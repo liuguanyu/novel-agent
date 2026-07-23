@@ -1,0 +1,5 @@
+schema: spec-driven
+created: 2026-07-15
+# 构建顺序权威来源见 openspec/ROADMAP.md
+wave: 6
+depends_on: [story-workspace, agent-orchestration, on-demand-summon, human-in-the-loop]

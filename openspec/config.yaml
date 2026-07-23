@@ -1,0 +1,54 @@
+schema: spec-driven
+
+# Project context shown to AI when creating artifacts.
+context: |
+  产品：多智能体长篇小说创作系统 —— 一个 human-in-the-loop 的“小说 IDE”。
+  定位：AI 开车（写/审/纠/重构），作者坐副驾并随时可拉手刹（打断）、夺方向盘（纠偏）。
+  不是黑盒自动生成器，而是带交互式 Linter、Git 式回滚、外科手术式局部重构的创作 IDE。
+
+  ── 技术栈 ──────────────────────────────────────────────
+  - 壳体/前端：Electron + React + TypeScript（strict）
+  - 编辑器：TipTap / ProseMirror（正文轴，支持锚定的 bug 高亮与 diff 视图）
+  - 智能体编排：LangGraph.js（条件路由、循环、interrupt 人工干预点、checkpointer）
+  - 硬账本：SQLite（事实库：实体/属性/时间线/关系/伏笔状态；带出处锚点；版本化）
+  - 语义记忆：本地向量库（Chroma / LanceDB；素材库与语义交叉盘问）
+  - 模型：per-agent 可配置的多 provider 适配层（不在 spec 中硬编码具体模型；
+    只声明能力档位：强文笔档 / 强逻辑档 / 廉价快速档）
+
+  ── 进程模型（Electron，防 UI 卡顿）────────────────────────
+  - Agent 逻辑、LangGraph 编排一律在 Main 进程或 utilityProcess，绝不在 Renderer。
+  - 异步 I/O（LLM 调用、SQLite、文件读写）：Main 进程可接受（await 不阻塞事件循环）。
+  - CPU 密集（embedding、大文本 diff、全书 Map-Reduce 总检、大文档解析）：
+    必须放 utilityProcess / worker_threads，避免阻塞主进程事件循环导致 UI/IPC 卡顿。
+  - Renderer 只负责渲染与交互，通过 IPC 与后端通信；不含业务逻辑。
+
+  ── 三大数据支柱（互相正交）──────────────────────────────
+  1. 事实库 Story Bible：强约束、结构化、本作权威事实、可溯源（出处锚点）、版本化
+     （与 LangGraph checkpoint 对齐，支持 time-travel 回滚）；支持正向（查新文）与
+     反向（改动后扫全书）一致性检查；随创作增量生长。
+  2. 素材库 Corpus：弱参考、语义检索、跨项目共享；自动提炼灵感/高光/桥段/叙事逻辑，
+     可人工修改；不构成约束。
+  3. 正文 Manuscript：章节树、当前草稿。
+
+  ── 提示词 ──────────────────────────────────────────────
+  - 借鉴 LibriScribe（MIT）的 agent 角色分工与 YAML 外置提示词设计（存档于 references/）。
+  - 提示词与代码解耦（YAML persona + 变量 slot + settings）；本项目需额外产出
+    结构化可锚定输出（bug 带 type/severity/出处/定位）。
+
+  ── 核心交互不变量 ────────────────────────────────────────
+  - 写入型操作（重构/润色）必须走局部 Diff 且逐 hunk 由作者接受/拒绝，绝不整章覆盖，
+    保护作者原创好文笔。
+  - 重构 Agent 只接收待修片段，返回局部改写；程序做 diff 拼回，Agent 看不到“好的部分”。
+  - 矛盾冲突时系统不替作者决策，把选择权交还作者（改设定 or 改旧文）。
+
+# Per-artifact rules.
+rules:
+  proposal:
+    - 用中文撰写；聚焦“为什么/改什么/能力/影响”，避免实现细节堆砌。
+    - 每个 change 聚焦单一能力域，保持能力之间正交。
+  design:
+    - 记录关键架构决策与取舍；必须覆盖进程模型归属（Main / utilityProcess / Renderer）。
+  tasks:
+    - 任务粒度可执行、可验证；标注所属进程与模块边界。
+  specs:
+    - 需求可测试；场景用 WHEN/THEN；涉及数据结构时给出字段级约束。

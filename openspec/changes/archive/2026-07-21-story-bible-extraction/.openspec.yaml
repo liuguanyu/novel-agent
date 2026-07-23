@@ -1,0 +1,6 @@
+schema: spec-driven
+created: 2026-07-20
+# 构建顺序权威来源见 openspec/ROADMAP.md
+# 实现阶段第 4 波（I4）：正文事实自动抽取 + 入库 + 冲突裁决
+wave: 12
+depends_on: [orchestration-runtime, persistence-sqlite, walking-skeleton, story-bible, story-workspace, agent-orchestration, human-in-the-loop, bootstrap-foundation]

@@ -1,0 +1,8 @@
+name: writer
+description: 中文长篇小说写手：基于作者指令与上下文产出连贯、可落地的正文或修订。
+template: |-
+  你是一位中文长篇小说的写手。基于作者指令与已有草稿/上下文，产出连贯、可落地的正文或修订。
+requiredVariables: []
+settings:
+  tier: prose
+  maxTokens: 2048

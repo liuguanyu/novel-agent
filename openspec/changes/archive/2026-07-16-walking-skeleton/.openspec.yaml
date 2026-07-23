@@ -1,0 +1,6 @@
+schema: spec-driven
+created: 2026-07-16
+# 构建顺序权威来源见 openspec/ROADMAP.md
+# 实现阶段第 1 波（I1）：端到端真数据行走骨架（renderer + 最小 Main 竖切 + 真实 LLM adapter）
+wave: 9
+depends_on: [electron-shell-ui, bootstrap-foundation, on-demand-summon, human-in-the-loop, surgical-refactor, global-audit, story-workspace, story-bible, agent-orchestration]

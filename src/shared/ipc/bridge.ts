@@ -1,0 +1,44 @@
+/**
+ * 受限 IPC 桥的类型契约 (walking-skeleton)
+ *
+ * preload 经 contextBridge 暴露的 API 形状，作为跨 preload/renderer 的**共享类型契约**置于 shared/ipc（叶子层）。
+ * preload 实现此接口；renderer 经 window.novelAgent 消费。此文件仅类型，不依赖 electron/core。
+ */
+
+import type { BackendStreamMessage } from './stream-messages.js';
+import type { FrontendCommandMessage } from './command-messages.js';
+import type { BackendControlEvent } from './control-messages.js';
+import type {
+  ChapterTreeDto,
+  ChapterContentDto,
+  GetChapterContentRequest,
+  CheckpointHistoryDto,
+  GetCheckpointHistoryRequest,
+  StoryBibleDto,
+  ArchitectBoardDto,
+} from './query-messages.js';
+
+/** 订阅解除函数。 */
+export type Unsubscribe = () => void;
+
+/** 暴露给 Renderer 的受限桥 API 契约。 */
+export interface NovelAgentBridge {
+  /** 取章节树（真读盘）。 */
+  getChapterTree(): Promise<ChapterTreeDto>;
+  /** 以节点 id 取正文。 */
+  getChapterContent(request: GetChapterContentRequest): Promise<ChapterContentDto>;
+  /** 发送前端命令（召唤/中断等）。 */
+  sendCommand(command: FrontendCommandMessage): void;
+  /** 订阅后端对话流式消息。 */
+  onDialogueStream(listener: (message: BackendStreamMessage) => void): Unsubscribe;
+  /** 订阅后端正文流式消息。 */
+  onManuscriptStream(listener: (message: BackendStreamMessage) => void): Unsubscribe;
+  /** 订阅后端控制事件（挂起裁决/纠偏/冲突等，与内容流分离）。 */
+  onControlEvent(listener: (event: BackendControlEvent) => void): Unsubscribe;
+  /** 取 checkpoint 历史链（time-travel）。 */
+  getCheckpointHistory(request?: GetCheckpointHistoryRequest): Promise<CheckpointHistoryDto>;
+  /** 取当前 Story Bible 事实视图（只读 DTO）。 */
+  getStoryBible(): Promise<StoryBibleDto>;
+  /** 取 architect 架构看板视图（只读投影 DTO：时间线轴/情节线/人设集）。 */
+  getArchitectBoard(): Promise<ArchitectBoardDto>;
+}

@@ -1,0 +1,205 @@
+@import 'tailwindcss';
+
+/*
+ * 设计 token (I8 visual-design)：宣纸墨色 + 朱砂点缀。
+ * 浅色 = 暖白宣纸 + 深墨字；深色 = 深墨背景 + 宣纸白字；主色/强调取朱砂红。
+ * 明暗由根元素 .dark 切换（renderer useTheme 据 core resolveTheme 应用）。
+ */
+
+@custom-variant dark (&:is(.dark *));
+
+:root {
+  --radius: 0.625rem;
+
+  /* 宣纸暖白基底 + 深墨前景 */
+  --background: oklch(0.976 0.008 85);
+  --foreground: oklch(0.24 0.012 60);
+  --card: oklch(0.992 0.006 88);
+  --card-foreground: oklch(0.24 0.012 60);
+  --popover: oklch(0.992 0.006 88);
+  --popover-foreground: oklch(0.24 0.012 60);
+
+  /* 朱砂主色 */
+  --primary: oklch(0.548 0.188 29);
+  --primary-foreground: oklch(0.98 0.008 85);
+
+  --secondary: oklch(0.94 0.012 80);
+  --secondary-foreground: oklch(0.3 0.012 60);
+  --muted: oklch(0.945 0.01 82);
+  --muted-foreground: oklch(0.5 0.015 62);
+  --accent: oklch(0.93 0.02 45);
+  --accent-foreground: oklch(0.3 0.05 30);
+
+  --destructive: oklch(0.577 0.245 27.325);
+  --border: oklch(0.89 0.012 78);
+  --input: oklch(0.89 0.012 78);
+  --ring: oklch(0.548 0.188 29);
+
+  /* 排版：衬线中文阅读体（正文轴）+ 无衬线 UI 体（外壳） */
+  --font-reading: 'Noto Serif SC', 'Songti SC', 'Source Han Serif SC', 'STSong', 'SimSun', ui-serif,
+    Georgia, serif;
+  --font-ui: system-ui, -apple-system, 'PingFang SC', 'Microsoft YaHei', 'Noto Sans SC', ui-sans-serif,
+    sans-serif;
+  --reading-line-height: 1.9;
+  --reading-paragraph-gap: 1.15rem;
+  --reading-indent: 2em;
+
+  /* 动效 token（reduced-motion 下由下方 @media 收敛） */
+  --motion-fast: 120ms;
+  --motion-base: 200ms;
+  --motion-ease: cubic-bezier(0.4, 0, 0.2, 1);
+
+  /* 滚动条 token：细、低调、跟随墨色；悬停略加深。 */
+  --scrollbar-size: 10px;
+  --scrollbar-thumb: oklch(0.24 0.012 60 / 22%);
+  --scrollbar-thumb-hover: oklch(0.24 0.012 60 / 40%);
+}
+
+.dark {
+  /* 深墨背景 + 宣纸白字 */
+  --background: oklch(0.19 0.008 60);
+  --foreground: oklch(0.93 0.01 85);
+  --card: oklch(0.23 0.009 60);
+  --card-foreground: oklch(0.93 0.01 85);
+  --popover: oklch(0.23 0.009 60);
+  --popover-foreground: oklch(0.93 0.01 85);
+
+  /* 朱砂在深底上略提亮 */
+  --primary: oklch(0.62 0.185 30);
+  --primary-foreground: oklch(0.16 0.006 60);
+
+  --secondary: oklch(0.29 0.01 60);
+  --secondary-foreground: oklch(0.93 0.01 85);
+  --muted: oklch(0.29 0.01 60);
+  --muted-foreground: oklch(0.7 0.012 78);
+  --accent: oklch(0.34 0.03 40);
+  --accent-foreground: oklch(0.92 0.02 60);
+
+  --destructive: oklch(0.704 0.191 22.216);
+  --border: oklch(0.99 0.005 85 / 12%);
+  --input: oklch(0.99 0.005 85 / 16%);
+  --ring: oklch(0.62 0.185 30);
+
+  /* 深色下用宣纸白做半透明滑块 */
+  --scrollbar-thumb: oklch(0.93 0.01 85 / 16%);
+  --scrollbar-thumb-hover: oklch(0.93 0.01 85 / 32%);
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+  --font-sans: var(--font-ui);
+  --font-serif: var(--font-reading);
+}
+
+@layer base {
+  * {
+    border-color: var(--border);
+  }
+  body {
+    background-color: var(--background);
+    color: var(--foreground);
+    font-family: var(--font-ui);
+  }
+
+  /* 正文轴阅读排版：衬线体 + 阅读级行高/段距/首行缩进 + CJK 标点。 */
+  .reading-prose {
+    font-family: var(--font-reading);
+    line-height: var(--reading-line-height);
+    text-align: justify;
+    text-justify: inter-ideograph;
+    hanging-punctuation: allow-end;
+  }
+  .reading-prose p {
+    margin-block: 0 var(--reading-paragraph-gap);
+    text-indent: var(--reading-indent);
+  }
+  .reading-prose p:last-child {
+    margin-block-end: 0;
+  }
+
+  /* 审校证据引文高亮（review-findings-ui）：琢砂半透底色 + 圆角，明暗主题自适应。 */
+  .review-highlight {
+    background-color: oklch(0.85 0.13 75 / 55%);
+    border-radius: 3px;
+    box-shadow: 0 0 0 1px oklch(0.7 0.16 65 / 45%);
+    transition: background-color var(--motion-base) var(--motion-ease);
+  }
+  .dark .review-highlight {
+    background-color: oklch(0.62 0.14 70 / 40%);
+    box-shadow: 0 0 0 1px oklch(0.7 0.16 65 / 55%);
+  }
+
+  /*
+   * 全局细滚动条：默认滑块透明（不可见），仅在容器悬停/滑动时淡入。
+   * 轨道始终透明、不占额外视觉；墨色/宣纸白半透明，跟随明暗主题。
+   */
+  ::-webkit-scrollbar {
+    width: var(--scrollbar-size);
+    height: var(--scrollbar-size);
+  }
+  ::-webkit-scrollbar-track,
+  ::-webkit-scrollbar-corner {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background-color: transparent;
+    border-radius: 9999px;
+    /* 透明边框做内缩 padding，使滑块视觉更细并与轨道留白。 */
+    border: 2px solid transparent;
+    background-clip: padding-box;
+    transition: background-color var(--motion-base) var(--motion-ease);
+  }
+  /* 无内容悬停区不占位、不显示按钮箭头。 */
+  ::-webkit-scrollbar-button {
+    display: none;
+  }
+  /* 容器悬停时才显露滑块（hover-to-reveal）；直接悬滑块时加深。 */
+  :hover::-webkit-scrollbar-thumb {
+    background-color: var(--scrollbar-thumb);
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background-color: var(--scrollbar-thumb-hover);
+  }
+
+  /* Firefox 兵底：默认隐藏（色透明），容器悬停时显露。 */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: transparent transparent;
+  }
+  *:hover {
+    scrollbar-color: var(--scrollbar-thumb) transparent;
+  }
+}
+
+/* 动效尊重 reduced-motion：reduce 时收敛全部非必要过渡/动画。 */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "lib": ["ES2022"],
+    "types": ["node"],
+    "rootDir": "./src",
+    "outDir": "./out-smoke",
+    "noEmit": false
+  },
+  "include": ["src/main/**/*", "src/core/**/*", "src/shared/**/*"]
+}

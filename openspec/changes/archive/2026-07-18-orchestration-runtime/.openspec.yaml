@@ -1,0 +1,6 @@
+schema: spec-driven
+created: 2026-07-17
+# 构建顺序权威来源见 openspec/ROADMAP.md
+# 实现阶段第 3 波（I3）：LangGraph 多智能体真编排 + 手刹中断/恢复/时间旅行 + 历史事实检索与纠偏
+wave: 11
+depends_on: [persistence-sqlite, walking-skeleton, agent-orchestration, human-in-the-loop, on-demand-summon, story-bible, bootstrap-foundation]

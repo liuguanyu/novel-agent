@@ -1,0 +1,5 @@
+schema: spec-driven
+created: 2026-07-15
+# 构建顺序权威来源见 openspec/ROADMAP.md
+wave: 8
+depends_on: [bootstrap-foundation, on-demand-summon, human-in-the-loop, surgical-refactor, global-audit, story-workspace, story-bible, corpus-library, agent-orchestration]

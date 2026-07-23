@@ -1,0 +1,29 @@
+# workspace-model Specification
+
+## Purpose
+TBD - created by archiving change story-workspace. Update Purpose after archive.
+## Requirements
+### Requirement: 项目工作区
+系统 MUST 以“一本书 = 一个本地项目工作区”为单位组织创作数据，工作区自包含其元数据、章节树与正文。
+
+#### Scenario: 工作区承载单本书
+- **WHEN** 用户创建或打开一本书
+- **THEN** 系统 MUST 将其表示为一个独立的工作区
+- **AND** 该工作区 MUST 自包含元数据、章节树与正文，不与其他书混杂
+
+#### Scenario: 打开已有工作区
+- **WHEN** 用户打开一个已存在的项目工作区
+- **THEN** 系统 MUST 加载其元数据与章节树
+- **AND** 章节标识符与结构 MUST 与上次保存时一致
+
+### Requirement: 工作区元数据
+工作区 MUST 维护可扩展的元数据，至少包含书名、体裁、语言；其余字段（简介、目标读者等）可选且可扩展。
+
+#### Scenario: 必填元数据存在
+- **WHEN** 一个工作区被创建
+- **THEN** 其元数据 MUST 至少包含书名、体裁、语言字段
+
+#### Scenario: 元数据可扩展
+- **WHEN** 需要记录额外元数据（如简介、目标读者、基调）
+- **THEN** 系统 MUST 允许在不破坏既有工作区的前提下扩展元数据字段
+
