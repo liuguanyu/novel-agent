@@ -14,7 +14,7 @@ import {
 } from '@/components/ui/sheet';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { useDashboard, type UseDashboardResult } from '../hooks/useDashboard.js';
-import type { ConsistencyIssueDto } from '../../shared/ipc/index.js';
+import type { ConsistencyIssueDto, LegacyRevisionDiagnosisItemDto, WorkflowRefDto, WorkflowSnapshotDto } from '../../shared/ipc/index.js';
 
 interface DashboardDrawerProps {
   readonly onSelectChapter?: (nodeId: string) => void;
@@ -23,6 +23,8 @@ interface DashboardDrawerProps {
   readonly onOpenChange?: (open: boolean) => void;
   /** 上提的仪表盘 hook（工具条动作排「全书总检」共用）；不传则内部自建。 */
   readonly dashboard?: UseDashboardResult;
+  readonly workflowRef?: WorkflowRefDto;
+  readonly workflow?: WorkflowSnapshotDto | null;
 }
 
 function severityLabel(severity: ConsistencyIssueDto['severity']): string {
@@ -33,6 +35,17 @@ function severityLabel(severity: ConsistencyIssueDto['severity']): string {
       return '黄牌';
     case 'info':
       return '提示';
+  }
+}
+
+function nextActionLabel(issue: ConsistencyIssueDto): string {
+  switch (issue.workflowStatus) {
+    case 'open': return '下一步：选择问题并定位原文';
+    case 'fixing': return '下一步：完成改写并提交 hunk 裁决';
+    case 'verifying': return '下一步：运行针对性复检';
+    case 'resolved': return '已完成：问题已解决';
+    case 'dismissed': return `已忽略${issue.resolutionReason === undefined ? '' : `：${issue.resolutionReason}`}`;
+    default: return '下一步：等待 Main 建立工作流问题记录';
   }
 }
 
@@ -54,6 +67,12 @@ interface IssueGroup {
   readonly issues: ReadonlyArray<ConsistencyIssueDto>;
 }
 
+type WorkflowStatusFilter = 'all' | NonNullable<ConsistencyIssueDto['workflowStatus']>;
+
+const WORKFLOW_STATUS_LABEL: Record<Exclude<WorkflowStatusFilter, 'all'>, string> = {
+  open: '待处理', fixing: '修复中', verifying: '复检中', resolved: '已解决', dismissed: '已忽略',
+};
+
 function issueGroups(issues: ReadonlyArray<ConsistencyIssueDto>): ReadonlyArray<IssueGroup> {
   const groups: ReadonlyArray<IssueGroup> = [
     { severity: 'critical', issues: issues.filter((issue) => issue.severity === 'critical') },
@@ -63,25 +82,42 @@ function issueGroups(issues: ReadonlyArray<ConsistencyIssueDto>): ReadonlyArray<
   return groups.filter((group) => group.issues.length > 0);
 }
 
+function DiagnosisSection({ title, items }: { readonly title: string; readonly items: ReadonlyArray<LegacyRevisionDiagnosisItemDto> }): JSX.Element {
+  return <section><h3 className="mb-2 text-sm font-semibold">{title}（{items.length}）</h3>{items.length === 0 ? <p className="text-xs text-muted-foreground">作者尚未提出此类要求。</p> : <div className="space-y-2">{items.map((item, index) => <div key={`${item.intent.kind}:${item.intent.text}:${index}`} className="rounded-md border border-border p-3 text-sm"><div className="flex items-center justify-between gap-2"><span className="font-medium">{item.intent.text}</span><span className={`rounded px-1.5 py-0.5 text-[10px] ${item.status === 'pending' ? 'bg-amber-500/10 text-amber-600' : 'bg-emerald-500/10 text-emerald-600'}`}>{item.status === 'located' ? '已定位' : item.status === 'evidence-found' ? '已找到证据' : '待深化'}</span></div>{item.matches.length > 0 && <div className="mt-2 space-y-1 text-xs text-muted-foreground">{item.matches.map((match) => <div key={`${match.label}:${match.anchorRefs.join(',')}`}><span className="font-medium text-foreground/80">{match.label}</span>{match.details !== undefined && <span> · {match.details.join('；')}</span>}{match.anchorRefs.length > 0 && <div>锚点：{match.anchorRefs.join('、')}</div>}</div>)}</div>}{item.linkedIssueIds.length > 0 && <div className="mt-1 text-xs text-primary">关联问题：{item.linkedIssueIds.join('、')}</div>}</div>)}</div>}</section>;
+}
+
 function IssueCard({
   issue,
   onSelectChapter,
+  onRunVerification,
 }: {
   readonly issue: ConsistencyIssueDto;
   readonly onSelectChapter?: (nodeId: string) => void;
+  readonly onRunVerification?: (issue: ConsistencyIssueDto) => void;
 }): JSX.Element {
   const chapterAnchor = issue.anchors.find((anchor) => anchor.kind === 'chapter');
+  const hasAnchor = issue.anchors.length > 0;
   return (
     <div className="rounded-md border border-border p-3 text-sm">
       <div className="mb-1 flex items-center justify-between gap-2">
-        <span className="font-medium">{severityLabel(issue.severity)} · {issue.type}</span>
-        {chapterAnchor !== undefined && onSelectChapter !== undefined && (
+        <span className="flex flex-wrap items-center gap-1 font-medium">
+          {severityLabel(issue.severity)} · {issue.type}
+          {issue.workflowStatus !== undefined && (
+            <span className="rounded bg-primary/10 px-1.5 py-0.5 text-[10px] text-primary">
+              {WORKFLOW_STATUS_LABEL[issue.workflowStatus]}
+            </span>
+          )}
+        </span>
+        {chapterAnchor !== undefined && onSelectChapter !== undefined ? (
           <Button variant="outline" size="sm" onClick={() => onSelectChapter(chapterAnchor.id)}>
             跳章
           </Button>
+        ) : (
+          <span className="rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">{hasAnchor ? '暂无章节锚点' : '无正文锚点，禁止写入'}</span>
         )}
       </div>
       <p className="text-foreground">{issue.description}</p>
+      <p className="mt-1 text-xs text-primary">{nextActionLabel(issue)}</p>
       {issue.suggestedFix !== undefined && (
         <p className="mt-1 text-muted-foreground">建议：{issue.suggestedFix}</p>
       )}
@@ -90,6 +126,14 @@ function IssueCard({
           {issue.evidence.quote}
         </blockquote>
       )}
+      {(issue.checkpointIds?.length ?? 0) > 0 && <p className="mt-2 text-xs text-muted-foreground">Checkpoint：{issue.checkpointIds?.join('、')}</p>}
+      {(issue.checkpointIds?.length ?? 0) > 0 && issue.workflowStatus === 'verifying' && <p className="text-xs text-amber-600">正文已落盘，当前等待针对性复检。</p>}
+      {(issue.verificationRunIds?.length ?? 0) > 0 && <p className="text-xs text-muted-foreground">复检运行：{issue.verificationRunIds?.join('、')}</p>}
+      {issue.resolutionReason !== undefined && <p className="text-xs text-muted-foreground">处理理由：{issue.resolutionReason}</p>}
+      {issue.workflowStatus === 'verifying' && onRunVerification !== undefined && hasAnchor && (
+        <Button className="mt-2" size="sm" onClick={() => onRunVerification(issue)}>运行复检</Button>
+      )}
+      {issue.workflowStatus === 'verifying' && !hasAnchor && <p className="mt-2 text-xs text-destructive">缺少稳定锚点，不能启动正文复检或写入。</p>}
       <div className="mt-2 flex flex-wrap gap-1 text-xs text-muted-foreground">
         {issue.anchors.map((anchor) => (
           <span key={`${anchor.kind}:${anchor.id}`} className="rounded bg-muted px-1.5 py-0.5">
@@ -106,18 +150,28 @@ export function DashboardDrawer({
   open: openProp,
   onOpenChange,
   dashboard: dashboardProp,
+  workflowRef,
+  workflow,
 }: DashboardDrawerProps): JSX.Element {
   const [internalOpen, setInternalOpen] = useState(false);
+  const [workflowStatus, setWorkflowStatus] = useState<WorkflowStatusFilter>('all');
   const internalDashboard = useDashboard();
   const controlled = openProp !== undefined;
   const open = controlled ? openProp : internalOpen;
   const setOpen = onOpenChange ?? setInternalOpen;
   const dashboard = dashboardProp ?? internalDashboard;
-  const groups = useMemo(
-    () => issueGroups(dashboard.state.dashboard?.issues ?? []),
-    [dashboard.state.dashboard?.issues],
-  );
+  const groups = useMemo(() => {
+    const issues = dashboard.state.dashboard?.issues ?? [];
+    return issueGroups(workflowStatus === 'all' ? issues : issues.filter((issue) => issue.workflowStatus === workflowStatus));
+  }, [dashboard.state.dashboard?.issues, workflowStatus]);
   const explanation = dashboard.state.dashboard?.scoreExplanation;
+  const auditIssues = dashboard.state.dashboard?.issues ?? [];
+  const diagnosis = dashboard.state.dashboard?.legacyDiagnosis;
+  const lifecycleCounts = useMemo(() => auditIssues.reduce<Record<string, number>>((counts, issue) => {
+    const status = issue.workflowStatus ?? 'untracked';
+    counts[status] = (counts[status] ?? 0) + 1;
+    return counts;
+  }, {}), [auditIssues]);
 
   return (
     <Sheet open={open} onOpenChange={setOpen}>
@@ -128,7 +182,7 @@ export function DashboardDrawer({
           </Button>
         </SheetTrigger>
       )}
-      <SheetContent side="bottom" className="h-[32rem]">
+      <SheetContent side="bottom" className="h-128">
         <SheetHeader>
           <SheetTitle>质量仪表盘</SheetTitle>
           <SheetDescription>
@@ -136,8 +190,25 @@ export function DashboardDrawer({
           </SheetDescription>
         </SheetHeader>
 
+        {workflow !== null && workflow !== undefined && (
+          <div className="mx-4 mb-2 rounded-md border border-primary/25 bg-primary/5 px-3 py-2 text-xs">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <span className="font-medium">工作流：{workflow.kind}</span>
+              <span className={workflow.status === 'completed' ? 'text-emerald-600' : workflow.status === 'failed' ? 'text-destructive' : 'text-primary'}>{workflow.status === 'completed' ? '已完成' : workflow.status === 'failed' ? '失败' : workflow.status === 'paused' ? '已暂停' : '进行中'}</span>
+            </div>
+            <div className="mt-1 text-muted-foreground">目标：{workflow.objective}</div>
+            <div className="mt-1 text-muted-foreground">当前阶段：{workflow.currentStageId ?? '无'} · 版本：{workflow.version}</div>
+            {workflow.currentStageId?.includes('final-audit') && workflow.status !== 'completed' && (
+              <div className="mt-1 text-amber-600">正在执行最终复检；若发现新问题，将回到问题队列。</div>
+            )}
+            {workflow.currentStageId?.includes('issue-triage') && auditIssues.some((issue) => issue.workflowStatus === 'open') && (
+              <div className="mt-1 text-amber-600">检测到待处理问题，工作流已回到问题队列；请先定位、修复并完成复检。</div>
+            )}
+          </div>
+        )}
+
         <div className="flex items-center gap-2 px-4 py-2">
-          <Button size="sm" onClick={dashboard.runGlobalAudit} disabled={dashboard.busy}>
+          <Button size="sm" onClick={() => dashboard.runGlobalAudit()} disabled={dashboard.busy}>
             运行全书总检
           </Button>
           {dashboard.busy && (
@@ -150,6 +221,13 @@ export function DashboardDrawer({
               清空
             </Button>
           )}
+          <label className="ml-auto flex items-center gap-1 text-xs text-muted-foreground">
+            生命周期
+            <select className="rounded border border-border bg-background px-1.5 py-1" value={workflowStatus} onChange={(event) => setWorkflowStatus(event.target.value as WorkflowStatusFilter)}>
+              <option value="all">全部</option>
+              {Object.entries(WORKFLOW_STATUS_LABEL).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+            </select>
+          </label>
           <span className="text-xs text-muted-foreground">
             {dashboard.state.status === 'running'
               ? `${phaseLabel(dashboard.state.phase)} · ${dashboard.state.completedItems}/${dashboard.state.totalItems}`
@@ -185,22 +263,32 @@ export function DashboardDrawer({
                 总检骨架项：{dashboard.state.dashboard.totalItems}
               </div>
               {explanation !== undefined && (
-                <div className="mt-3 text-xs text-muted-foreground">
+                <div className="text-xs text-muted-foreground">
                   <div>公式：{explanation.formula}</div>
                   <div>
                     红牌 {explanation.criticalCount} / 黄牌 {explanation.warningCount} / 提示 {explanation.infoCount}
                   </div>
                   <div>扣分：{explanation.penalty}</div>
+                  <div className="mt-2 border-t border-border pt-2">生命周期：{Object.entries(lifecycleCounts).map(([status, count]) => `${WORKFLOW_STATUS_LABEL[status as Exclude<WorkflowStatusFilter, 'all'>] ?? '未关联'} ${count}`).join(' · ') || '暂无问题'}</div>
+                  <div>生成时间：{new Date(dashboard.state.dashboard.generatedAt).toLocaleString()}</div>
+                  {dashboard.state.runId !== undefined && <div>审计运行：{dashboard.state.runId}</div>}
                 </div>
               )}
             </div>
 
-            <ScrollArea className="h-[20rem] rounded-md border border-border p-3">
-              {groups.length === 0 ? (
-                <div className="text-sm text-muted-foreground">未发现全局一致性问题。</div>
-              ) : (
-                <div className="space-y-4">
-                  {groups.map((group) => (
+            <ScrollArea className="h-80 rounded-md border border-border p-3">
+              <div className="space-y-5">
+                {diagnosis !== undefined && <>
+                  <DiagnosisSection title="作者要求保留" items={diagnosis.preservation} />
+                  <DiagnosisSection title="人物特征提取" items={diagnosis.characterExtraction} />
+                  <DiagnosisSection title="去掉或修复" items={diagnosis.removals} />
+                  <div className="border-t border-border" />
+                </>}
+                {groups.length === 0 ? (
+                  <div className="text-sm text-muted-foreground">未发现全局一致性问题。</div>
+                ) : (
+                  <div className="space-y-4">
+                    {groups.map((group) => (
                     <section key={group.severity}>
                       <h3 className="mb-2 text-sm font-semibold">
                         {severityLabel(group.severity)}（{group.issues.length}）
@@ -211,13 +299,15 @@ export function DashboardDrawer({
                             key={`${issue.type}:${issue.severity}:${index}`}
                             issue={issue}
                             {...(onSelectChapter !== undefined ? { onSelectChapter } : {})}
+                            {...(workflowRef !== undefined ? { onRunVerification: (target: ConsistencyIssueDto) => dashboard.runTargetedVerification(target, workflowRef) } : {})}
                           />
                         ))}
                       </div>
                     </section>
-                  ))}
-                </div>
-              )}
+                    ))}
+                  </div>
+                )}
+              </div>
             </ScrollArea>
           </div>
         )}

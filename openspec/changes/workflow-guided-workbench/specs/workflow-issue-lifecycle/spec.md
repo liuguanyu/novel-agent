@@ -2,7 +2,7 @@
 
 ### Requirement: 工作流问题使用可审计生命周期
 
-每个纳入工作流的问题 MUST 有稳定 `issueId` 与 `WorkflowIssueRecord`，至少包含 `workflowId`、`sourceAuditRunId`、`status`（`open` / `fixing` / `verifying` / `resolved` / `dismissed`）、`anchorRefs`、`refactorRunIds`、`checkpointIds`、`verificationRunIds` 及可选 `resolutionReason`。状态转换 MUST 受控，MUST NOT 用卡片是否显示或一次运行是否结束推断问题已解决。
+每个纳入工作流的问题 MUST 有稳定 `issueId` 与 `WorkflowIssueRecord`，至少包含 `workflowId`、`sourceAuditRunId`、`status`（`open` / `fixing` / `verifying` / `resolved` / `dismissed`，并支持 resolved 后 reopen 回 open）、`anchorRefs`、`refactorRunIds`、`checkpointIds`、`verificationRunIds` 及可选 `resolutionReason`。状态转换 MUST 受控，MUST NOT 用卡片是否显示或一次运行是否结束推断问题已解决。记录 discovery、audit、transition、resolution history；复发审计 MUST 支持 `resolved → open` reopen 并保留原解决证据。
 
 #### Scenario: 选择问题进入修复
 - **WHEN** 作者选择一个 open 问题开始修复
@@ -27,6 +27,11 @@
 - **WHEN** 针对性复检再次发现目标问题
 - **THEN** 问题 MUST 返回 fixing
 - **AND** 工作流 MUST 引导生成新的局部改写方案而非关闭卡片
+
+#### Scenario: 后续审计使已解决问题 reopen
+- **WHEN** 后续章节审校或最终全书复检发现一个 `resolved` 问题复发或出现等价冲突
+- **THEN** 同一 `WorkflowIssueRecord` MUST 从 resolved 转回 open，而不是创建无法关联历史的重复记录
+- **AND** MUST 追加审计与 reopen transition 记录，并保留原 resolution evidence、checkpoint 和 verification run history
 
 ### Requirement: dismissed 表示作者有意不修复
 

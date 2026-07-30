@@ -70,6 +70,8 @@ type StageStatus =
   | 'skipped'
   | 'failed';
 
+type StageImpactStatus = 'none' | 'stale' | 'needs-review' | 'conflicting';
+
 type StageActor = 'system' | 'expert' | 'author' | 'quality-gate';
 
 type WorkflowScope =
@@ -94,6 +96,8 @@ interface WorkflowStageInstance {
   readonly stageId: string;
   readonly templateStageId: string;
   readonly status: StageStatus;
+  /** Cross-cutting impact state; never a stage lifecycle status. */
+  readonly impactStatus: StageImpactStatus;
   readonly actor: StageActor;
   readonly scope: WorkflowScope;
   readonly runIds: ReadonlyArray<string>;
@@ -164,7 +168,7 @@ interface CreativeAsset {
 
 作者可以在任意工作流阶段或 standalone 上下文澄清资产。澄清运行关联目标 `assetId`、base version、可选 workflow/stage 和独立 activity 状态，但不改变主工作流 `currentStageId`。若目标不明确，必须先由作者消歧；不得猜测同名人物或世界规则。
 
-资产提交后由 Main 计算 `AssetImpactSet`：基于显式 asset refs、Story Bible 关系和稳定 manuscript scope 找出依赖旧版本的规划、正文和质量结果。受影响对象标记为 `stale`、`needs-review` 或 `conflicting`，由作者选择立即处理、记入待办或继续当前阶段；系统不能静默重写正文、自动撤销定稿或强制跳回早期阶段。
+资产提交后由 Main 计算 `AssetImpactSet`：基于显式 asset refs、Story Bible 关系和稳定 manuscript scope 找出依赖旧版本的规划、正文和质量结果。受影响对象通过独立的 `StageImpactStatus`/`impactStatus` 标记为 `stale`、`needs-review` 或 `conflicting`，不改变 `StageStatus`；由作者选择立即处理、记入待办或继续当前阶段；系统不能静默重写正文、自动撤销定稿或强制跳回早期阶段。
 
 备选方案是每次澄清都把主工作流退回“人物设计/世界观”阶段。拒绝原因：作者可能在任何时点做局部澄清，回退会破坏当前章节工作上下文，也无法表达仅影响未来章节的低风险变化。
 
@@ -206,11 +210,15 @@ interface WorkflowIssueRecord {
   readonly refactorRunIds: ReadonlyArray<string>;
   readonly checkpointIds: ReadonlyArray<string>;
   readonly verificationRunIds: ReadonlyArray<string>;
+  readonly discoveryHistory: ReadonlyArray<WorkflowIssueHistoryEntry>;
+  readonly auditHistory: ReadonlyArray<WorkflowIssueHistoryEntry>;
+  readonly transitionHistory: ReadonlyArray<WorkflowIssueHistoryEntry>;
+  readonly resolutionHistory: ReadonlyArray<WorkflowIssueHistoryEntry>;
   readonly resolutionReason?: string;
 }
 ```
 
-状态转换为：`open → fixing → verifying → resolved`；复检失败时 `verifying → fixing`；作者判定误报/有意保留时可 `open|fixing|verifying → dismissed`，必须记录理由。`resolved` 只能由针对性复检的结构化结果产生，不能仅因 diff 已落盘而设置。
+状态转换为：`open → fixing → verifying → resolved`；复检失败时 `verifying → fixing`；已 `resolved` 的问题若后续审计发现复发 MUST `resolved → open`（reopen），并保留原 resolution history；作者判定误报/有意保留时可 `open|fixing|verifying → dismissed`，必须记录理由。每次发现、审计、状态转换和解决/重开都追加 discovery/audit/transition/resolution history，包含时间、来源运行、操作者和证据引用。`resolved` 只能由针对性复检的结构化结果产生，不能仅因 diff 已落盘而设置。
 
 `suggestedFix` 只用于解释修改方向。真正进入 diff 的 rewritten text 必须由作者输入或改写专家产生，并保持可编辑。
 
@@ -224,6 +232,8 @@ Main 使用 SQLite 保存 workflow instance、stage records、stage-run links、
 
 ### 11. IPC 使用强类型命令和快照
 
+每个 IPC 请求 MUST 带 `requestId`；会改变状态的命令 MUST 另带幂等 `operationId`，并以 `expectedVersion` 做乐观并发校验。契约明确区分 `run`、`workflow`、`asset`、`request` scope，不能用单一可选引用混淆归属；continuation 判别联合必须与精确 scope/request 关联。
+
 新增命令建议包括：`start-workflow`、`get-active-workflow`、`start-workflow-stage`、`confirm-workflow-stage`、`skip-workflow-stage`、`pause-workflow`、`resume-workflow`、`cancel-workflow`、`select-workflow-issue`、`dismiss-workflow-issue`、`verify-workflow-issue`，以及 `clarify-creative-asset`、`confirm-creative-asset-change`、`reject-creative-asset-change`、`resolve-asset-impact`。
 
 新增事件建议包括：`workflow-snapshot-updated`、`workflow-command-failed`、`creative-asset-change-proposed`、`creative-asset-updated` 与 `asset-impact-detected`。既有 `stream-start`、`graph-node-activated`、`interrupt-raised`、`review-completed`、`refactor-applied` 可携带可选 `workflowRef: { workflowId; stageId }`。可选字段保证 standalone run 向后兼容。
@@ -236,12 +246,46 @@ Main 使用 SQLite 保存 workflow instance、stage records、stage-run links、
 
 下层继续复用现有 `useWorkbenchActivities` 和真实 `graph-node-activated` 顺序；它显示当前阶段选中或最近一次 `runId` 的节点轨迹。新 run 可重置下层轨迹，但不得清空上层 workflow 历史。standalone run 时只显示现有单次运行视图，不伪造业务模板。
 
-### 13. 进程归属
+### 13. 产品外壳以书目和作者任务为中心
+
+主界面不再把工作流任务卡、作者要求、内部 stage 列表、事实抽取指标和专家运行轨迹纵向堆叠。稳定外壳采用以下层级：
+
+```text
+产品栏：Logo / Novel Agent                         设定目标 / 显示模式
+书目栏：书架 / 当前书目                            书目整理（目标摘要）
+进展区：面向作者的 Workflow Graph
+主体区：书目导航 | 正文/按需面板 | 专家对话
+底部栏：当前后台任务实时摘要                       召唤专家快捷入口
+```
+
+“设定目标”弹层承载 objective 与可重复的保留/提取/去掉或修复要求；保存只更新版本化目标，不直接推进或回退阶段。工作流 Graph 只显示中文业务阶段和当前运行摘要，内部 actor、stage id、版本号、impact 状态降级到诊断详情。事实底稿、Story Bible、质量诊断等均为按需工作面板，不常驻挤压正文。
+
+### 14. 三种互斥专注模式
+
+Renderer 使用单一 `ViewMode = 'workbench' | 'reading' | 'conversation'` 管理视图，三种模式互斥：
+
+- `workbench`：显示工作流 Graph、左中右三栏、底部完整实时进展；问题到正文 Hero 连线只在此模式可见。
+- `reading`：全屏呈现适合人类连续阅读的正文，隐藏 Graph、三栏工具和 Hero 连线；保留章节导航与不打扰阅读的极简后台状态。
+- `conversation`：全屏呈现专家对话，隐藏 Graph、书目导航、正文和 Hero 连线；保留当前专家、任务和章节上下文。
+
+切换模式只改变 Renderer 视图，不停止 Main 中的事实回填、诊断或专家运行；当前章节、阅读位置和对话上下文必须保留。召唤专家的显式入口归属对话区，平台快捷键提示移至底部角落，产品顶栏保持简洁。
+
+### 15. 实时进展与事实底稿分层
+
+底部状态栏负责回答“系统现在在做什么”，使用真实 control event / workflow snapshot 显示当前任务、章节、进度、发现数量或待裁决状态；默认不暴露候选、分块、无效和跳过等技术指标。事实底稿面板负责证据、抽取结果和冲突裁决，可从 Graph、底部进展或看板入口按需打开。Story Bible 继续负责整理后的已确认知识视图，三者职责不得重复。
+
+普通运行不得每章自动打开事实底稿；冲突导致暂停时，底部必须明确提示并提供定位到裁决面板的动作。读书模式下冲突提示不得自动将作者踢出沉浸视图。
+
+### 16. 进程归属
 
 - **Core**：工作流/创作资产/影响领域类型、模板目录、纯状态转换校验、DTO 契约；不得依赖 Electron、React、lucide、LangGraph。
 - **Main**：workflow 与 creative asset application service、SQLite repository、事务、Story Bible 映射、影响分析、运行关联、continuation resolver、IPC 验证和事件发布；LangGraph 仍在 Main。
 - **utilityProcess / worker**：全书事实回填、Map-Reduce 总检、大规模复检等 CPU 密集执行；通过已有 Main 协调层回报强类型完成证据，不直接写 Renderer 状态。
 - **Renderer**：工作流阶段和问题状态展示、命令意图采集、真实节点轨迹展示；不得自行判定阶段完成或问题 resolved。
+
+### 17. 同一项目仅允许一个 active workflow
+
+同一项目首版限制同时只能有一个 `active` workflow，以避免正文修改与阶段归属冲突；可以保留多个 paused/completed 实例。启动或恢复工作流时由 Main 在事务内强制该唯一约束。
 
 ## Risks / Trade-offs
 
@@ -263,13 +307,14 @@ Main 使用 SQLite 保存 workflow instance、stage records、stage-run links、
 3. 接入 workflow IPC 与查询快照；未创建工作流的项目返回无 active workflow。
 4. 先接入创作资产持久化、作者确认和 Story Bible 映射，再接入新书策划阶段与 stage-run link，随后接入章节循环；standalone summon 始终保留。
 5. 接入老书回填/总检和 issue lifecycle，随后串联 diff/hunk/checkpoint/复检。
-6. 最后升级工作台为双层视图，并对现有单次轨迹做回归测试。
-7. 回滚时关闭工作流入口和事件消费即可恢复 standalone UI；新表可保留以免丢失数据。数据库 schema downgrade 仅在确认无须保留工作流记录时执行。
+6. 将现有纵向任务卡迁移为产品外壳：目标弹层、书目面包屑、业务 Graph、按需事实底稿、底部实时进展和对话内召唤入口。
+7. 引入互斥 `workbench` / `reading` / `conversation` 模式，完成读书模式、对话全屏与 Hero 连线可见性约束，并对后台任务不中断做回归测试。
+8. 回滚时关闭工作流入口和事件消费即可恢复 standalone UI；新表可保留以免丢失数据。数据库 schema downgrade 仅在确认无须保留工作流记录时执行。
 
 ## Open Questions
 
-- 同一项目首版是否限制同时只能有一个 `active` workflow？本设计建议限制一个，以避免正文修改与阶段归属冲突；可保留多个 paused/completed 实例。
 - 新书模板中的世界观与人物设计是否允许并行？首版建议保持可回退的顺序流程，待状态模型稳定后再支持并行 stage group。
 - “作者手工直接编辑正文”如何自动关联当前 issue 的 checkpoint？建议首版只有从问题修复入口发起的 diff/hunk 才自动关联，普通编辑要求作者显式选择关联问题。
 - 资产影响分析首版采用显式 asset refs + Story Bible 关系 + 稳定 scope；对正文中的隐式语义引用是否补充向量/LLM 扫描，应在基础链路稳定后单独评估成本和误报。
 - 针对性复检的最小执行器应按问题类型映射 reviewer、fact-checker 或 plagiarism-checker，具体映射表需在实现前结合现有 agent 输出能力确认。
+- 读书模式首版的阅读设置范围建议只含字号、正文宽度与主题；是否持久化到项目级或用户级偏好可在外壳骨架稳定后决定。

@@ -18,6 +18,7 @@ import type {
   RefactorDiffComputedEvent,
   RefactorDiffFailedEvent,
   RunId,
+  WorkflowRefDto,
 } from '../../shared/ipc/index.js';
 
 type RefactorStatus = 'idle' | 'computing' | 'reviewing' | 'applying' | 'applied' | 'failed';
@@ -119,7 +120,12 @@ function applyApplyFailed(prev: RefactorState, event: RefactorApplyFailedEvent):
  * 消费 refactor-* 控制事件并维护改写审阅状态。
  * onApplied 在 refactor-applied 时回调（供 App 重载当前章节正文，呈现磁盘变更）。
  */
-export function useRefactor(onApplied?: (nodeId: string) => void): UseRefactorResult {
+export function useRefactor(
+  onApplied?: (nodeId: string) => void,
+  workflowRef?: WorkflowRefDto,
+  issueId?: string,
+  workflowVersion?: number,
+): UseRefactorResult {
   const [state, setState] = useState<RefactorState>(INITIAL_STATE);
 
   const send = useCallback((command: FrontendCommandMessage): void => {
@@ -136,10 +142,43 @@ export function useRefactor(onApplied?: (nodeId: string) => void): UseRefactorRe
         anchor,
         rewrittenFragment,
       });
-      send({ type: 'compute-refactor-diff', runId, anchor, rewrittenFragment });
+      const command: FrontendCommandMessage = {
+        type: 'compute-refactor-diff',
+        runId,
+        anchor,
+        rewrittenFragment,
+        ...(workflowRef !== undefined
+          ? { workflowRef: { ...workflowRef, ...(issueId !== undefined ? { issueId } : {}) } }
+          : {}),
+      };
+      if (workflowRef === undefined || issueId === undefined) {
+        send(command);
+      } else if (workflowVersion === undefined) {
+        setState((previous) => ({ ...previous, status: 'failed', error: '工作流版本不可用，无法开始问题修复' }));
+      } else {
+        void window.novelAgent.sendWorkflowCommand({
+          type: 'workflow-select-issue',
+          requestId: crypto.randomUUID(),
+          operationId: crypto.randomUUID(),
+          expectedVersion: workflowVersion,
+          workflowId: workflowRef.workflowId,
+          stageId: workflowRef.stageId,
+          issueId,
+          runId,
+          workflowRef: { ...workflowRef, issueId },
+        }).then((response) => {
+          if (response.failure !== undefined || response.snapshot === null) {
+            setState((previous) => previous.runId === runId
+              ? { ...previous, status: 'failed', error: response.failure?.error.message ?? '无法开始问题修复' }
+              : previous);
+            return;
+          }
+          send(command);
+        });
+      }
       return runId;
     },
-    [send],
+    [issueId, send, workflowRef, workflowVersion],
   );
 
   const setDecision = useCallback((hunkId: string, decision: HunkDecisionValue): void => {
@@ -161,10 +200,13 @@ export function useRefactor(onApplied?: (nodeId: string) => void): UseRefactorRe
         anchor: prev.anchor,
         rewrittenFragment: prev.rewrittenFragment,
         decisions,
+        ...(workflowRef !== undefined
+          ? { workflowRef: { ...workflowRef, ...(issueId !== undefined ? { issueId } : {}) } }
+          : {}),
       });
       return { ...prev, status: 'applying', error: undefined };
     });
-  }, [send]);
+  }, [issueId, send, workflowRef]);
 
   const clear = useCallback((): void => {
     setState(INITIAL_STATE);

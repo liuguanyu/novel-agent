@@ -30,7 +30,8 @@ export interface DashboardState {
 export interface UseDashboardResult {
   readonly state: DashboardState;
   readonly busy: boolean;
-  runGlobalAudit(): RunId;
+  runGlobalAudit(workflowRef?: import('../../shared/ipc/index.js').WorkflowRefDto): RunId;
+  runTargetedVerification(issue: import('../../shared/ipc/index.js').ConsistencyIssueDto, workflowRef: import('../../shared/ipc/index.js').WorkflowRefDto): RunId | undefined;
   abort(): void;
   clear(): void;
 }
@@ -105,10 +106,17 @@ export function useDashboard(): UseDashboardResult {
     window.novelAgent.sendCommand(command);
   }, []);
 
-  const runGlobalAudit = useCallback((): RunId => {
+  const runGlobalAudit = useCallback((workflowRef?: import('../../shared/ipc/index.js').WorkflowRefDto): RunId => {
     const runId = newRunId();
     setState({ ...INITIAL_STATE, runId, status: 'running' });
-    send({ type: 'run-global-audit', runId });
+    send({ type: 'run-global-audit', runId, ...(workflowRef === undefined ? {} : { workflowRef }) });
+    return runId;
+  }, [send]);
+
+  const runTargetedVerification = useCallback((issue: import('../../shared/ipc/index.js').ConsistencyIssueDto, workflowRef: import('../../shared/ipc/index.js').WorkflowRefDto): RunId | undefined => {
+    if (issue.issueId === undefined) return undefined;
+    const runId = newRunId();
+    send({ type: 'run-targeted-verification', runId, workflowRef: { ...workflowRef, issueId: issue.issueId } });
     return runId;
   }, [send]);
 
@@ -125,6 +133,16 @@ export function useDashboard(): UseDashboardResult {
     const off = window.novelAgent.onControlEvent((event: BackendControlEvent) => {
       setState((prev) => {
         if (event.type === 'global-audit-started') return fromStarted(event);
+        if (event.type === 'targeted-verification-completed' && prev.dashboard !== undefined) {
+          return {
+            ...prev,
+            dashboard: {
+              ...prev.dashboard,
+              issues: prev.dashboard.issues.map((issue) => issue.issueId === event.issue.issueId ? event.issue : issue),
+            },
+          };
+        }
+        if (event.type === 'targeted-verification-failed') return { ...prev, error: event.error.message };
         // 事实变化事件的 runId 与总检 runId 不同，需在 runId 守卫之前处理。
         if (isFactChangeEvent(event)) {
           if (prev.status === 'completed' && !prev.stale) return { ...prev, stale: true };
@@ -157,5 +175,5 @@ export function useDashboard(): UseDashboardResult {
 
   const busy = useMemo(() => state.status === 'running', [state.status]);
 
-  return { state, busy, runGlobalAudit, abort, clear };
+  return { state, busy, runGlobalAudit, runTargetedVerification, abort, clear };
 }

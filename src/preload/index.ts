@@ -11,6 +11,7 @@ import {
   IPC_CHANNELS,
   QUERY_CHANNELS,
   type BackendControlEvent,
+  type BackendModelTaskEvent,
   type BackendStreamMessage,
   type FrontendCommandMessage,
   type ChapterTreeDto,
@@ -20,8 +21,12 @@ import {
   type GetChapterContentRequest,
   type StoryBibleDto,
   type ArchitectBoardDto,
+  type WorkspaceProjectContextDto,
   type NovelAgentBridge,
   type Unsubscribe,
+  WORKFLOW_QUERY_CHANNELS,
+  WORKFLOW_COMMAND_CHANNEL,
+  type WorkflowSnapshotResponse, type GetWorkflowSnapshotRequest, type WorkflowCommand, type WorkflowAssetQuery, type WorkflowAssetResponse,
 } from '../shared/ipc/index.js';
 
 /** 暴露给 Renderer 的受限桥 API。 */
@@ -29,6 +34,9 @@ const api: NovelAgentBridge = {
   /** 取章节树（真读盘，Main 侧 handle）。 */
   getChapterTree(): Promise<ChapterTreeDto> {
     return ipcRenderer.invoke(QUERY_CHANNELS.getChapterTree) as Promise<ChapterTreeDto>;
+  },
+  getWorkspaceProject(): Promise<WorkspaceProjectContextDto> {
+    return ipcRenderer.invoke(QUERY_CHANNELS.getWorkspaceProject) as Promise<WorkspaceProjectContextDto>;
   },
   /** 以节点 id 取正文。 */
   getChapterContent(request: GetChapterContentRequest): Promise<ChapterContentDto> {
@@ -46,6 +54,10 @@ const api: NovelAgentBridge = {
   getArchitectBoard(): Promise<ArchitectBoardDto> {
     return ipcRenderer.invoke(QUERY_CHANNELS.getArchitectBoard) as Promise<ArchitectBoardDto>;
   },
+  getWorkflowSnapshot(request: GetWorkflowSnapshotRequest): Promise<WorkflowSnapshotResponse> { return ipcRenderer.invoke(WORKFLOW_QUERY_CHANNELS.snapshot, request) as Promise<WorkflowSnapshotResponse>; },
+  getActiveWorkflow(projectId: string): Promise<WorkflowSnapshotResponse> { return ipcRenderer.invoke(WORKFLOW_QUERY_CHANNELS.active, projectId) as Promise<WorkflowSnapshotResponse>; },
+  getWorkflowAsset(request: WorkflowAssetQuery): Promise<WorkflowAssetResponse> { return ipcRenderer.invoke(WORKFLOW_QUERY_CHANNELS.asset, request) as Promise<WorkflowAssetResponse>; },
+  sendWorkflowCommand(command: WorkflowCommand): Promise<WorkflowSnapshotResponse> { return ipcRenderer.invoke(WORKFLOW_COMMAND_CHANNEL, command) as Promise<WorkflowSnapshotResponse>; },
   /** 发送前端命令（召唤/中断等），经 control-event 通道上行。 */
   sendCommand(command: FrontendCommandMessage): void {
     ipcRenderer.send(IPC_CHANNELS.controlEvent, command);
@@ -73,6 +85,14 @@ const api: NovelAgentBridge = {
     };
     ipcRenderer.on(IPC_CHANNELS.controlEvent, handler);
     return () => ipcRenderer.removeListener(IPC_CHANNELS.controlEvent, handler);
+  },
+  /** 订阅自动模型任务活动。独立通道保证任务记录不会进入专家聊天或业务控制订阅。 */
+  onModelTaskEvent(listener: (event: BackendModelTaskEvent) => void): Unsubscribe {
+    const handler = (_event: IpcRendererEvent, message: unknown): void => {
+      listener(message as BackendModelTaskEvent);
+    };
+    ipcRenderer.on(IPC_CHANNELS.modelTaskEvent, handler);
+    return () => ipcRenderer.removeListener(IPC_CHANNELS.modelTaskEvent, handler);
   },
 };
 

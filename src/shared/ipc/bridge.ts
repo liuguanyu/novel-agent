@@ -8,6 +8,7 @@
 import type { BackendStreamMessage } from './stream-messages.js';
 import type { FrontendCommandMessage } from './command-messages.js';
 import type { BackendControlEvent } from './control-messages.js';
+import type { BackendModelTaskEvent } from './model-task-messages.js';
 import type {
   ChapterTreeDto,
   ChapterContentDto,
@@ -16,7 +17,9 @@ import type {
   GetCheckpointHistoryRequest,
   StoryBibleDto,
   ArchitectBoardDto,
+  WorkspaceProjectContextDto,
 } from './query-messages.js';
+import type { WorkflowSnapshotResponse, GetWorkflowSnapshotRequest, WorkflowCommand, WorkflowAssetQuery, WorkflowAssetResponse } from './workflow-messages.js';
 
 /** 订阅解除函数。 */
 export type Unsubscribe = () => void;
@@ -25,6 +28,8 @@ export type Unsubscribe = () => void;
 export interface NovelAgentBridge {
   /** 取章节树（真读盘）。 */
   getChapterTree(): Promise<ChapterTreeDto>;
+  /** 取当前工作区项目身份，不暴露本地路径。 */
+  getWorkspaceProject(): Promise<WorkspaceProjectContextDto>;
   /** 以节点 id 取正文。 */
   getChapterContent(request: GetChapterContentRequest): Promise<ChapterContentDto>;
   /** 发送前端命令（召唤/中断等）。 */
@@ -35,10 +40,16 @@ export interface NovelAgentBridge {
   onManuscriptStream(listener: (message: BackendStreamMessage) => void): Unsubscribe;
   /** 订阅后端控制事件（挂起裁决/纠偏/冲突等，与内容流分离）。 */
   onControlEvent(listener: (event: BackendControlEvent) => void): Unsubscribe;
+  /** 订阅自动模型任务的结构化活动；该记录与专家对话历史完全分离。 */
+  onModelTaskEvent(listener: (event: BackendModelTaskEvent) => void): Unsubscribe;
   /** 取 checkpoint 历史链（time-travel）。 */
   getCheckpointHistory(request?: GetCheckpointHistoryRequest): Promise<CheckpointHistoryDto>;
   /** 取当前 Story Bible 事实视图（只读 DTO）。 */
   getStoryBible(): Promise<StoryBibleDto>;
   /** 取 architect 架构看板视图（只读投影 DTO：时间线轴/情节线/人设集）。 */
   getArchitectBoard(): Promise<ArchitectBoardDto>;
+  getWorkflowSnapshot(request: GetWorkflowSnapshotRequest): Promise<WorkflowSnapshotResponse>;
+  getActiveWorkflow(projectId: string): Promise<WorkflowSnapshotResponse>;
+  getWorkflowAsset(request: WorkflowAssetQuery): Promise<WorkflowAssetResponse>;
+  sendWorkflowCommand(command: WorkflowCommand): Promise<WorkflowSnapshotResponse>;
 }

@@ -12,13 +12,19 @@
  * 里程碑态（作者可见 time-travel）由 recordMilestone 提交进 I2 SqliteCheckpointer，沿 parent 链成史。
  */
 
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import type { WebContents } from 'electron';
 import { Command, INTERRUPT } from '@langchain/langgraph';
 import {
   IPC_CHANNELS,
   type BackendControlEvent,
+  type BackendModelTaskEvent,
   type BackendStreamMessage,
+  type ModelTaskActivityPhase,
+  type ModelTaskConflictCandidateDto,
+  type ModelTaskDisplayMetadata,
+  type ModelTaskRefDto,
+  type ModelTaskSupplementDto,
   type CheckpointDto,
   type CheckpointHistoryDto,
   type ConsistencyIssueDto,
@@ -28,16 +34,25 @@ import {
   type StoryBibleFactEditDto,
   type StoryBibleFactLocatorDto,
 } from '../../shared/ipc/index.js';
-import type { ResumeDecision } from '../../shared/ipc/index.js';
+import type { ResumeDecision, WorkflowRefDto } from '../../shared/ipc/index.js';
 import type { CapabilityTier } from '../../core/model/index.js';
 import type { Checkpoint, CheckpointId, NovelState } from '../../core/orchestration/index.js';
 import { actionForAgent } from '../../core/orchestration/index.js';
+import {
+  resolveContinuation,
+  type ContinuationScope,
+  type InterruptContinuationRecord,
+  type WorkflowContinuation,
+  buildLegacyRevisionDiagnosis,
+  type WorkflowIssueRecord,
+  type WorkflowRef,
+} from '../../core/workflow/index.js';
 import type { CandidateFact, ConsistencyIssue, ExtractionInput, FactView } from '../../core/story-bible/index.js';
 import { asCheckpointId, asFactVersionId } from '../../core/story-bible/index.js';
 import { asNodeId } from '../../core/manuscript/node-id.js';
 import type { ModelResolver } from '../model-resolver.js';
 import { appendOrchestrationLog } from '../local-log.js';
-import type { SqliteCheckpointer, SqliteFactStore } from '../db/index.js';
+import type { CreativeAssetRepository, SqliteCheckpointer, SqliteFactStore, WorkflowIssueRepository, WorkflowRepository } from '../db/index.js';
 import {
   assembleContext,
   type AssemblyRequest,
@@ -78,11 +93,13 @@ import {
   type CorpusHit,
 } from '../../core/corpus/index.js';
 import { readChapterContent } from '../novel-reader.js';
+import type { ChapterContentDto } from '../../shared/ipc/index.js';
 import {
   createOrchestrationGraph,
   type CompiledOrchestrationGraph,
   type GraphRunDeps,
 } from './graph.js';
+import { parseReviewerIssuesWithDiagnostics } from './consistency-schema.js';
 
 /** 审校类 agent：产 activeBugs、运行结束后结构化下发 review-completed（与写手/规划类区分）。 */
 const REVIEW_AGENTS: ReadonlySet<string> = new Set([
@@ -95,6 +112,7 @@ const REVIEW_AGENTS: ReadonlySet<string> = new Set([
 export interface BackfillFactsParams {
   runId: RunId;
   chapters: ReadonlyArray<ExtractionInput>;
+  workflowRef?: WorkflowRef;
 }
 
 export interface SummonParams {
@@ -114,6 +132,8 @@ export interface SummonParams {
   instruction?: string;
   /** writer 产出新正文后是否自动抽取低风险事实；冲突仍必须人工裁决。 */
   autoExtractFacts?: boolean;
+  /** Lightweight ownership only; workflow history remains in the workflow service. */
+  workflowRef?: WorkflowRef;
 }
 
 /** 从 checkpoint 重启的参数（time-travel task 5.2）。 */
@@ -123,6 +143,42 @@ export interface RestartParams {
   checkpointId: string;
   /** 可选的作者新指令（为空时沿用 checkpoint 内 chatHistory 的上下文继续） */
   instruction?: string;
+}
+
+type TargetedVerificationAgent = 'reviewer' | 'fact-checker' | 'plagiarism-checker';
+
+export function targetedVerificationAgentFor(issueType: string): TargetedVerificationAgent {
+  const normalized = issueType.toLowerCase();
+  if (normalized.includes('plagiarism') || normalized.includes('originality') || normalized.includes('similarity')) {
+    return 'plagiarism-checker';
+  }
+  if (['naming-conflict', 'timeline-break', 'plot-hook-dangling', 'state-contradiction', 'spatial-inconsistency', 'attribute-conflict', 'fact-conflict'].includes(normalized)) {
+    return 'fact-checker';
+  }
+  return 'reviewer';
+}
+
+export interface StageRunEvidenceRecorder {
+  record(input: {
+    readonly runId: RunId;
+    readonly workflowRef: WorkflowRef;
+    readonly status: 'started' | 'resumed' | 'completed' | 'failed' | 'interrupted';
+    readonly evidence?: Readonly<Record<string, string>>;
+    /** Required completion outcome when the current template stage has a quality gate. */
+    readonly completion?: {
+      readonly passed: boolean;
+      readonly issueIds: ReadonlyArray<string>;
+      readonly transition?: 'quality-failed' | 'issues-found';
+    };
+  }): Promise<void>;
+}
+
+/** Persistence boundary for durable interrupt continuation records. */
+export interface ContinuationRecordService {
+  save(record: InterruptContinuationRecord): Promise<void>;
+  getByRunId(runId: RunId): Promise<InterruptContinuationRecord | null>;
+  remove(interruptId: string): Promise<void>;
+  resolveStageTarget?(workflowRef: WorkflowRef, targetTemplateStageId: string): Promise<string | null>;
 }
 
 /** 运行时依赖注入：模型解析器、里程碑 checkpointer 与事实库（均可能未就绪）。 */
@@ -139,6 +195,16 @@ export interface RuntimeDeps {
   getEmbedRunner?: () => EmbedRunner | undefined;
   /** 素材向量存储（I7）：未就绪时检索返回空快照（弱参考，不阻断）。 */
   getCorpusStore?: () => CorpusStore | undefined;
+  stageRunEvidence?: StageRunEvidenceRecorder;
+  continuationRecords?: ContinuationRecordService;
+  workflowIssues?: WorkflowIssueRepository;
+  workflows?: WorkflowRepository;
+  creativeAssets?: CreativeAssetRepository;
+  /** 可注入正文 I/O，供隔离 E2E 使用；未注入时使用默认小说工作区。 */
+  manuscript?: {
+    readonly readChapterContent: (nodeId: string) => Promise<ChapterContentDto>;
+    readonly writeBackRefactoredFragment: (anchor: FragmentAnchor, fragmentText: string) => Promise<{ ok: boolean; reason?: 'node-not-found' | 'anchor-out-of-range' | 'io-error'; newContentLength?: number }>;
+  };
 }
 
 /** 本次召唤的检索/组装基座（scope/锚点/关键词/指令）。随账本持久，供 resume 时 assembleContext 复用。 */
@@ -153,10 +219,34 @@ interface RunAssemblyBase {
 }
 
 /** 抽取冲突挂起账本：等待作者经 resume-run 选择 accept-new / keep-existing 等选项。 */
+interface ModelTaskAttemptContext {
+  readonly taskId: string;
+  readonly attemptId: string;
+  readonly kind: 'fact-extraction';
+  readonly runId: RunId;
+  readonly workflowRef?: WorkflowRef;
+}
+
+interface FactTaskRecord {
+  readonly taskId: string;
+  readonly wc: WebContents;
+  readonly kind: 'chapter' | 'backfill';
+  readonly inputs: ReadonlyArray<ExtractionInput>;
+  readonly workflowRef?: WorkflowRef;
+  currentAttempt: ModelTaskAttemptContext;
+  currentOffset: number;
+  supplement?: ModelTaskSupplementDto;
+}
+
 interface PendingExtractionConflictRun {
   readonly wc: WebContents;
   readonly chapterId: string;
   readonly conflicts: ReadonlyArray<IngestConflict>;
+  readonly modelTask?: ModelTaskAttemptContext;
+  readonly backfill?: {
+    readonly chapters: ReadonlyArray<ExtractionInput>;
+    readonly nextOffset: number;
+  };
 }
 
 /** 一次运行的可变账本（seq/里程碑 parent 游标随节点推进而变）。 */
@@ -167,6 +257,8 @@ interface ActiveRun {
   readonly threadId: string;
   /** 本次召唤的组装基座（供 assembleContext/checkFacts 闭包读）。 */
   readonly assembly: RunAssemblyBase;
+  readonly workflowRef?: WorkflowRef;
+  continuationTarget?: string;
   /** dialogue 分片序号（前端按序拼接）。 */
   seq: number;
   /** 里程碑链游标：下一次 commit 的 parent（初始 null，提交后前移）。 */
@@ -218,6 +310,10 @@ export class OrchestrationRuntime {
   readonly #runs = new Map<RunId, ActiveRun>();
   /** 显式抽取冲突的挂起账本，复用 resume-run 手刹通道裁决。 */
   readonly #pendingExtractionConflicts = new Map<RunId, PendingExtractionConflictRun>();
+  /** 当前进程内的模型任务账本；持久化历史将在后续迁移中接入。 */
+  readonly #factTasks = new Map<string, FactTaskRecord>();
+  /** Diff preview binds apply to the exact fragment observed for this run. */
+  readonly #fragmentBases = new Map<RunId, { nodeId: string; from: number; to: number; hash: string }>();
 
   constructor(deps: RuntimeDeps) {
     this.#graph = createOrchestrationGraph();
@@ -229,8 +325,62 @@ export class OrchestrationRuntime {
     this.#runs.get(runId)?.controller.abort();
   }
 
+  /** 受控中断模型任务：必须同时匹配 task/attempt/run，避免误中断专家运行。 */
+  abortModelTask(taskId: string, attemptId: string, runId: RunId): boolean {
+    const task = this.#factTasks.get(taskId);
+    if (task === undefined || task.currentAttempt.attemptId !== attemptId || task.currentAttempt.runId !== runId) return false;
+    this.abort(runId);
+    return true;
+  }
+
+  /** 对当前任务创建新 attempt；旧 attempt 只保留在 Renderer 的历史活动中，不被覆盖。 */
+  async retryModelTask(taskId: string, attemptId: string, wc: WebContents): Promise<boolean> {
+    const task = this.#factTasks.get(taskId);
+    if (task === undefined || task.currentAttempt.attemptId !== attemptId) return false;
+    const runId = randomUUID() as RunId;
+    const nextAttempt = this.#createFactModelTask(runId, task.workflowRef, task.taskId);
+    task.currentAttempt = nextAttempt;
+    this.#sendModelTaskActivity(wc, nextAttempt, 'reading', '开始新的模型任务尝试');
+    const run = this.#startUtilityRun(wc, runId, task.workflowRef);
+    const supplement = task.supplement?.text;
+    try {
+      const resolver = this.#deps.getModelResolver();
+      const factStore = this.#deps.getFactStore();
+      if (resolver === undefined || factStore === undefined) {
+        this.#failModelTask(wc, nextAttempt, { category: 'io', message: '模型任务依赖未就绪，无法重试' });
+        return true;
+      }
+      if (task.kind === 'chapter') {
+        const input = task.inputs[0];
+        if (input === undefined) {
+          this.#failModelTask(wc, nextAttempt, { category: 'validation', message: '模型任务缺少章节正文' });
+          return true;
+        }
+        await this.#runFactExtractionPipeline(wc, runId, input, resolver, factStore, run.controller.signal, undefined, nextAttempt, supplement);
+      } else {
+        const startOffset = task.supplement?.scope === 'remaining-chapters' ? Math.min(task.currentOffset + 1, task.inputs.length) : task.currentOffset;
+        const completed = await this.#continueFactBackfill(run, task.inputs, startOffset, resolver, factStore, nextAttempt, supplement);
+        if (completed) this.#completeModelTask(wc, nextAttempt, { chapters: task.inputs.length - startOffset });
+      }
+    } catch (error) {
+      this.#failModelTask(wc, nextAttempt, { category: 'model', message: error instanceof Error ? error.message : String(error) });
+    } finally {
+      if (!this.#pendingExtractionConflicts.has(runId)) this.#runs.delete(runId);
+    }
+    return true;
+  }
+
+  /** 补充要求只作用于新 attempt；workflow-goal 必须走作者目标更新命令，不能从任务自由文本写入。 */
+  async supplementModelTask(taskId: string, attemptId: string, supplement: ModelTaskSupplementDto, wc: WebContents): Promise<boolean> {
+    if (supplement.scope === 'workflow-goal' || supplement.text.trim().length === 0) return false;
+    const task = this.#factTasks.get(taskId);
+    if (task === undefined || task.currentAttempt.attemptId !== attemptId) return false;
+    task.supplement = { ...supplement };
+    return this.retryModelTask(taskId, attemptId, wc);
+  }
+
   /** 启动一次非 LangGraph 的显式抽取账本，使 abort-run 也能中断抽取模型调用。 */
-  #startUtilityRun(wc: WebContents, runId: RunId): ActiveRun {
+  #startUtilityRun(wc: WebContents, runId: RunId, workflowRef?: WorkflowRef): ActiveRun {
     const run: ActiveRun = {
       controller: new AbortController(),
       wc,
@@ -238,6 +388,7 @@ export class OrchestrationRuntime {
       assembly: DEFAULT_ASSEMBLY_BASE,
       seq: 0,
       parent: null,
+      ...(workflowRef === undefined ? {} : { workflowRef }),
     };
     this.#runs.set(runId, run);
     return run;
@@ -264,6 +415,145 @@ export class OrchestrationRuntime {
     wc.send(IPC_CHANNELS.controlEvent, event);
   }
 
+  #createFactModelTask(runId: RunId, workflowRef?: WorkflowRef, taskId?: string): ModelTaskAttemptContext {
+    return {
+      taskId: taskId ?? randomUUID(),
+      attemptId: randomUUID(),
+      kind: 'fact-extraction',
+      runId,
+      ...(workflowRef === undefined ? {} : { workflowRef }),
+    };
+  }
+
+  #modelTaskRef(task: ModelTaskAttemptContext, chapterId?: string): ModelTaskRefDto {
+    return {
+      taskId: task.taskId,
+      attemptId: task.attemptId,
+      kind: task.kind,
+      runId: task.runId,
+      ...(task.workflowRef === undefined ? {} : { workflowRef: task.workflowRef }),
+      ...(chapterId === undefined ? {} : { chapterId }),
+    };
+  }
+
+  #sendModelTaskActivity(
+    wc: WebContents,
+    task: ModelTaskAttemptContext,
+    phase: ModelTaskActivityPhase,
+    message: string,
+    chapterId?: string,
+    metadata?: ModelTaskDisplayMetadata,
+    awaitingAuthor = false,
+    conflicts?: ReadonlyArray<ModelTaskConflictCandidateDto>,
+  ): void {
+    wc.send(IPC_CHANNELS.modelTaskEvent, {
+      ...this.#modelTaskRef(task, chapterId),
+      type: 'model-task-activity',
+      attemptStatus: awaitingAuthor ? 'awaiting-author' : 'running',
+      activity: {
+        activityId: randomUUID(),
+        phase,
+        message,
+        ...(metadata === undefined ? {} : { metadata }),
+        ...(conflicts === undefined ? {} : { conflicts }),
+        createdAt: new Date().toISOString(),
+      },
+    } satisfies BackendModelTaskEvent);
+  }
+
+  #completeModelTask(
+    wc: WebContents,
+    task: ModelTaskAttemptContext,
+    summary: ModelTaskDisplayMetadata,
+    chapterId?: string,
+  ): void {
+    wc.send(IPC_CHANNELS.modelTaskEvent, {
+      ...this.#modelTaskRef(task, chapterId),
+      type: 'model-task-completed',
+      attemptStatus: 'completed',
+      summary,
+      completedAt: new Date().toISOString(),
+    } satisfies BackendModelTaskEvent);
+  }
+
+  #failModelTask(
+    wc: WebContents,
+    task: ModelTaskAttemptContext,
+    error: { category: 'model' | 'validation' | 'aborted' | 'io' | 'internal'; message: string },
+    chapterId?: string,
+  ): void {
+    wc.send(IPC_CHANNELS.modelTaskEvent, {
+      ...this.#modelTaskRef(task, chapterId),
+      type: 'model-task-failed',
+      attemptStatus: error.category === 'aborted' ? 'aborted' : 'failed',
+      error,
+      failedAt: new Date().toISOString(),
+    } satisfies BackendModelTaskEvent);
+  }
+
+  #withWorkflow<T extends object>(run: ActiveRun, message: T): T & { workflowRef?: WorkflowRefDto } {
+    return run.workflowRef === undefined ? message : { ...message, workflowRef: run.workflowRef };
+  }
+
+  async #assertWorkflowRef(ref: WorkflowRef, requireIssueRunId?: RunId, requireCurrentStage = false): Promise<void> {
+    const workflows = this.#deps.workflows;
+    if (workflows === undefined) throw new Error('workflow repository is unavailable');
+    const workflow = await workflows.get(ref.workflowId);
+    if (workflow === null || !workflow.stages.some((stage) => stage.stageId === ref.stageId)) throw new Error('stage does not belong to workflow');
+    if (requireCurrentStage && workflow.currentStageId !== ref.stageId) throw new Error('workflowRef.stageId must equal current stage');
+    if (ref.issueId !== undefined) {
+      const issue = await this.#deps.workflowIssues?.get(ref.issueId);
+      if (issue === null || issue === undefined || issue.workflowId !== ref.workflowId) throw new Error('issue does not belong to workflow');
+      if (requireIssueRunId !== undefined && (issue.status !== 'fixing' || !issue.refactorRunIds.includes(requireIssueRunId))) throw new Error('issue is not fixing with this run');
+    }
+  }
+
+  async #assertIssueAnchor(ref: WorkflowRef | undefined, nodeId: string): Promise<void> {
+    if (ref?.issueId === undefined) return;
+    const issue = await this.#deps.workflowIssues?.get(ref.issueId);
+    if (issue === null || issue === undefined || !issue.anchorRefs.some((anchor) => anchor === `chapter:${nodeId}` || anchor === `scene:${nodeId}`)) {
+      throw new Error('refactor anchor does not belong to issue');
+    }
+  }
+
+  async #recordStageRun(
+    run: ActiveRun,
+    status: 'started' | 'resumed' | 'completed' | 'failed' | 'interrupted',
+    evidence?: Readonly<Record<string, string>>,
+    completion?: {
+      readonly passed: boolean;
+      readonly issueIds: ReadonlyArray<string>;
+      readonly transition?: 'quality-failed' | 'issues-found';
+    },
+  ): Promise<void> {
+    if (run.workflowRef === undefined || this.#deps.stageRunEvidence === undefined) return;
+    await this.#deps.stageRunEvidence.record({
+      runId: run.threadId,
+      workflowRef: run.workflowRef,
+      status,
+      ...(evidence !== undefined ? { evidence } : {}),
+      ...(completion !== undefined ? { completion } : {}),
+    });
+  }
+
+  async #projectReviewIssues(
+    run: ActiveRun,
+    issues: ReadonlyArray<ConsistencyIssue>,
+  ): Promise<{ readonly dtos: ReadonlyArray<ConsistencyIssueDto>; readonly issueIds: ReadonlyArray<string> }> {
+    if (run.workflowRef === undefined || this.#deps.workflowIssues === undefined) {
+      return { dtos: issues.map((issue) => toIssueDto(issue)), issueIds: [] };
+    }
+    const records = await this.#deps.workflowIssues.upsertFromAudit(
+      run.workflowRef.workflowId,
+      run.threadId,
+      issues,
+    );
+    return {
+      dtos: issues.map((issue, index) => toIssueDto(issue, records[index])),
+      issueIds: records.map((record) => record.issueId),
+    };
+  }
+
   /** 组装本次运行注入图的抽象回调（把图与具体 IPC/DB 解耦）。 */
   #buildRunDeps(run: ActiveRun, resolver: ModelResolver): GraphRunDeps {
     const checkpointer = this.#deps.getCheckpointer();
@@ -273,22 +563,15 @@ export class OrchestrationRuntime {
       createAdapter: (agentId: string, tier: CapabilityTier, options) =>
         resolver.createAdapter(agentId, tier, options),
       emitDialogue: (delta: string) => {
-        this.#send(run.wc, {
-          type: 'stream-chunk',
-          runId: run.threadId,
-          kind: 'dialogue',
-          delta,
-          seq: run.seq++,
-        });
+        this.#send(run.wc, this.#withWorkflow(run, {
+          type: 'stream-chunk', runId: run.threadId, kind: 'dialogue', delta, seq: run.seq++,
+        }));
       },
       emitReasoning: (delta: string) => {
-        this.#send(run.wc, {
-          type: 'stream-chunk',
-          runId: run.threadId,
-          kind: 'dialogue',
-          delta: `\u0001reasoning\u0001${delta}`,
-          seq: run.seq++,
-        });
+        this.#send(run.wc, this.#withWorkflow(run, {
+          type: 'stream-chunk', runId: run.threadId, kind: 'dialogue',
+          delta: `\u0001reasoning\u0001${delta}`, seq: run.seq++,
+        }));
       },
       signal: run.controller.signal,
       log: (message: string) => {
@@ -311,6 +594,9 @@ export class OrchestrationRuntime {
               await this.#autoExtractAfterWriter(run, resolver, state);
             },
           }
+        : {}),
+      ...(run.continuationTarget !== undefined
+        ? { continuationTarget: () => run.continuationTarget }
         : {}),
       recordMilestone: async (atNode: string, state: NovelState): Promise<void> => {
         // 里程碑态 checkpoint（design D3.5）：持久化进 SqliteCheckpointer，沿 parent 链成史。
@@ -343,8 +629,16 @@ export class OrchestrationRuntime {
     factStore: SqliteFactStore,
     signal: AbortSignal,
     progress?: { index: number; total: number },
+    modelTask?: ModelTaskAttemptContext,
+    supplement?: string,
   ): Promise<void> {
     const chapterId = input.location.id as string;
+    if (modelTask !== undefined) {
+      this.#sendModelTaskActivity(wc, modelTask, 'reading', `已读取${chapterId}，共 ${input.text.length.toLocaleString()} 字`, chapterId, {
+        textChars: input.text.length,
+        ...(progress === undefined ? {} : { index: progress.index, total: progress.total }),
+      });
+    }
     const latestVersion = await factStore.getLatestVersion();
     const emptyView: FactView = {
       version: asFactVersionId('extraction-empty-view'),
@@ -361,6 +655,7 @@ export class OrchestrationRuntime {
 
     for (const chunk of chunks) {
       if (signal.aborted) {
+        if (modelTask !== undefined) this.#failModelTask(wc, modelTask, { category: 'aborted', message: '事实抽取已中断' }, chapterId);
         this.#sendControl(wc, {
           type: 'fact-extraction-failed',
           runId,
@@ -369,15 +664,21 @@ export class OrchestrationRuntime {
         });
         return;
       }
+      if (modelTask !== undefined) this.#sendModelTaskActivity(wc, modelTask, 'model', '正在识别人物、事件、关系与时间线', chapterId, {
+        chunkIndex: extractedChunks.length + 1,
+        chunks: chunks.length,
+      });
       const extracted = await extractor.extract(chunk, {
         signal,
         logger: (message) => appendOrchestrationLog(`[extraction:${runId}] ${message}`),
+        ...(supplement === undefined ? {} : { supplement }),
       });
       extractedChunks.push(extracted);
       candidates.push(...extracted.output.candidates);
     }
 
     if (signal.aborted) {
+      if (modelTask !== undefined) this.#failModelTask(wc, modelTask, { category: 'aborted', message: '事实抽取已中断' }, chapterId);
       this.#sendControl(wc, {
         type: 'fact-extraction-failed',
         runId,
@@ -387,6 +688,9 @@ export class OrchestrationRuntime {
       return;
     }
 
+    if (modelTask !== undefined) this.#sendModelTaskActivity(wc, modelTask, 'validation', '正在校验并归一化候选事实', chapterId, {
+      candidateObjects: extractedChunks.reduce((sum, item) => sum + item.diagnostics.candidateObjects, 0),
+    });
     const initialNormalized = normalizeCandidateFacts(candidates, view);
     const batchEntities = initialNormalized.facts.flatMap((fact) =>
       fact.kind === 'entity' && !view.entities.some((entity) => entity.id === fact.entity.id)
@@ -399,6 +703,10 @@ export class OrchestrationRuntime {
         : { ...view, entities: [...view.entities, ...batchEntities] };
     const normalized = normalizeCandidateFacts(candidates, normalizationView);
     const plan = buildIngestPlan(normalized.facts, view, normalized.skipped);
+    if (modelTask !== undefined) this.#sendModelTaskActivity(wc, modelTask, 'ingest', '正在写入低风险事实并整理冲突', chapterId, {
+      validCandidates: normalized.facts.length,
+      skipped: plan.diagnostics.skipped,
+    });
     const applied = await applyIngestPlan(factStore, plan, view);
     const rawChars = extractedChunks.reduce((sum, item) => sum + item.diagnostics.rawChars, 0);
     const candidateObjects = extractedChunks.reduce((sum, item) => sum + item.diagnostics.candidateObjects, 0);
@@ -427,16 +735,49 @@ export class OrchestrationRuntime {
       ...(progress !== undefined ? progress : {}),
     });
     if (plan.conflicts.length > 0) {
+      if (modelTask !== undefined) {
+        this.#sendModelTaskActivity(
+          wc,
+          modelTask,
+          'conflict',
+          `发现 ${plan.conflicts.length} 条冲突，等待作者裁决`,
+          chapterId,
+          { conflicts: plan.conflicts.length },
+          true,
+          plan.conflicts.map((conflict, index) => ({
+            conflictId: createHash('sha1').update(`${chapterId}:${conflict.issue.type}:${conflict.issue.description}:${conflict.existingLabel}:${index}`).digest('hex'),
+            candidateSummary: conflict.issue.description,
+            existingSummary: conflict.existingLabel,
+            ...(conflict.issue.evidence?.quote === undefined ? {} : { evidenceQuote: conflict.issue.evidence.quote }),
+            allowedActions: ['accept-candidate', 'keep-existing', 'ignore-candidate'] as const,
+          })),
+        );
+      }
       this.#pendingExtractionConflicts.set(runId, {
         wc,
         chapterId,
         conflicts: plan.conflicts,
+        ...(modelTask === undefined ? {} : { modelTask }),
       });
       this.#sendControl(wc, {
         type: 'interrupt-raised',
         runId,
         issues: plan.conflicts.map((conflict) => toIssueDto(conflict.issue)),
       });
+    } else if (modelTask !== undefined) {
+      this.#sendModelTaskActivity(wc, modelTask, 'completed', '本章事实抽取完成', chapterId, {
+        autoIngested: plan.diagnostics.autoIngest,
+        conflicts: plan.diagnostics.conflicts,
+        skipped: plan.diagnostics.skipped,
+      });
+      if (progress === undefined) {
+        this.#completeModelTask(wc, modelTask, {
+          autoIngested: plan.diagnostics.autoIngest,
+          conflicts: plan.diagnostics.conflicts,
+          skipped: plan.diagnostics.skipped,
+          factVersion: applied.version as string,
+        }, chapterId);
+      }
     }
   }
 
@@ -461,6 +802,8 @@ export class OrchestrationRuntime {
       resolver,
       factStore,
       run.controller.signal,
+      undefined,
+      this.#createFactModelTask(run.threadId, run.workflowRef),
     );
   }
 
@@ -502,6 +845,7 @@ export class OrchestrationRuntime {
       ...(params.initialDraft !== undefined ? { currentDraft: params.initialDraft } : {}),
       currentAction,
       agentStatus: 'idle',
+      ...(params.workflowRef !== undefined ? { workflowRef: params.workflowRef } : {}),
     };
     if (params.anchorNodeId !== undefined && params.anchorNodeId.length > 0) {
       state.currentChapterId = { id: asNodeId(params.anchorNodeId), kind: 'chapter' };
@@ -515,6 +859,13 @@ export class OrchestrationRuntime {
    */
   async summon(wc: WebContents, params: SummonParams): Promise<void> {
     const { runId } = params;
+    if (params.workflowRef !== undefined) {
+      try { await this.#assertWorkflowRef(params.workflowRef, undefined, true); }
+      catch (err) {
+        this.#send(wc, { type: 'stream-error', runId, kind: 'dialogue', error: { category: 'validation', message: err instanceof Error ? err.message : String(err) } });
+        return;
+      }
+    }
     const resolver = this.#deps.getModelResolver();
     if (resolver === undefined) {
       this.#send(wc, {
@@ -533,9 +884,11 @@ export class OrchestrationRuntime {
       assembly: assemblyBaseFrom(params),
       seq: 0,
       parent: null,
+      ...(params.workflowRef !== undefined ? { workflowRef: params.workflowRef } : {}),
     };
     this.#runs.set(runId, run);
-    this.#send(wc, { type: 'stream-start', runId, kind: 'dialogue' });
+    await this.#recordStageRun(run, 'started');
+    this.#send(wc, this.#withWorkflow(run, { type: 'stream-start', runId, kind: 'dialogue' }));
 
     await this.#drive(run, resolver, this.#initialState(params));
   }
@@ -544,7 +897,12 @@ export class OrchestrationRuntime {
    * 恢复被挂起的运行，携带作者决策（task 4.3–4.5）。
    * 以 Command({resume}) 从挂起点续跑：modify/correct 回 writer，approve/reject 终止。
    */
-  async resume(wc: WebContents, runId: RunId, decision: ResumeDecision): Promise<void> {
+  async resume(
+    wc: WebContents,
+    runId: RunId,
+    decision: ResumeDecision,
+    workflowRef?: WorkflowRef,
+  ): Promise<void> {
     // decision 跨 IPC 到达时为不可信输入：校验判别形状后方可续跑，非法决策以 stream-error 拒绝，
     // 避免让未知 kind 穿透到图 awaitDecision 的穷尽 switch（无 default 分支会静默返回 undefined）。
     if (!isValidResumeDecision(decision)) {
@@ -556,7 +914,7 @@ export class OrchestrationRuntime {
       });
       return;
     }
-    if (await this.#resumeExtractionConflict(wc, runId, decision)) return;
+    if (await this.#resumeExtractionConflict(wc, runId, decision, workflowRef)) return;
     const resolver = this.#deps.getModelResolver();
     if (resolver === undefined) {
       this.#send(wc, {
@@ -568,7 +926,17 @@ export class OrchestrationRuntime {
       return;
     }
     // 复用既有账本（保 thread/parent 游标连续 + 组装基座）；若已丢失（如重启）则新建一条同 thread 账本。
+    // 已存在运行的 workflowRef 是唯一 ownership 真相：调用方显式传 ref 时只能精确匹配，
+    // 未传时则必须继承它，不能让 continuation scope 被伪造或降级为 standalone。
     const existing = this.#runs.get(runId);
+    const continuationService = this.#deps.continuationRecords;
+    const persistedRecord = continuationService === undefined ? null : await continuationService.getByRunId(runId);
+    const ownedRef = existing?.workflowRef ?? (persistedRecord?.scope.kind === 'workflow' || persistedRecord?.scope.kind === 'issue' ? persistedRecord.scope.workflowRef : undefined);
+    if (existing?.workflowRef !== undefined && workflowRef !== undefined && !sameWorkflowRef(existing.workflowRef, workflowRef)) {
+      this.#send(wc, this.#withWorkflow(existing, { type: 'stream-error', runId, kind: 'dialogue', error: { category: 'validation', message: '恢复被拒绝：workflowRef 与运行 ownership 不匹配' } }));
+      return;
+    }
+    const effectiveWorkflowRef = ownedRef ?? workflowRef;
     const run: ActiveRun = existing ?? {
       controller: new AbortController(),
       wc,
@@ -576,9 +944,35 @@ export class OrchestrationRuntime {
       assembly: DEFAULT_ASSEMBLY_BASE,
       seq: 0,
       parent: null,
+      ...(effectiveWorkflowRef !== undefined ? { workflowRef: effectiveWorkflowRef } : {}),
     };
     if (existing === undefined) this.#runs.set(runId, run);
 
+    if (continuationService !== undefined) {
+      const record = persistedRecord;
+      if (record !== null) {
+        const scope = continuationScope(runId, effectiveWorkflowRef);
+        const resolved = resolveContinuation(record, decision.kind, scope);
+        if (!resolved.ok) {
+          this.#send(wc, this.#withWorkflow(run, {
+            type: 'stream-error', runId, kind: 'dialogue',
+            error: { category: 'validation', message: `恢复被拒绝：${resolved.reason}` },
+          }));
+          return;
+        }
+        const target = await this.#resolveContinuationTarget(resolved.continuation, effectiveWorkflowRef);
+        if (target !== undefined) run.continuationTarget = target;
+        await continuationService.remove(record.interruptId);
+      } else if (existing === undefined) {
+        this.#send(wc, this.#withWorkflow(run, { type: 'stream-error', runId, kind: 'dialogue', error: { category: 'validation', message: '恢复被拒绝：continuation not found' } }));
+        this.#runs.delete(runId);
+        return;
+      }
+    }
+
+    // Continuation validation/consumption must succeed before the workflow leaves blocked.
+    // Record this before graph execution so subsequent completion evidence is legal.
+    await this.#recordStageRun(run, 'resumed');
     await this.#drive(run, resolver, new Command({ resume: decision }));
   }
 
@@ -681,6 +1075,15 @@ export class OrchestrationRuntime {
     }
 
     const run = this.#startUtilityRun(wc, runId);
+    const modelTask = this.#createFactModelTask(runId);
+    this.#factTasks.set(modelTask.taskId, {
+      taskId: modelTask.taskId,
+      wc,
+      kind: 'chapter',
+      inputs: [input],
+      currentAttempt: modelTask,
+      currentOffset: 0,
+    });
     this.#sendControl(wc, {
       type: 'fact-extraction-started',
       runId,
@@ -696,8 +1099,14 @@ export class OrchestrationRuntime {
         resolver,
         factStore,
         run.controller.signal,
+        undefined,
+        modelTask,
       );
     } catch (err) {
+      this.#failModelTask(wc, modelTask, {
+        category: run.controller.signal.aborted ? 'aborted' : 'model',
+        message: err instanceof Error ? err.message : String(err),
+      }, chapterId);
       this.#sendControl(wc, {
         type: 'fact-extraction-failed',
         runId,
@@ -866,97 +1275,83 @@ export class OrchestrationRuntime {
     }
   }
 
-  async runGlobalAudit(wc: WebContents, runId: RunId): Promise<void> {
-    const factStore = this.#deps.getFactStore();
-    if (factStore === undefined) {
-      this.#sendControl(wc, {
-        type: 'global-audit-failed',
-        runId,
-        error: { category: 'io', message: '事实库未就绪：无法运行全书总检' },
-      });
-      return;
-    }
-
-    const run = this.#startUtilityRun(wc, runId);
-    try {
-      const version = await factStore.getLatestVersion();
-      if (version === null) {
-        this.#sendControl(wc, {
-          type: 'global-audit-failed',
-          runId,
-          error: { category: 'validation', message: 'Story Bible 为空：请先抽取章节事实再运行全书总检' },
-        });
+  async runGlobalAudit(wc: WebContents, runId: RunId, workflowRef?: WorkflowRef): Promise<void> {
+    const emit = (event: BackendControlEvent): void => {
+      this.#sendControl(wc, workflowRef === undefined ? event : { ...event, workflowRef } as BackendControlEvent);
+    };
+    if (workflowRef !== undefined) {
+      try { await this.#assertWorkflowRef(workflowRef, undefined, true); }
+      catch (err) {
+        emit({ type: 'global-audit-failed', runId, error: { category: 'validation', message: err instanceof Error ? err.message : String(err) } });
         return;
       }
+    }
+
+    const run = this.#startUtilityRun(wc, runId, workflowRef);
+    try {
+      await this.#recordStageRun(run, 'started');
+      const factStore = this.#deps.getFactStore();
+      if (factStore === undefined) throw new Error('事实库未就绪：无法运行全书总检');
+      const version = await factStore.getLatestVersion();
+      if (version === null) throw new Error('Story Bible 为空：请先抽取章节事实再运行全书总检');
 
       const view = await factStore.getView(version);
       const totalItems = countAuditableItems(view);
-      this.#sendControl(wc, {
-        type: 'global-audit-started',
-        runId,
-        factVersion: version as string,
-        totalItems,
-      });
+      emit({ type: 'global-audit-started', runId, factVersion: version as string, totalItems });
+      if (run.controller.signal.aborted) throw new AuditAbortedError('全书总检已中断');
+      emit({ type: 'global-audit-progress', runId, phase: 'map', completedItems: totalItems, totalItems });
+      if (run.controller.signal.aborted) throw new AuditAbortedError('全书总检已中断');
 
-      if (run.controller.signal.aborted) {
-        this.#sendControl(wc, {
-          type: 'global-audit-failed',
-          runId,
-          error: { category: 'aborted', message: '全书总检已中断' },
-        });
-        return;
-      }
-      this.#sendControl(wc, {
-        type: 'global-audit-progress',
-        runId,
-        phase: 'map',
-        completedItems: totalItems,
-        totalItems,
-      });
-
-      if (run.controller.signal.aborted) {
-        this.#sendControl(wc, {
-          type: 'global-audit-failed',
-          runId,
-          error: { category: 'aborted', message: '全书总检已中断' },
-        });
-        return;
-      }
       const runner = this.#deps.getAuditRunner?.() ?? new InlineAuditRunner();
       const result = await runner.run(view, run.controller.signal);
-      this.#sendControl(wc, {
-        type: 'global-audit-progress',
-        runId,
-        phase: 'reduce',
-        completedItems: totalItems,
-        totalItems,
-      });
-      this.#sendControl(wc, {
-        type: 'global-audit-progress',
-        runId,
-        phase: 'score',
-        completedItems: totalItems,
-        totalItems,
-      });
-      this.#sendControl(wc, {
-        type: 'global-audit-completed',
-        runId,
+      const persistedIssues = workflowRef !== undefined && this.#deps.workflowIssues !== undefined
+        ? await this.#deps.workflowIssues.upsertFromAudit(workflowRef.workflowId, runId, result.issues)
+        : [];
+      const workflow = workflowRef === undefined ? null : await this.#deps.workflows?.get(workflowRef.workflowId) ?? null;
+      const diagnosis = workflow?.kind === 'legacy-book-revision' && workflow.authorIntents.length > 0
+        ? buildLegacyRevisionDiagnosis(
+            workflow.authorIntents,
+            view,
+            result.issues.map((issue, index) => ({
+              issue,
+              ...(persistedIssues[index]?.issueId === undefined ? {} : { issueId: persistedIssues[index].issueId }),
+            })),
+            result.generatedAt,
+          )
+        : undefined;
+      const diagnosisAssetId = diagnosis === undefined || workflow === null || this.#deps.creativeAssets === undefined
+        ? undefined
+        : `${workflow.workflowId}:legacy-revision-diagnosis`;
+      if (diagnosisAssetId !== undefined && diagnosis !== undefined && workflow !== null && this.#deps.creativeAssets !== undefined) {
+        const existing = await this.#deps.creativeAssets.get(diagnosisAssetId);
+        const provenance = { runId, workflowRef, factVersion: diagnosis.factVersion, authorIntents: workflow.authorIntents };
+        const asset = existing === null
+          ? await this.#deps.creativeAssets.create({ assetId: diagnosisAssetId, projectId: workflow.projectId, kind: 'legacy-revision-diagnosis', scope: { kind: 'project', projectId: workflow.projectId }, content: diagnosis, status: 'generated', provenance }, `diagnosis:${runId}`)
+          : await this.#deps.creativeAssets.update(diagnosisAssetId, existing.version, diagnosis, 'generated', provenance, `diagnosis:${runId}`);
+        emit({ type: 'creative-asset-updated', runId, asset: asset as unknown as Record<string, unknown>, ...(workflowRef === undefined ? {} : { workflowRef }), projectId: workflow.projectId });
+      }
+      emit({ type: 'global-audit-progress', runId, phase: 'reduce', completedItems: totalItems, totalItems });
+      emit({ type: 'global-audit-progress', runId, phase: 'score', completedItems: totalItems, totalItems });
+      emit({
+        type: 'global-audit-completed', runId,
         dashboard: {
-          factVersion: result.factVersion,
-          generatedAt: result.generatedAt,
-          healthScore: result.healthScore,
-          scoreExplanation: result.scoreExplanation,
-          totalItems: result.totalItems,
-          issues: result.issues.map(toIssueDto),
+          factVersion: result.factVersion, generatedAt: result.generatedAt,
+          healthScore: result.healthScore, scoreExplanation: result.scoreExplanation,
+          totalItems: result.totalItems, issues: result.issues.map((issue, index) => toIssueDto(issue, persistedIssues[index])),
+          ...(diagnosis === undefined ? {} : { legacyDiagnosis: diagnosis }),
         },
+      });
+      await this.#recordStageRun(run, 'completed', diagnosisAssetId === undefined ? undefined : { diagnosisAssetId }, {
+        passed: result.issues.length === 0,
+        issueIds: persistedIssues.map((issue) => issue.issueId),
       });
     } catch (err) {
       const aborted = err instanceof AuditAbortedError || run.controller.signal.aborted;
-      this.#sendControl(wc, {
-        type: 'global-audit-failed',
-        runId,
+      await this.#recordStageRun(run, aborted ? 'interrupted' : 'failed', { reason: err instanceof Error ? err.message : String(err) });
+      emit({
+        type: 'global-audit-failed', runId,
         error: {
-          category: aborted ? 'aborted' : 'internal',
+          category: aborted ? 'aborted' : (this.#deps.getFactStore() === undefined ? 'io' : 'internal'),
           message: err instanceof Error ? err.message : String(err),
         },
       });
@@ -971,29 +1366,120 @@ export class OrchestrationRuntime {
    * utilityProcess，fork 不可用回退内联）计算最小差异 + hunk 拆分 → 经 refactor-diff-* 控制事件下发。
    * diff 属 CPU 密集，在 worker 算；Main 不阻塞。
    */
+  async runTargetedVerification(
+    wc: WebContents,
+    runId: RunId,
+    workflowRef: WorkflowRef & { readonly issueId: string },
+  ): Promise<void> {
+    const run = this.#startUtilityRun(wc, runId, workflowRef);
+    let advancesTargetedStage = false;
+    try {
+      await this.#assertWorkflowRef(workflowRef, undefined, true);
+      const workflow = await this.#deps.workflows?.get(workflowRef.workflowId);
+      const currentStage = workflow?.stages.find((stage) => stage.stageId === workflowRef.stageId);
+      advancesTargetedStage = currentStage?.templateStageId === 'targeted-verification';
+      if (advancesTargetedStage) await this.#recordStageRun(run, 'started');
+      const repository = this.#deps.workflowIssues;
+      if (repository === undefined) throw new Error('workflow issue repository is unavailable');
+      const issue = await repository.get(workflowRef.issueId);
+      const payload = await repository.getPayload(workflowRef.issueId);
+      if (issue === null || issue.status !== 'verifying') throw new Error('issue is not awaiting verification');
+      if (payload === null) throw new Error('issue payload is unavailable; rerun audit before verification');
+      const chapterAnchor = payload.anchors.find((anchor) => anchor.kind === 'chapter');
+      if (chapterAnchor === undefined) throw new Error('targeted verification requires a chapter anchor');
+      const chapter = await (this.#deps.manuscript?.readChapterContent ?? readChapterContent)(chapterAnchor.id);
+      const resolver = this.#deps.getModelResolver();
+      if (resolver === undefined) throw new Error('model resolver is unavailable');
+      const verificationAgent = targetedVerificationAgentFor(payload.type);
+      const adapter = resolver.createAdapter(verificationAgent, 'reasoning');
+      const result = await adapter.complete({
+        messages: [
+          { role: 'system', content: '你是针对性复检员。只判断给定问题在当前正文中是否仍存在。若已修复，严格输出 []；若仍存在或出现等价冲突，输出 ConsistencyIssue JSON 数组。不得报告无关的新问题。' },
+          { role: 'user', content: `【待复检问题】\n${JSON.stringify(payload)}\n\n【当前章节正文】\n${chapter.content}` },
+        ],
+        options: { signal: run.controller.signal, maxTokens: 2048 },
+      });
+      const findings = parseReviewerIssuesWithDiagnostics(result.text, '').issues.map((finding) => ({
+        ...finding,
+        anchors: finding.anchors.map((anchor) => anchor.kind === 'chapter' ? chapterAnchor : anchor),
+      }));
+      const passed = findings.length === 0;
+      const evidenceRefs = passed
+        ? [`checkpoint:${issue.checkpointIds.at(-1) ?? 'unknown'}`, `chapter:${chapterAnchor.id as string}`]
+        : findings.flatMap((finding) => finding.anchors.map((anchor) => `${anchor.kind}:${anchor.id as string}`));
+      const updated = await repository.recordVerificationAndTransition(
+        workflowRef.issueId, runId, passed, !passed, evidenceRefs,
+      );
+      if (advancesTargetedStage) {
+        await this.#recordStageRun(run, 'completed', undefined, {
+          passed,
+          issueIds: passed ? [] : [workflowRef.issueId],
+          ...(passed ? {} : { transition: 'quality-failed' }),
+        });
+      }
+      this.#sendControl(wc, {
+        type: 'targeted-verification-completed', runId, workflowRef, passed,
+        issue: toIssueDto(payload, updated),
+        findings: findings.map((finding) => toIssueDto(finding)),
+      });
+      if (advancesTargetedStage) {
+        const latest = await this.#deps.workflows?.get(workflowRef.workflowId);
+        if (latest !== null && latest !== undefined) {
+          this.#sendControl(wc, {
+            type: 'workflow-snapshot', runId,
+            snapshot: { ...latest, authorIntents: latest.authorIntents as import('../../shared/ipc/workflow-messages.js').AuthorIntentDto[], stages: latest.stages as unknown as ReadonlyArray<Record<string, unknown>> },
+          });
+        }
+      }
+    } catch (err) {
+      if (advancesTargetedStage) {
+        try {
+          await this.#recordStageRun(run, 'failed', { reason: err instanceof Error ? err.message : String(err) });
+        } catch {
+          // Preserve the original verification failure; stale-stage errors are already represented by the snapshot.
+        }
+      }
+      this.#sendControl(wc, {
+        type: 'targeted-verification-failed', runId, workflowRef,
+        error: {
+          category: run.controller.signal.aborted ? 'aborted' : err instanceof Error && /unavailable/.test(err.message) ? 'io' : 'validation',
+          message: err instanceof Error ? err.message : String(err),
+        },
+      });
+    } finally {
+      this.#runs.delete(runId);
+    }
+  }
+
   async computeRefactorDiff(
     wc: WebContents,
     runId: RunId,
     anchor: FragmentAnchor,
     rewrittenFragment: string,
+    workflowRef?: WorkflowRef,
   ): Promise<void> {
-    const run = this.#startUtilityRun(wc, runId);
+    const run = this.#startUtilityRun(wc, runId, workflowRef);
     try {
-      const chapter = await readChapterContent(anchor.node.id);
+      if (workflowRef !== undefined) await this.#assertWorkflowRef(workflowRef, workflowRef.issueId === undefined ? undefined : runId, true);
+      await this.#assertIssueAnchor(workflowRef, anchor.node.id as string);
+      const chapter = await (this.#deps.manuscript?.readChapterContent ?? readChapterContent)(anchor.node.id);
       const fragment = carveFragment(chapter.content, anchor);
       if (fragment === null) {
         this.#sendControl(wc, {
           type: 'refactor-diff-failed',
           runId,
+          ...(workflowRef !== undefined ? { workflowRef } : {}),
           error: { category: 'validation', message: '片段锚点越界或非法：无法裁出待修片段' },
         });
         return;
       }
       const runner = this.#deps.getDiffRunner?.() ?? new InlineDiffRunner();
       const result = await runner.run(fragment, rewrittenFragment, run.controller.signal);
+      this.#fragmentBases.set(runId, { nodeId: anchor.node.id as string, from: anchor.from, to: anchor.to, hash: createHash('sha256').update(fragment.text).digest('hex') });
       this.#sendControl(wc, {
         type: 'refactor-diff-computed',
         runId,
+        ...(workflowRef !== undefined ? { workflowRef } : {}),
         anchor: { id: anchor.node.id, kind: anchor.node.kind },
         originalFragment: fragment.text,
         rewrittenFragment: result.rewrittenFragment,
@@ -1010,6 +1496,7 @@ export class OrchestrationRuntime {
       this.#sendControl(wc, {
         type: 'refactor-diff-failed',
         runId,
+        ...(workflowRef !== undefined ? { workflowRef } : {}),
         error: {
           category: aborted ? 'aborted' : 'internal',
           message: err instanceof Error ? err.message : String(err),
@@ -1073,18 +1560,25 @@ export class OrchestrationRuntime {
     anchor: FragmentAnchor,
     rewrittenFragment: string,
     decisions: ReadonlyArray<HunkDecision>,
+    workflowRef?: WorkflowRef,
   ): Promise<void> {
     try {
-      const chapter = await readChapterContent(anchor.node.id);
+      if (workflowRef !== undefined) await this.#assertWorkflowRef(workflowRef, workflowRef.issueId === undefined ? undefined : runId, true);
+      await this.#assertIssueAnchor(workflowRef, anchor.node.id as string);
+      const chapter = await (this.#deps.manuscript?.readChapterContent ?? readChapterContent)(anchor.node.id);
       const fragment = carveFragment(chapter.content, anchor);
       if (fragment === null) {
         this.#sendControl(wc, {
           type: 'refactor-apply-failed',
           runId,
+          ...(workflowRef !== undefined ? { workflowRef } : {}),
           error: { category: 'validation', message: '片段锚点越界或非法：无法裁出待修片段' },
         });
         return;
       }
+      const base = this.#fragmentBases.get(runId);
+      const currentHash = createHash('sha256').update(fragment.text).digest('hex');
+      if (base === undefined || base.nodeId !== anchor.node.id || base.from !== anchor.from || base.to !== anchor.to || base.hash !== currentHash) throw new Error('fragment base changed or was not previewed; recompute diff');
       // 确定性重算 DiffResult（无状态：同片段+同改写恒产同 hunk 序列），hunk 均有效。
       const diff = computeDiffResult(fragment, rewrittenFragment);
       const validity: Record<string, HunkValidity> = {};
@@ -1095,6 +1589,7 @@ export class OrchestrationRuntime {
         this.#sendControl(wc, {
           type: 'refactor-apply-failed',
           runId,
+          ...(workflowRef !== undefined ? { workflowRef } : {}),
           error: {
             category: 'validation',
             message: splice.reason === 'overlapping-hunks' ? '接受的 hunk 区间重叠，无法确定性拼回' : '存在失效 hunk，需重算',
@@ -1104,11 +1599,23 @@ export class OrchestrationRuntime {
         return;
       }
 
-      const writeback = await writeBackRefactoredFragment(anchor, splice.fragmentText);
+      const acceptedHunkIds = decisions.filter((decision) => decision.decision === 'accept').map((decision) => decision.hunkId);
+      if (workflowRef?.issueId !== undefined && acceptedHunkIds.length === 0) {
+        this.#sendControl(wc, {
+          type: 'refactor-apply-failed',
+          runId,
+          workflowRef,
+          error: { category: 'validation', message: '未接受任何 hunk；问题仍处于 fixing，不能创建 checkpoint 或进入复检' },
+        });
+        return;
+      }
+
+      const writeback = await (this.#deps.manuscript?.writeBackRefactoredFragment ?? writeBackRefactoredFragment)(anchor, splice.fragmentText);
       if (!writeback.ok) {
         this.#sendControl(wc, {
           type: 'refactor-apply-failed',
           runId,
+          ...(workflowRef !== undefined ? { workflowRef } : {}),
           error: {
             category: writeback.reason === 'io-error' ? 'io' : 'validation',
             message: `正文写回失败：${writeback.reason ?? 'unknown'}`,
@@ -1116,8 +1623,6 @@ export class OrchestrationRuntime {
         });
         return;
       }
-
-      const acceptedHunkIds = decisions.filter((d) => d.decision === 'accept').map((d) => d.hunkId);
 
       // 变更作为可回滚步提交 checkpointer（与事实版本共用标识空间）。
       const checkpointer = this.#deps.getCheckpointer();
@@ -1127,10 +1632,21 @@ export class OrchestrationRuntime {
         const cp = await checkpointer.commit(`refactor:${anchor.node.id}`, state, null);
         checkpointId = cp.id as string;
       }
+      if (workflowRef?.issueId !== undefined) {
+        if (checkpointId === undefined) throw new Error('issue refactor requires a durable checkpoint');
+        if (this.#deps.workflowIssues === undefined) throw new Error('workflow issue repository is unavailable');
+        const issue = await this.#deps.workflowIssues.get(workflowRef.issueId);
+        if (issue === null || issue.workflowId !== workflowRef.workflowId) {
+          throw new Error('issue does not belong to workflow');
+        }
+        await this.#deps.workflowIssues.linkCheckpointAndMarkVerifying(workflowRef.issueId, checkpointId);
+      }
 
+      this.#fragmentBases.delete(runId);
       this.#sendControl(wc, {
         type: 'refactor-applied',
         runId,
+        ...(workflowRef !== undefined ? { workflowRef } : {}),
         nodeId: anchor.node.id,
         acceptedHunkIds,
         ...(checkpointId !== undefined ? { checkpointId } : {}),
@@ -1139,6 +1655,7 @@ export class OrchestrationRuntime {
       this.#sendControl(wc, {
         type: 'refactor-apply-failed',
         runId,
+        ...(workflowRef !== undefined ? { workflowRef } : {}),
         error: {
           category: err instanceof DiffAbortedError ? 'aborted' : 'internal',
           message: err instanceof Error ? err.message : String(err),
@@ -1165,6 +1682,54 @@ export class OrchestrationRuntime {
       agentStatus: 'idle',
       contextRefs: { facts: null, corpus: null },
     };
+  }
+
+  async #continueFactBackfill(
+    run: ActiveRun,
+    chapters: ReadonlyArray<ExtractionInput>,
+    startOffset: number,
+    resolver: ModelResolver,
+    factStore: SqliteFactStore,
+    modelTask: ModelTaskAttemptContext,
+    supplement?: string,
+  ): Promise<boolean> {
+    for (let offset = startOffset; offset < chapters.length; offset += 1) {
+      const chapter = chapters[offset];
+      if (chapter === undefined) continue;
+      const chapterId = chapter.location.id as string;
+      if (run.controller.signal.aborted) throw new Error('事实补抽已中断');
+      this.#sendControl(run.wc, {
+        type: 'fact-extraction-started',
+        runId: run.threadId,
+        chapterId,
+        textChars: chapter.text.length,
+        index: offset + 1,
+        total: chapters.length,
+      });
+      await this.#runFactExtractionPipeline(
+        run.wc,
+        run.threadId,
+        chapter,
+        resolver,
+        factStore,
+        run.controller.signal,
+        { index: offset + 1, total: chapters.length },
+        modelTask,
+        supplement,
+      );
+      const task = Array.from(this.#factTasks.values()).find((item) => item.currentAttempt.runId === run.threadId);
+      if (task !== undefined) task.currentOffset = offset;
+      const pending = this.#pendingExtractionConflicts.get(run.threadId);
+      if (pending !== undefined) {
+        this.#pendingExtractionConflicts.set(run.threadId, {
+          ...pending,
+          backfill: { chapters, nextOffset: offset + 1 },
+        });
+        await this.#recordStageRun(run, 'interrupted', { reason: '事实抽取冲突等待作者裁决' });
+        return false;
+      }
+    }
+    return true;
   }
 
   async backfillFacts(wc: WebContents, params: BackfillFactsParams): Promise<void> {
@@ -1198,39 +1763,32 @@ export class OrchestrationRuntime {
       return;
     }
 
-    const run = this.#startUtilityRun(wc, params.runId);
+    const run = this.#startUtilityRun(wc, params.runId, params.workflowRef);
+    const modelTask = this.#createFactModelTask(params.runId, params.workflowRef);
+    this.#factTasks.set(modelTask.taskId, {
+      taskId: modelTask.taskId,
+      wc,
+      kind: 'backfill',
+      inputs: params.chapters,
+      ...(params.workflowRef === undefined ? {} : { workflowRef: params.workflowRef }),
+      currentAttempt: modelTask,
+      currentOffset: 0,
+    });
     try {
-      for (const [offset, chapter] of params.chapters.entries()) {
-        const chapterId = chapter.location.id as string;
-        if (run.controller.signal.aborted) {
-          this.#sendControl(wc, {
-            type: 'fact-extraction-failed',
-            runId: params.runId,
-            chapterId,
-            error: { category: 'aborted', message: '事实补抽已中断' },
-          });
-          return;
-        }
-        this.#sendControl(wc, {
-          type: 'fact-extraction-started',
-          runId: params.runId,
-          chapterId,
-          textChars: chapter.text.length,
-          index: offset + 1,
-          total: params.chapters.length,
-        });
-        await this.#runFactExtractionPipeline(
-          wc,
-          params.runId,
-          chapter,
-          resolver,
-          factStore,
-          run.controller.signal,
-          { index: offset + 1, total: params.chapters.length },
-        );
-        if (this.#pendingExtractionConflicts.has(params.runId)) return;
+      await this.#recordStageRun(run, 'started');
+      const completed = await this.#continueFactBackfill(run, params.chapters, 0, resolver, factStore, modelTask);
+      if (completed) {
+        await this.#recordStageRun(run, 'completed');
+        this.#completeModelTask(wc, modelTask, { chapters: params.chapters.length });
       }
     } catch (err) {
+      this.#failModelTask(wc, modelTask, {
+        category: run.controller.signal.aborted ? 'aborted' : 'model',
+        message: err instanceof Error ? err.message : String(err),
+      }, firstChapterId);
+      await this.#recordStageRun(run, run.controller.signal.aborted ? 'interrupted' : 'failed', {
+        reason: err instanceof Error ? err.message : String(err),
+      });
       this.#sendControl(wc, {
         type: 'fact-extraction-failed',
         runId: params.runId,
@@ -1249,9 +1807,20 @@ export class OrchestrationRuntime {
      wc: WebContents,
      runId: RunId,
      decision: ResumeDecision,
+     workflowRef?: WorkflowRef,
    ): Promise<boolean> {
      const pending = this.#pendingExtractionConflicts.get(runId);
      if (pending === undefined) return false;
+     const run = this.#runs.get(runId);
+     if (run?.workflowRef !== undefined && workflowRef !== undefined && !sameWorkflowRef(run.workflowRef, workflowRef)) {
+       this.#sendControl(wc, {
+         type: 'fact-extraction-failed',
+         runId,
+         chapterId: pending.chapterId,
+         error: { category: 'validation', message: '恢复被拒绝：workflowRef 与运行 ownership 不匹配' },
+       });
+       return true;
+     }
      const factStore = this.#deps.getFactStore();
      if (factStore === undefined) {
        this.#sendControl(wc, {
@@ -1329,7 +1898,64 @@ export class OrchestrationRuntime {
      }
 
      this.#pendingExtractionConflicts.delete(runId);
-     this.#runs.delete(runId);
+     if (pending.backfill === undefined || run === undefined) {
+       if (pending.modelTask !== undefined) {
+         this.#sendModelTaskActivity(wc, pending.modelTask, 'completed', '冲突裁决已应用，事实任务完成', pending.chapterId, {
+           conflicts: pending.conflicts.length,
+         });
+         this.#completeModelTask(wc, pending.modelTask, { conflicts: pending.conflicts.length }, pending.chapterId);
+       }
+       this.#runs.delete(runId);
+       return true;
+     }
+
+     const resolver = this.#deps.getModelResolver();
+     if (resolver === undefined) {
+       if (pending.modelTask !== undefined) this.#failModelTask(wc, pending.modelTask, { category: 'io', message: '模型配置未就绪：无法继续事实补抽' }, pending.chapterId);
+       await this.#recordStageRun(run, 'failed', { reason: '模型配置未就绪：无法继续事实补抽' });
+       this.#runs.delete(runId);
+       this.#sendControl(wc, {
+         type: 'fact-extraction-failed',
+         runId,
+         chapterId: pending.chapterId,
+         error: { category: 'io', message: '模型配置未就绪：无法继续事实补抽' },
+       });
+       return true;
+     }
+
+     try {
+       await this.#recordStageRun(run, 'resumed');
+       const completed = await this.#continueFactBackfill(
+         run,
+         pending.backfill.chapters,
+         pending.backfill.nextOffset,
+         resolver,
+         factStore,
+         pending.modelTask ?? this.#createFactModelTask(runId, run.workflowRef),
+       );
+       if (completed) {
+         await this.#recordStageRun(run, 'completed');
+         this.#runs.delete(runId);
+       }
+     } catch (err) {
+       if (pending.modelTask !== undefined) this.#failModelTask(wc, pending.modelTask, {
+         category: run.controller.signal.aborted ? 'aborted' : 'model',
+         message: err instanceof Error ? err.message : String(err),
+       }, pending.chapterId);
+       await this.#recordStageRun(run, run.controller.signal.aborted ? 'interrupted' : 'failed', {
+         reason: err instanceof Error ? err.message : String(err),
+       });
+       this.#runs.delete(runId);
+       this.#sendControl(wc, {
+         type: 'fact-extraction-failed',
+         runId,
+         chapterId: pending.chapterId,
+         error: {
+           category: run.controller.signal.aborted ? 'aborted' : 'model',
+           message: err instanceof Error ? err.message : String(err),
+         },
+       });
+     }
      return true;
    }
 
@@ -1356,6 +1982,22 @@ export class OrchestrationRuntime {
     };
   }
 
+  async #resolveContinuationTarget(
+    continuation: WorkflowContinuation,
+    workflowRef: WorkflowRef | undefined,
+  ): Promise<string | undefined> {
+    switch (continuation.kind) {
+      case 'resume-source-node': return continuation.sourceNode;
+      case 'resume-stage':
+        return workflowRef === undefined ? undefined :
+          (await this.#deps.continuationRecords?.resolveStageTarget?.(
+            workflowRef, continuation.targetTemplateStageId,
+          )) ?? undefined;
+      case 'resume-issue-fix': return 'editor';
+      case 'resume-asset-maintenance': return 'writer';
+    }
+  }
+
   /** 驱动图运行到完成或挂起，并收敛出 stream-end / stream-error（summon 与 resume 共用）。 */
   async #drive(
     run: ActiveRun,
@@ -1373,6 +2015,7 @@ export class OrchestrationRuntime {
       });
       let latestState: unknown;
       const interrupts: Array<{ value?: unknown }> = [];
+      let interruptSource = 'awaitDecision';
 
       for await (const chunk of stream) {
         if (!Array.isArray(chunk) || chunk.length !== 2) continue;
@@ -1390,13 +2033,14 @@ export class OrchestrationRuntime {
         };
         if (typeof task.name !== 'string') continue;
         if (task.input !== undefined) {
-          this.#sendControl(wc, { type: 'graph-node-activated', runId, node: task.name, phase: 'enter' });
+          this.#sendControl(wc, this.#withWorkflow(run, { type: 'graph-node-activated', runId, node: task.name, phase: 'enter' }));
         }
         if (Array.isArray(task.interrupts)) {
+          interruptSource = task.name;
           interrupts.push(...task.interrupts as Array<{ value?: unknown }>);
         }
         if (task.result !== undefined) {
-          this.#sendControl(wc, { type: 'graph-node-activated', runId, node: task.name, phase: 'exit' });
+          this.#sendControl(wc, this.#withWorkflow(run, { type: 'graph-node-activated', runId, node: task.name, phase: 'exit' }));
         }
       }
 
@@ -1405,37 +2049,64 @@ export class OrchestrationRuntime {
         (interrupt) => (interrupt.value ?? []) as ReadonlyArray<ConsistencyIssue>,
       );
       if (pending.length > 0) {
+        // Persist before projecting events so every workflow review card carries its stable lifecycle identity.
+        const projected = isReviewAgent
+          ? await this.#projectReviewIssues(run, pending)
+          : { dtos: pending.map((issue) => toIssueDto(issue)), issueIds: [] };
         // 挂起等待作者裁决：dialogue 轴结束一段，待裁决问题经 control-event 推强类型报告。
-        this.#send(wc, { type: 'stream-end', runId, kind: 'dialogue', reason: 'completed' });
+        this.#send(wc, this.#withWorkflow(run, { type: 'stream-end', runId, kind: 'dialogue', reason: 'completed' }));
+        await this.#recordStageRun(run, 'interrupted', { sourceNode: interruptSource });
         if (isReviewAgent) {
-          this.#sendControl(wc, {
+          this.#sendControl(wc, this.#withWorkflow(run, {
             type: 'review-completed',
             runId,
             agent: run.assembly.agent,
-            issues: pending.map(toIssueDto),
+            issues: projected.dtos,
+          }));
+        }
+        if (run.workflowRef !== undefined && this.#deps.continuationRecords !== undefined) {
+          await this.#deps.continuationRecords.save({
+            interruptId: randomUUID(), scope: continuationScope(runId, run.workflowRef),
+            sourceNode: interruptSource,
+            continuation: run.workflowRef.issueId === undefined
+              ? { kind: 'resume-source-node', sourceNode: run.assembly.agent }
+              : { kind: 'resume-issue-fix', issueId: run.workflowRef.issueId },
+            allowedDecisionKinds: ['approve', 'reject', 'correct', 'modify'],
+            createdAt: new Date().toISOString(),
           });
         }
-        this.#sendControl(wc, { type: 'interrupt-raised', runId, issues: pending.map(toIssueDto) });
+        this.#sendControl(wc, this.#withWorkflow(run, { type: 'interrupt-raised', runId, issues: projected.dtos }));
         return;
       }
-      this.#send(wc, { type: 'stream-end', runId, kind: 'dialogue', reason: 'completed' });
+      this.#send(wc, this.#withWorkflow(run, { type: 'stream-end', runId, kind: 'dialogue', reason: 'completed' }));
+      const bugs = (latestState as { activeBugs?: ReadonlyArray<ConsistencyIssue> } | undefined)?.activeBugs ?? [];
+      const projected = isReviewAgent
+        ? await this.#projectReviewIssues(run, bugs)
+        : { dtos: bugs.map((issue) => toIssueDto(issue)), issueIds: [] };
+      await this.#recordStageRun(
+        run,
+        'completed',
+        undefined,
+        isReviewAgent ? { passed: bugs.length === 0, issueIds: projected.issueIds } : undefined,
+      );
       // 审校类运行正常完成：若产出非空 activeBugs，经 control-event 下发结构化卡片清单。
       if (isReviewAgent) {
-        const bugs = (latestState as { activeBugs?: ReadonlyArray<ConsistencyIssue> } | undefined)?.activeBugs ?? [];
         if (bugs.length > 0) {
-          this.#sendControl(wc, {
+          this.#sendControl(wc, this.#withWorkflow(run, {
             type: 'review-completed',
             runId,
             agent: run.assembly.agent,
-            issues: bugs.map(toIssueDto),
-          });
+            issues: projected.dtos,
+          }));
         }
       }
       this.#runs.delete(runId);
     } catch (err) {
       if (run.controller.signal.aborted) {
-        this.#send(wc, { type: 'stream-end', runId, kind: 'dialogue', reason: 'aborted' });
+        this.#send(wc, this.#withWorkflow(run, { type: 'stream-end', runId, kind: 'dialogue', reason: 'aborted' }));
+        await this.#recordStageRun(run, 'interrupted', { reason: 'aborted' });
       } else {
+        await this.#recordStageRun(run, 'failed', { reason: err instanceof Error ? err.message : String(err) });
         this.#send(wc, {
           type: 'stream-error',
           runId,
@@ -1454,6 +2125,17 @@ export class OrchestrationRuntime {
  * 不深入校验 modify.issues 内元（由图节点 validateConsistencyIssues 收窄）与 correct.optionId 取值
  *（由 resume 分支自行处理未知 optionId），仅保证 kind 合法且必需字段类型正确。
  */
+function sameWorkflowRef(left: WorkflowRef, right: WorkflowRef): boolean {
+  return left.workflowId === right.workflowId && left.stageId === right.stageId && left.issueId === right.issueId;
+}
+
+function continuationScope(runId: RunId, workflowRef: WorkflowRef | undefined): ContinuationScope {
+  if (workflowRef === undefined) return { kind: 'standalone', runId };
+  return workflowRef.issueId === undefined
+    ? { kind: 'workflow', workflowRef, runId }
+    : { kind: 'issue', workflowRef, issueId: workflowRef.issueId, runId };
+}
+
 function isValidResumeDecision(decision: ResumeDecision): boolean {
   if (typeof decision !== 'object' || decision === null) return false;
   switch ((decision as { kind?: unknown }).kind) {
@@ -1473,13 +2155,20 @@ function isValidResumeDecision(decision: ResumeDecision): boolean {
  * 把 core `ConsistencyIssue` 投影为可序列化 DTO（NodeRef.id 去 brand 为 string）。
  * shared/ 不依赖 core/，故跨 IPC 只传结构同构的普通对象。
  */
-function toIssueDto(issue: ConsistencyIssue): ConsistencyIssueDto {
+function toIssueDto(issue: ConsistencyIssue, workflowIssue?: WorkflowIssueRecord): ConsistencyIssueDto {
   return {
     type: issue.type,
     severity: issue.severity,
     anchors: issue.anchors.map((a) => ({ id: a.id as string, kind: a.kind })),
     description: issue.description,
     requiresHumanDecision: issue.requiresHumanDecision,
+    ...(workflowIssue === undefined ? {} : {
+      issueId: workflowIssue.issueId,
+      workflowStatus: workflowIssue.status,
+      checkpointIds: workflowIssue.checkpointIds,
+      verificationRunIds: workflowIssue.verificationRunIds,
+      ...(workflowIssue.resolutionReason === undefined ? {} : { resolutionReason: workflowIssue.resolutionReason }),
+    }),
     ...(issue.suggestedFix !== undefined ? { suggestedFix: issue.suggestedFix } : {}),
     ...(issue.evidence !== undefined ? { evidence: issue.evidence } : {}),
     ...(issue.options !== undefined

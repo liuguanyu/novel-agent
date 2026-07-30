@@ -12,7 +12,7 @@
 #### Scenario: 策划补充写入目标资产且不自动进入审校
 - **WHEN** 人物设计阶段中作者继续向人物设计师补充意见
 - **THEN** 新运行 MUST 继续归属人物设计阶段并生成目标 character asset 的候选变更
-- **AND** 作者确认后 MUST 写入人物资产新版本及适用的 Story Bible 约束事实
+- **AND** 作者确认 change-set candidate 后 MUST 写入人物资产新版本及适用的 Story Bible 约束事实
 - **AND** 工作流 MUST NOT 自动进入正文审校阶段
 - **AND** 只有作者确认人物设计产物后才能推进
 
@@ -33,18 +33,19 @@
 
 ### Requirement: 新书模板按章节形成受控循环
 
-新书模板 MUST 对每个章节依次执行章节规划、分场大纲、正文写作、事实抽取、自动审校、人工修改/验收与章节定稿。章节定稿后 MUST 由作者决定创建下一章循环或结束章节创作并进入全书总检；章节 scope MUST 使用稳定 `chapterId`。
+新书模板 MUST 对每个章节依次执行章节规划、分场大纲、正文写作、事实抽取、自动审校、人工修改/验收（含 WorkflowIssueRecord、diff/hunk、checkpoint、verifying 与复检回环）与章节定稿。章节定稿后 MUST 由作者决定创建下一章循环或结束章节创作并进入全书总检；章节 scope MUST 使用稳定 `chapterId`。
 
 #### Scenario: 审校无问题进入章节验收
 - **WHEN** 本章事实抽取成功且自动审校未产生阻塞问题
 - **THEN** 工作流 MAY 自动完成自动步骤并进入作者验收/定稿门
 - **AND** MUST NOT 在作者确认前把章节标记为定稿
 
-#### Scenario: 审校有问题回到修改
+#### Scenario: 审校问题经证据链修复并复检回环
 - **WHEN** 自动审校产生需要修改或裁决的问题
-- **THEN** 当前章节 MUST 进入人工修改/验收阶段
-- **AND** 修改完成后 MUST 回到针对本章的审校/验证
-- **AND** 问题未消除时 MUST NOT 定稿
+- **THEN** Main MUST 为每个纳入修复的问题建立稳定的 `WorkflowIssueRecord`，关联本章 scope、来源审校 run 与正文锚点，并将当前章节置于人工修改/验收阶段
+- **AND** 正文修改 MUST 经可审阅 diff、逐 hunk 裁决和成功落盘 checkpoint，随后问题 MUST 转为 verifying，MUST NOT 因 diff 生成或落盘直接 resolved
+- **AND** 针对性复检失败时问题 MUST 返回 fixing 并重新进入 diff/hunk/checkpoint/verification 回环，同时保留此前修订证据
+- **AND** 任何未 resolved 或未由作者带理由 dismissed 的问题存在时，本章 MUST NOT 定稿
 
 #### Scenario: 下一章创建新范围
 - **WHEN** 作者在章节定稿后选择继续下一章

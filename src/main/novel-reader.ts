@@ -9,6 +9,7 @@
  * 正文仍是磁盘 Markdown 文件，MUST NOT 存入 SQLite（project-storage 契约）。
  */
 
+import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import type { ChapterTreeDto, ChapterContentDto } from '../shared/ipc/index.js';
@@ -21,6 +22,20 @@ import {
 
 /** 默认工作区根目录（项目根内示例小说，相对 cwd）。 */
 export const DEFAULT_NOVEL_DIR = resolve(process.cwd(), '津门余味');
+
+/** 供 workflow 持久化使用的稳定项目身份；不把本机路径暴露给 Renderer。 */
+export interface WorkspaceProjectContext {
+  readonly projectId: string;
+  readonly title: string;
+}
+
+export async function readWorkspaceProjectContext(
+  rootDir: string = DEFAULT_NOVEL_DIR,
+): Promise<WorkspaceProjectContext> {
+  const handle = await getWorkspace(rootDir);
+  const projectId = `project:${createHash('sha256').update(resolve(rootDir)).digest('hex').slice(0, 32)}`;
+  return { projectId, title: handle.metadata.title };
+}
 
 /** 进程内工作区句柄缓存（避免每次查询都重扫盘）。key=rootDir。 */
 const handleCache = new Map<string, WorkspaceHandle>();

@@ -13,6 +13,7 @@
  */
 
 import { ipcMain, type IpcMainInvokeEvent } from 'electron';
+import { z } from 'zod';
 import {
   IPC_CHANNELS,
   QUERY_CHANNELS,
@@ -24,8 +25,9 @@ import {
   type CheckpointHistoryDto,
   type StoryBibleDto,
   type ArchitectBoardDto,
+  WORKFLOW_QUERY_CHANNELS, WORKFLOW_COMMAND_CHANNEL, type WorkflowCommand,
 } from '../shared/ipc/index.js';
-import { readChapterTree, readChapterContent, readManifestChapterIds } from './novel-reader.js';
+import { readChapterTree, readChapterContent, readManifestChapterIds, readWorkspaceProjectContext } from './novel-reader.js';
 import { asNodeId } from '../core/manuscript/index.js';
 import {
   asCorpusItemType,
@@ -37,6 +39,7 @@ import {
 } from '../core/corpus/index.js';
 import { emptyStoryBibleDto, projectStoryBible, emptyArchitectBoardDto, projectArchitectBoard } from './story-bible-dto.js';
 import { loadModelsConfig, ModelResolver } from './model-resolver.js';
+import type { WorkflowApplicationService } from './workflow-application-service.js';
 import {
   OrchestrationRuntime,
   type BackfillFactsParams,
@@ -44,14 +47,63 @@ import {
   type RestartParams,
 } from './orchestration/runtime.js';
 
+const idSchema = z.string().trim().min(1).max(256);
+const workflowRefSchema = z.object({ workflowId: idSchema, stageId: idSchema, issueId: idSchema.optional() }).strict();
+const metaShape = { requestId: idSchema.optional(), operationId: idSchema.optional(), expectedVersion: z.number().int().nonnegative().optional(), workflowRef: workflowRefSchema.optional() };
+const workflowSnapshotQuerySchema = z.object({ ...metaShape, workflowId: idSchema.optional(), projectId: idSchema }).strict();
+const assetQuerySchema = z.object({ assetId: idSchema, projectId: idSchema }).strict();
+const authorIntentSchema = z.object({ kind: z.enum(['preserve', 'extract', 'remove']), text: z.string().trim().min(1).max(2_000) }).strict();
+const startWorkflowSchema = z.object({ ...metaShape, requestId: idSchema, operationId: idSchema, type: z.literal('start-workflow'), projectId: idSchema, workflowId: idSchema.optional(), kind: z.enum(['new-book-creation', 'legacy-book-revision']).optional(), objective: z.string().trim().min(1).max(10_000), authorIntents: z.array(authorIntentSchema).max(100).optional() }).strict();
+const workflowActionSchema = z.object({
+  ...metaShape, requestId: idSchema, operationId: idSchema, expectedVersion: z.number().int().nonnegative(), type: z.enum([
+    'workflow-start-stage', 'workflow-confirm-stage', 'workflow-retry-stage', 'workflow-skip-stage',
+    'workflow-pause', 'workflow-resume', 'workflow-cancel', 'workflow-update-goal', 'workflow-update-author-intents', 'workflow-select-issue', 'workflow-dismiss-issue',
+    'workflow-verify-issue', 'workflow-change-asset', 'workflow-confirm-asset-change', 'workflow-reject-asset-change',
+    'workflow-resolve-asset-impact',
+  ]), workflowId: idSchema, stageId: idSchema.optional(), issueId: idSchema.optional(), assetId: idSchema.optional(),
+  impactId: idSchema.optional(), runId: idSchema.optional(), reason: z.string().max(10_000).optional(), result: z.string().max(256).optional(),
+  content: z.unknown().optional(), provenance: z.unknown().optional(), objective: z.string().trim().min(1).max(10_000).optional(), authorIntents: z.array(authorIntentSchema).max(100).optional(),
+}).strict();
+const workflowCommandSchema = z.union([startWorkflowSchema, workflowActionSchema]);
+
 /**
  * 注册所有 IPC handlers。启动时调用一次。
  * @param runtime 长驻编排运行时（持有单一有状态图 + checkpointer 接线）。
  */
-export function registerIpcHandlers(runtime: OrchestrationRuntime): void {
+export function registerIpcHandlers(runtime: OrchestrationRuntime, workflowService?: WorkflowApplicationService): void {
+  if (workflowService !== undefined) {
+    ipcMain.handle(WORKFLOW_QUERY_CHANNELS.snapshot, async (_e, raw: unknown) => ({ snapshot: await workflowService.get(workflowSnapshotQuerySchema.parse(raw) as unknown as Parameters<WorkflowApplicationService['get']>[0]) }));
+    ipcMain.handle(WORKFLOW_QUERY_CHANNELS.active, async (_e, raw: unknown) => ({ snapshot: await workflowService.active(idSchema.parse(raw)) }));
+    ipcMain.handle(WORKFLOW_QUERY_CHANNELS.asset, async (_e, raw: unknown) => ({ asset: await workflowService.asset(assetQuerySchema.parse(raw)) }));
+    ipcMain.handle(WORKFLOW_COMMAND_CHANNEL, async (event, raw: unknown) => {
+      const command = workflowCommandSchema.parse(raw) as WorkflowCommand;
+      const runId = command.type === 'start-workflow' ? command.operationId : (command.runId ?? command.operationId);
+      try {
+        const snapshot = await workflowService.command(command);
+        if (snapshot !== null) event.sender.send(IPC_CHANNELS.controlEvent, { type: 'workflow-snapshot', runId, requestId: command.requestId, operationId: command.operationId, snapshot });
+        for (const assetEvent of workflowService.drainAssetEvents()) event.sender.send(IPC_CHANNELS.controlEvent, assetEvent);
+        return { snapshot };
+      } catch (error: unknown) {
+        const latest = command.type === 'start-workflow'
+          ? null
+          : await workflowService.latest(command.workflowId);
+        const failure = {
+          type: 'workflow-failure' as const,
+          runId,
+          requestId: command.requestId,
+          operationId: command.operationId,
+          error: { code: 'workflow-command-failed', message: error instanceof Error ? error.message : String(error) },
+          ...(latest !== null ? { snapshot: latest } : {}),
+        };
+        event.sender.send(IPC_CHANNELS.controlEvent, failure);
+        return { snapshot: latest, failure };
+      }
+    });
+  }
   ipcMain.handle(QUERY_CHANNELS.getChapterTree, async (): Promise<ChapterTreeDto> => {
     return readChapterTree();
   });
+  ipcMain.handle(QUERY_CHANNELS.getWorkspaceProject, async () => readWorkspaceProjectContext());
 
   ipcMain.handle(
     QUERY_CHANNELS.getChapterContent,
@@ -112,6 +164,7 @@ export function registerIpcHandlers(runtime: OrchestrationRuntime): void {
           ...(message.keywords !== undefined ? { keywords: message.keywords } : {}),
           ...(message.instruction !== undefined ? { instruction: message.instruction } : {}),
           ...(message.autoExtractFacts !== undefined ? { autoExtractFacts: message.autoExtractFacts } : {}),
+          ...(message.workflowRef !== undefined ? { workflowRef: message.workflowRef } : {}),
         };
         void runtime.summon(wc, params);
         return;
@@ -125,8 +178,20 @@ export function registerIpcHandlers(runtime: OrchestrationRuntime): void {
         runtime.abort(message.runId);
         return;
       }
+      case 'abort-model-task': {
+        runtime.abortModelTask(message.taskId, message.attemptId, message.runId);
+        return;
+      }
+      case 'retry-model-task': {
+        void runtime.retryModelTask(message.taskId, message.attemptId, wc);
+        return;
+      }
+      case 'workflow-supplement-model-task': {
+        void runtime.supplementModelTask(message.taskId, message.attemptId, message.supplement, wc);
+        return;
+      }
       case 'resume-run': {
-        void runtime.resume(wc, message.runId, message.decision);
+        void runtime.resume(wc, message.runId, message.decision, message.workflowRef);
         return;
       }
       case 'restart-from-checkpoint': {
@@ -159,12 +224,20 @@ export function registerIpcHandlers(runtime: OrchestrationRuntime): void {
             };
           }),
         );
-        const params: BackfillFactsParams = { runId: message.runId, chapters };
+        const params: BackfillFactsParams = {
+          runId: message.runId,
+          chapters,
+          ...(message.workflowRef === undefined ? {} : { workflowRef: message.workflowRef }),
+        };
         void runtime.backfillFacts(wc, params);
         return;
       }
       case 'run-global-audit': {
-        void runtime.runGlobalAudit(wc, message.runId);
+        void runtime.runGlobalAudit(wc, message.runId, message.workflowRef);
+        return;
+      }
+      case 'run-targeted-verification': {
+        void runtime.runTargetedVerification(wc, message.runId, message.workflowRef);
         return;
       }
       case 'retrieve-corpus': {
@@ -206,6 +279,7 @@ export function registerIpcHandlers(runtime: OrchestrationRuntime): void {
             to: message.anchor.to,
           },
           message.rewrittenFragment,
+          message.workflowRef,
         );
         return;
       }
@@ -220,6 +294,7 @@ export function registerIpcHandlers(runtime: OrchestrationRuntime): void {
           },
           message.rewrittenFragment,
           message.decisions.map((d) => ({ hunkId: d.hunkId, decision: d.decision })),
+          message.workflowRef,
         );
         return;
       }

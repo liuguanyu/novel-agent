@@ -43,7 +43,7 @@ export interface UseFactExtractionResult {
   readonly state: FactExtractionState;
   readonly busy: boolean;
   extractCurrentChapter(nodeId: string): RunId;
-  backfillAll(): RunId;
+  backfillAll(workflowRef?: import('../../shared/ipc/index.js').WorkflowRefDto): RunId;
   abort(): void;
   resolveConflict(optionId: string): void;
   rejectConflict(): void;
@@ -131,10 +131,10 @@ export function useFactExtraction(): UseFactExtractionResult {
     return runId;
   }, [send]);
 
-  const backfillAll = useCallback((): RunId => {
+  const backfillAll = useCallback((workflowRef?: import('../../shared/ipc/index.js').WorkflowRefDto): RunId => {
     const runId = newRunId();
     setState({ ...INITIAL_STATE, runId, mode: 'backfill', status: 'running' });
-    send({ type: 'backfill-facts', runId });
+    send({ type: 'backfill-facts', runId, ...(workflowRef === undefined ? {} : { workflowRef }) });
     return runId;
   }, [send]);
 
@@ -152,7 +152,7 @@ export function useFactExtraction(): UseFactExtractionResult {
   const rejectConflict = useCallback((): void => {
     if (state.runId === undefined) return;
     send({ type: 'resume-run', runId: state.runId, decision: { kind: 'reject' } });
-    setState((prev) => ({ ...prev, status: 'aborted', issues: [] }));
+    setState((prev) => ({ ...prev, status: 'running', issues: [] }));
   }, [send, state.runId]);
 
   const clear = useCallback((): void => {

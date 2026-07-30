@@ -19,7 +19,7 @@ import {
 } from './extraction/index.js';
 import { openDatabase, SqliteFactStore } from './db/index.js';
 import { retrieveFacts } from './retrieval/fact-retrieval.js';
-import { asFactVersionId, type FactView } from '../core/story-bible/index.js';
+import { asEntityId, asFactVersionId, type FactView } from '../core/story-bible/index.js';
 import type { CapabilityTier, ModelAdapter } from '../core/model/index.js';
 import { asNodeId } from '../core/manuscript/index.js';
 
@@ -339,6 +339,39 @@ async function smokeIngestWriter(): Promise<void> {
       timelineHits.timelineEvents.some((event) => event.description.includes('当铺')),
       `events=${timelineHits.timelineEvents.length}`,
     );
+    const normalizedRelation = normalized.facts.find((fact) => fact.kind === 'relation');
+    check(
+      'writer：同批新增实体的 relation 可安全入库',
+      normalizedRelation !== undefined &&
+        firstPlan.autoIngest.some((item) => item.fact === normalizedRelation) &&
+        firstView.relations.some((relation) => relation.id === normalizedRelation.relation.id),
+      `relations=${firstView.relations.length}`,
+    );
+
+    if (normalizedRelation !== undefined) {
+      const danglingRelation = {
+        ...normalizedRelation,
+        relation: {
+          ...normalizedRelation.relation,
+          id: `${normalizedRelation.relation.id}-dangling` as typeof normalizedRelation.relation.id,
+          to: asEntityId('missing-entity'),
+        },
+      };
+      const danglingPlan = buildIngestPlan([danglingRelation], firstView);
+      const danglingApply = await applyIngestPlan(store, danglingPlan, firstView);
+      const danglingView = await store.getView(danglingApply.version);
+      check(
+        'writer：悬空 relation 被诊断性跳过且不触发外键失败',
+        danglingPlan.autoIngest.length === 0 &&
+          danglingPlan.skipped.some((item) =>
+            item.reason.includes('关系端点实体不存在'),
+          ) &&
+          danglingView.relations.length === firstView.relations.length,
+        `auto=${danglingPlan.autoIngest.length} skipped=${danglingPlan.skipped.length}`,
+      );
+    } else {
+      check('writer：构造悬空 relation fixture', false, '缺 relation 候选');
+    }
 
     const secondPlan = buildIngestPlan(normalized.facts, firstView, normalized.skipped);
     const secondApply = await applyIngestPlan(store, secondPlan, firstView);

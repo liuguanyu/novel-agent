@@ -12,3 +12,8 @@ export type { Migration } from './migrations.js';
 export { SqliteCheckpointer } from './checkpoint-store.js';
 export { SqliteFactStore } from './fact-store.js';
 export type { AppendVersionOptions } from './fact-store.js';
+export { WorkflowRepository, OptimisticVersionConflictError } from './workflow-repository.js';
+export type { WorkflowRecord, WorkflowStageRecord, CreateWorkflowInput } from './workflow-repository.js';
+export { CreativeAssetRepository, WorkflowIssueRepository } from './creative-asset-repository.js';
+export type { CreativeAssetRecord, CreativeAssetCandidate, CreativeAssetDependencyInput, CreativeAssetImpactRecord, ConfirmCandidateResult, AuditIssueInput } from './creative-asset-repository.js';
+export { SqliteStageRunEvidenceRecorder, SqliteContinuationRecordService, assertWorkflowRefOwnership } from './workflow-runtime-persistence.js';

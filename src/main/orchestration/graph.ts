@@ -154,6 +154,8 @@ export interface GraphRunDeps {
    * 中途 abort 时节点在此调用前已抛错，故不会落里程碑（干净态保证）。
    */
   readonly recordMilestone: (atNode: string, state: NovelState) => Promise<void>;
+  /** Workflow-aware resume route; absent preserves standalone writer behavior. */
+  readonly continuationTarget?: () => string | undefined;
 }
 
 /** configurable 载荷：thread_id（LangGraph 运行态 checkpoint 键）+ 本运行依赖。 */
@@ -788,7 +790,7 @@ function routeAfterReview(state: GraphState): 'awaitDecision' | 'writer' | typeo
  *  - modify           → 覆写 activeBugs 为作者修订列表后回 writer 再写（不重跑 reviewer）。
  * interrupt 之前无昂贵调用，故 resume 只重跑本便宜节点，满足「不重跑已完成节点」。
  */
-function awaitDecisionNode(state: GraphState): Command {
+function awaitDecisionNode(state: GraphState, config: GraphConfig): Command {
   const pending: ReadonlyArray<ConsistencyIssue> = state.activeBugs.filter(
     (b) => b.requiresHumanDecision,
   );
@@ -801,14 +803,14 @@ function awaitDecisionNode(state: GraphState): Command {
       return new Command({ goto: END, update: { agentStatus: 'idle', currentAction: 'idle' } });
     case 'correct':
       return new Command({
-        goto: 'writer',
+        goto: depsFrom(config).continuationTarget?.() ?? 'writer',
         update: { activeBugs: [], agentStatus: 'idle', currentAction: 'write' },
       });
     case 'modify': {
       const validated = validateConsistencyIssues(decision.issues);
       const nextBugs: ReadonlyArray<ConsistencyIssue> = validated.ok ? validated.data : pending;
       return new Command({
-        goto: 'writer',
+        goto: depsFrom(config).continuationTarget?.() ?? 'writer',
         update: { activeBugs: nextBugs, agentStatus: 'idle', currentAction: 'write' },
       });
     }
@@ -833,7 +835,7 @@ function buildCompiledGraph() {
     .addNode('concept-generator', conceptGeneratorNode)
     .addNode('scene-outliner', sceneOutlinerNode)
     .addNode('researcher', researcherNode)
-    .addNode('awaitDecision', awaitDecisionNode, { ends: ['writer', END] })
+    .addNode('awaitDecision', awaitDecisionNode, { ends: ['writer', 'reviewer', 'fact-checker', 'scene-generator', 'plagiarism-checker', 'editor', 'style-editor', 'architect', 'character-generator', 'worldbuilding', 'concept-generator', 'scene-outliner', 'researcher', END] })
     .addEdge(START, 'supervisor')
     .addEdge('writer', 'reviewer')
     .addEdge('scene-generator', 'reviewer')

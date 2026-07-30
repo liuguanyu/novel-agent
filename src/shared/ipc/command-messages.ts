@@ -8,6 +8,8 @@
  */
 
 import type { RunId } from './stream-messages.js';
+import type { WorkflowRefDto } from './workflow-messages.js';
+import type { ModelTaskSupplementDto } from './model-task-messages.js';
 
 /** 发起一次运行（具体动作载荷由 agent-orchestration 定义，这里仅占位判别字段） */
 export interface StartRunCommand {
@@ -48,6 +50,8 @@ export interface SummonRunCommand {
   instruction?: string;
   /** 可选：writer 产出新草稿后自动抽取低风险事实；冲突仍走手刹。 */
   autoExtractFacts?: boolean;
+  /** Optional ownership by a long-running workflow stage. */
+  workflowRef?: WorkflowRefDto;
 }
 
 /** 取章节树（walking-skeleton：同步查询，Main 读盘后经当前通道回结果） */
@@ -92,6 +96,8 @@ export interface ResumeRunCommand {
   runId: RunId;
   /** 作者决策（强类型判别联合）。 */
   decision: ResumeDecision;
+  /** Must exactly match the persisted interrupt ownership when present. */
+  workflowRef?: WorkflowRefDto;
 }
 
 /**
@@ -108,6 +114,28 @@ export interface RestartFromCheckpointCommand {
 }
 
 /** 显式为某章节抽取 Story Bible 候选事实（Main 侧读正文、调 LLM、写事实库）。 */
+export interface SupplementModelTaskCommand {
+  type: 'workflow-supplement-model-task';
+  runId: RunId;
+  taskId: string;
+  attemptId: string;
+  supplement: ModelTaskSupplementDto;
+}
+
+export interface RetryModelTaskCommand {
+  type: 'retry-model-task';
+  runId: RunId;
+  taskId: string;
+  attemptId: string;
+}
+
+export interface AbortModelTaskCommand {
+  type: 'abort-model-task';
+  runId: RunId;
+  taskId: string;
+  attemptId: string;
+}
+
 export interface ExtractFactsCommand {
   type: 'extract-facts';
   runId: RunId;
@@ -121,12 +149,21 @@ export interface BackfillFactsCommand {
   runId: RunId;
   /** 章节节点 id 列表；为空时 Main 侧按当前 manifest 的全部 chapter 顺序补抽。 */
   nodeIds?: ReadonlyArray<string>;
+  workflowRef?: WorkflowRefDto;
 }
 
 /** 基于当前 Story Bible 事实视图运行一次只读全书总检。 */
 export interface RunGlobalAuditCommand {
   type: 'run-global-audit';
   runId: RunId;
+  workflowRef?: WorkflowRefDto;
+}
+
+/** Main reads the issue anchors and current manuscript, then runs a targeted reviewer. */
+export interface RunTargetedVerificationCommand {
+  type: 'run-targeted-verification';
+  runId: RunId;
+  workflowRef: WorkflowRefDto & { issueId: string };
 }
 
 /** Story Bible 事实定位器：Renderer 只能提交受限目标，Main 侧验证后写库。 */
@@ -212,6 +249,7 @@ export interface ComputeRefactorDiffCommand {
   anchor: FragmentAnchorDto;
   /** 重构 agent 产出的改写片段全文 */
   rewrittenFragment: string;
+  workflowRef?: WorkflowRefDto;
 }
 
 /** 作者对单个 hunk 的裁决意图（accept/reject）。 */
@@ -234,6 +272,7 @@ export interface ApplyHunkDecisionsCommand {
   rewrittenFragment: string;
   /** 逐 hunk 裁决 */
   decisions: ReadonlyArray<HunkDecisionDto>;
+  workflowRef?: WorkflowRefDto;
 }
 
 /**
@@ -249,8 +288,12 @@ export type FrontendCommandMessage =
   | ResumeRunCommand
   | RestartFromCheckpointCommand
   | ExtractFactsCommand
+  | SupplementModelTaskCommand
+  | RetryModelTaskCommand
+  | AbortModelTaskCommand
   | BackfillFactsCommand
   | RunGlobalAuditCommand
+  | RunTargetedVerificationCommand
   | ConfirmStoryBibleFactCommand
   | EditStoryBibleFactCommand
   | DeleteStoryBibleFactCommand

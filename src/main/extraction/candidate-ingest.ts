@@ -234,10 +234,16 @@ function planOne(
       return timelineHas(view, fact.event)
         ? { fact, reason: '时间线事件已存在，幂等跳过' }
         : { operation: 'add', fact, reason: '新增时间线事件' };
-    case 'relation':
-      return relationHas(view, fact.relation)
-        ? { fact, reason: '关系已存在，幂等跳过' }
-        : { operation: 'add', fact, reason: '新增实体关系' };
+    case 'relation': {
+      if (relationHas(view, fact.relation)) return { fact, reason: '关系已存在，幂等跳过' };
+      const fromExists = targetView.entities.some((entity) => entity.id === fact.relation.from);
+      const toExists = targetView.entities.some((entity) => entity.id === fact.relation.to);
+      if (!fromExists || !toExists) {
+        const missing = [!fromExists ? fact.relation.from : undefined, !toExists ? fact.relation.to : undefined].filter((id): id is NonNullable<typeof id> => id !== undefined);
+        return { fact, reason: `关系端点实体不存在，跳过 relation：${missing.join('、')}` };
+      }
+      return { operation: 'add', fact, reason: '新增实体关系' };
+    }
     case 'plot-hook':
       return plotHookHas(view, fact.hook)
         ? { fact, reason: '伏笔已存在，幂等跳过' }

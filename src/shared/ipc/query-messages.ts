@@ -12,6 +12,8 @@
 export const QUERY_CHANNELS = {
   /** 取章节树 */
   getChapterTree: 'query:get-chapter-tree',
+  /** 取当前工作区项目身份（供 workflow 归属，不暴露本地路径） */
+  getWorkspaceProject: 'query:get-workspace-project',
   /** 取某节点正文 */
   getChapterContent: 'query:get-chapter-content',
   /** 取 checkpoint 历史链（time-travel task 5.1） */
@@ -23,6 +25,11 @@ export const QUERY_CHANNELS = {
 } as const;
 
 export type QueryChannel = (typeof QUERY_CHANNELS)[keyof typeof QUERY_CHANNELS];
+
+export interface WorkspaceProjectContextDto {
+  readonly projectId: string;
+  readonly title: string;
+}
 
 /** 节点层级（与 core manuscript NodeKind 同值，此处独立声明以守叶子约束）。 */
 export type NodeKindDto = 'volume' | 'chapter' | 'scene';

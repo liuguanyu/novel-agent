@@ -18,6 +18,9 @@ import type {
   StoryBibleFactLocatorDto,
 } from './command-messages.js';
 import type { RunId } from './stream-messages.js';
+import type { AuthorIntentDto, WorkflowRefDto, WorkflowSnapshotEvent, WorkflowFailureEvent } from './workflow-messages.js';
+
+
 
 /** 锚点投影（对应 core NodeRef，id 去 brand 为 string）。 */
 export interface IssueAnchorDto {
@@ -57,8 +60,16 @@ export interface ConsistencyIssueDto {
   anchors: ReadonlyArray<IssueAnchorDto>;
   /** 问题描述 */
   description: string;
-  /** 建议修复（可空） */
+  /** 只读修改建议（可空），不是可直接落盘的正文。 */
   suggestedFix?: string;
+  /** 作者独立录入的改写要求；旧事件可省略，且不得回写为 suggestedFix。 */
+  authorRewrittenInstruction?: string;
+  /** 工作流问题生命周期投影；standalone/旧事件均可省略。 */
+  issueId?: string;
+  workflowStatus?: 'open' | 'fixing' | 'verifying' | 'resolved' | 'dismissed';
+  checkpointIds?: ReadonlyArray<string>;
+  verificationRunIds?: ReadonlyArray<string>;
+  resolutionReason?: string;
   /** 原文证据片段（可空；用于 UI 展示与后续 editor 定位） */
   evidence?: IssueEvidenceDto;
   /** 是否需人工决策 */
@@ -76,6 +87,7 @@ export interface InterruptRaisedEvent {
   runId: RunId;
   /** 待裁决问题列表（强类型投影，禁 any 穿透） */
   issues: ReadonlyArray<ConsistencyIssueDto>;
+  workflowRef?: WorkflowRefDto;
 }
 
 /**
@@ -91,6 +103,23 @@ export interface ReviewCompletedEvent {
   agent: string;
   /** 强类型问题清单投影（禁 any 穿透）。 */
   issues: ReadonlyArray<ConsistencyIssueDto>;
+  workflowRef?: WorkflowRefDto;
+}
+
+export interface TargetedVerificationCompletedEvent {
+  type: 'targeted-verification-completed';
+  runId: RunId;
+  workflowRef: WorkflowRefDto & { issueId: string };
+  passed: boolean;
+  issue: ConsistencyIssueDto;
+  findings: ReadonlyArray<ConsistencyIssueDto>;
+}
+
+export interface TargetedVerificationFailedEvent {
+  type: 'targeted-verification-failed';
+  runId: RunId;
+  workflowRef: WorkflowRefDto & { issueId: string };
+  error: { category: 'validation' | 'aborted' | 'io' | 'model' | 'internal'; message: string };
 }
 
 /**
@@ -104,6 +133,7 @@ export interface GraphNodeActivatedEvent {
   node: string;
   /** 相位：enter=开始执行，exit=执行完成。 */
   phase: 'enter' | 'exit';
+  workflowRef?: WorkflowRefDto;
 }
 
 /** 事实抽取开始：进度类控制事件，不混入内容流。 */
@@ -162,6 +192,22 @@ export interface AuditScoreExplanationDto {
   formula: string;
 }
 
+export interface LegacyRevisionDiagnosisItemDto {
+  intent: AuthorIntentDto;
+  status: 'located' | 'evidence-found' | 'pending';
+  matches: ReadonlyArray<{ label: string; anchorRefs: ReadonlyArray<string>; details?: ReadonlyArray<string> }>;
+  linkedIssueIds: ReadonlyArray<string>;
+}
+
+export interface LegacyRevisionDiagnosisDto {
+  kind: 'legacy-revision-diagnosis';
+  factVersion: string;
+  generatedAt: number;
+  preservation: ReadonlyArray<LegacyRevisionDiagnosisItemDto>;
+  characterExtraction: ReadonlyArray<LegacyRevisionDiagnosisItemDto>;
+  removals: ReadonlyArray<LegacyRevisionDiagnosisItemDto>;
+}
+
 export interface QualityDashboardDto {
   factVersion: string;
   generatedAt: number;
@@ -169,12 +215,14 @@ export interface QualityDashboardDto {
   scoreExplanation: AuditScoreExplanationDto;
   totalItems: number;
   issues: ReadonlyArray<ConsistencyIssueDto>;
+  legacyDiagnosis?: LegacyRevisionDiagnosisDto;
 }
 
 /** 全书总检开始：进度类控制事件，不混入内容流。 */
 export interface GlobalAuditStartedEvent {
   type: 'global-audit-started';
   runId: RunId;
+  workflowRef?: WorkflowRefDto;
   factVersion: string;
   totalItems: number;
 }
@@ -183,6 +231,7 @@ export interface GlobalAuditStartedEvent {
 export interface GlobalAuditProgressEvent {
   type: 'global-audit-progress';
   runId: RunId;
+  workflowRef?: WorkflowRefDto;
   phase: 'map' | 'reduce' | 'score';
   completedItems: number;
   totalItems: number;
@@ -192,6 +241,7 @@ export interface GlobalAuditProgressEvent {
 export interface GlobalAuditCompletedEvent {
   type: 'global-audit-completed';
   runId: RunId;
+  workflowRef?: WorkflowRefDto;
   dashboard: QualityDashboardDto;
 }
 
@@ -199,6 +249,7 @@ export interface GlobalAuditCompletedEvent {
 export interface GlobalAuditFailedEvent {
   type: 'global-audit-failed';
   runId: RunId;
+  workflowRef?: WorkflowRefDto;
   error: {
     category: 'validation' | 'aborted' | 'io' | 'internal';
     message: string;
@@ -314,6 +365,7 @@ export interface RefactorDiffComputedEvent {
   rewrittenFragment: string;
   /** 拆分出的可独立裁决 hunk（片段内偏移升序） */
   hunks: ReadonlyArray<DiffHunkDto>;
+  workflowRef?: WorkflowRefDto;
 }
 
 /** 局部重构 diff 计算失败：错误作为一等控制事件，不以未捕获异常穿透 IPC。 */
@@ -324,6 +376,7 @@ export interface RefactorDiffFailedEvent {
     category: 'validation' | 'aborted' | 'io' | 'internal';
     message: string;
   };
+  workflowRef?: WorkflowRefDto;
 }
 
 /** 逐 hunk 裁决拼回并写回磁盘成功：携可回滚 checkpoint 供 time-travel 定位。 */
@@ -336,6 +389,7 @@ export interface RefactorAppliedEvent {
   acceptedHunkIds: ReadonlyArray<string>;
   /** 变更落定产生的 checkpoint id（无 checkpointer 时缺省） */
   checkpointId?: string;
+  workflowRef?: WorkflowRefDto;
 }
 
 /** 逐 hunk 裁决拼回/写盘失败：失效/重叠/越界/IO 错误均结构化下发。 */
@@ -348,6 +402,7 @@ export interface RefactorApplyFailedEvent {
   };
   /** 相关 hunk 标识（失效/重叠时供 UI 定位） */
   hunkIds?: ReadonlyArray<string>;
+  workflowRef?: WorkflowRefDto;
 }
 
 /**
@@ -397,13 +452,63 @@ export interface CorpusRetrievalFailedEvent {
   };
 }
 
+/** 待作者确认的创作资产候选；增量 optional-friendly DTO，不代表 Renderer 已提交。 */
+export interface CreativeAssetCandidateDto {
+  candidateId: string;
+  /** The long-lived asset identity; candidateId is the proposal identity. */
+  assetId: string;
+  baseVersion?: number;
+  content?: unknown;
+  provenance?: unknown;
+  status?: 'pending' | 'confirmed' | 'rejected';
+  changeSetId?: string;
+  workflowRef?: WorkflowRefDto;
+}
+
+/** 资产变更影响审阅项。 */
+export interface AssetImpactDto {
+  impactId: string;
+  assetId: string;
+  status: 'stale' | 'needs-review' | 'conflicting' | string;
+  summary?: string;
+  targetRefs?: ReadonlyArray<string>;
+  workflowRef?: WorkflowRefDto;
+}
+
+export interface CreativeAssetChangeProposedEvent {
+  type: 'creative-asset-change-proposed';
+  runId: RunId;
+  candidate: CreativeAssetCandidateDto;
+}
+
+export interface CreativeAssetUpdatedEvent {
+  type: 'creative-asset-updated';
+  runId: RunId;
+  asset: Record<string, unknown>;
+  workflowRef?: WorkflowRefDto;
+  projectId: string;
+}
+
+export interface AssetImpactDetectedEvent {
+  type: 'asset-impact-detected';
+  runId: RunId;
+  impact: AssetImpactDto;
+}
+
 /**
  * 后端 → 前端 控制事件判别联合。
  * 接收方通过 `type` 收窄；后续 change（纠偏/冲突/时间旅行）在此叠加成员。
  */
 export type BackendControlEvent =
+  | WorkflowSnapshotEvent
+  | WorkflowFailureEvent
+  | CreativeAssetChangeProposedEvent
+  | CreativeAssetUpdatedEvent
+  | AssetImpactDetectedEvent
   | InterruptRaisedEvent
   | ReviewCompletedEvent
+  | TargetedVerificationCompletedEvent
+  | TargetedVerificationFailedEvent
   | GraphNodeActivatedEvent
   | FactExtractionStartedEvent
   | FactExtractionCompletedEvent

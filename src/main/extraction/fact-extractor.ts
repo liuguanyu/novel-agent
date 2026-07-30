@@ -20,6 +20,8 @@ export interface FactExtractorModelResolver {
 export interface FactExtractionRunOptions {
   readonly signal?: AbortSignal;
   readonly logger?: (message: string) => void;
+  /** 作者受控补充要求；只作为本次模型任务的额外约束，不修改已确认事实。 */
+  readonly supplement?: string;
 }
 
 export interface FactExtractionResult {
@@ -76,7 +78,10 @@ export class FactExtractor {
 
   async extract(input: ExtractionInput, options: FactExtractionRunOptions = {}): Promise<FactExtractionResult> {
     const adapter = this.resolver.createAdapter(FACT_EXTRACTOR_AGENT_ID, FACT_EXTRACTOR_TIER);
-    const prompt = renderFactExtractionPrompt(input);
+    const prompt = renderFactExtractionPrompt(input) +
+      (options.supplement === undefined || options.supplement.trim().length === 0
+        ? ''
+        : `\n\n作者本次补充要求（仅用于当前任务尝试，不代表确认事实）：\n${options.supplement.trim()}`);
     const modelResult = await adapter.complete({
       messages: [
         {

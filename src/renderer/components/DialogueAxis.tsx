@@ -41,10 +41,16 @@ interface DialogueAxisProps {
   onApproveConflict: (runId: string) => void;
   onRejectConflict: (runId: string) => void;
   onModifyConflict: (runId: string, issues: ReadonlyArray<ConsistencyIssueDto>) => void;
+  /** 定位中断问题的证据引文。 */
+  onLocateConflict: (issue: ConsistencyIssueDto) => void;
+  /** 从中断问题进入局部改写审阅。 */
+  onAdoptConflict: (issue: ConsistencyIssueDto) => void;
   /** 选中某条审校问题（触发正文定位高亮）。 */
   onSelectFinding: (runId: string, index: number) => void;
   /** 采纳某条发现：以证据引文预填重构面板并打开。 */
   onAdoptFinding: (issue: ConsistencyIssueDto) => void;
+  /** 显式召唤专家入口（打开命令面板；task 10.6）。 */
+  onSummonExpert?: () => void;
 }
 
 function ReasoningBlock({ reasoning }: { reasoning: string }): JSX.Element | null {
@@ -141,12 +147,18 @@ function ConflictIssueCard({
   draft,
   onPickOption,
   onChangeInstruction,
+  onLocate,
+  onAdopt,
 }: {
   issue: ConsistencyIssueDto;
   draft: IssueDecisionDraft;
   onPickOption: (optionId: string, label: string) => void;
   onChangeInstruction: (text: string) => void;
+  onLocate: (issue: ConsistencyIssueDto) => void;
+  onAdopt: (issue: ConsistencyIssueDto) => void;
 }): JSX.Element {
+  const chapterAnchor = issue.anchors.find((anchor) => anchor.kind === 'chapter');
+  const hasEvidence = issue.evidence?.quote !== undefined && issue.evidence.quote.length > 0;
   return (
     <div className="space-y-2 overflow-hidden rounded-md border border-amber-300/70 bg-amber-50/80 p-2.5 text-xs text-amber-950">
       <div className="font-medium break-words">
@@ -160,6 +172,29 @@ function ConflictIssueCard({
       )}
       {issue.suggestedFix !== undefined && (
         <p className="break-words text-amber-900">建议：{issue.suggestedFix}</p>
+      )}
+      {chapterAnchor !== undefined && (
+        <div className="flex flex-wrap gap-1 pt-0.5">
+          <Button type="button" size="xs" variant="outline" onClick={() => onLocate(issue)}>
+            {hasEvidence ? '定位原文' : '跳转章节'}
+          </Button>
+          <Button
+            type="button"
+            size="xs"
+            variant="outline"
+            disabled={!hasEvidence}
+            title={hasEvidence ? undefined : '缺少原文证据，无法安全进入局部改写'}
+            onClick={() => onAdopt(issue)}
+          >
+            采纳并修改
+          </Button>
+        </div>
+      )}
+      {!hasEvidence && chapterAnchor !== undefined && (
+        <p className="text-[11px] text-amber-800">缺少原文证据：可跳转章节核对，但暂不能进入局部改写。</p>
+      )}
+      {chapterAnchor === undefined && (
+        <p className="text-[11px] text-amber-800">缺少稳定章节锚点：无法定位或写入正文。</p>
       )}
 
       {issue.options !== undefined && issue.options.length > 0 && (
@@ -206,7 +241,7 @@ function ConflictIssueCard({
           value={draft.instruction}
           onChange={(e) => onChangeInstruction(e.target.value)}
           rows={2}
-          placeholder="点选上方方向自动填入，或在此自定义修改要求…"
+          placeholder="默认留空；点选裁决方向或输入作者自己的修改要求…"
           className="w-full resize-none rounded border border-amber-300 bg-white/70 px-2 py-1 text-xs text-amber-950 outline-none placeholder:text-amber-500/80 focus-visible:ring-2 focus-visible:ring-amber-400"
         />
       </div>
@@ -217,7 +252,7 @@ function ConflictIssueCard({
 function buildInitialDrafts(
   issues: ReadonlyArray<ConsistencyIssueDto>,
 ): ReadonlyArray<IssueDecisionDraft> {
-  return issues.map((issue) => ({ instruction: issue.suggestedFix ?? '', selectedOptionId: undefined }));
+  return issues.map((issue) => ({ instruction: issue.authorRewrittenInstruction ?? '', selectedOptionId: undefined }));
 }
 
 function ConflictPanel({
@@ -225,11 +260,15 @@ function ConflictPanel({
   onApprove,
   onReject,
   onModify,
+  onLocate,
+  onAdopt,
 }: {
   conflict: PendingConflict;
   onApprove: (runId: string) => void;
   onReject: (runId: string) => void;
   onModify: (runId: string, issues: ReadonlyArray<ConsistencyIssueDto>) => void;
+  onLocate: (issue: ConsistencyIssueDto) => void;
+  onAdopt: (issue: ConsistencyIssueDto) => void;
 }): JSX.Element {
   const [drafts, setDrafts] = useState<ReadonlyArray<IssueDecisionDraft>>(() =>
     buildInitialDrafts(conflict.issues),
@@ -244,18 +283,16 @@ function ConflictPanel({
     setDrafts((prev) => prev.map((d, i) => (i === index ? { ...d, ...patch } : d)));
   };
 
-  // 采纳：把每条问题的作者修改要求作为 suggestedFix 回传（modify → 覆盖 activeBugs → 交写手）。
-  // 剔除 evidence（Main 侧 consistencyIssueSchema 为 strict，不含该字段）。
+  // modify 仅携作者独立录入的改写要求；suggestedFix 始终保留为审校器只读建议。
+  // Main 的既有 strict schema 尚未接收 authorRewrittenInstruction，因此把作者要求放入 description，
+  // 同时原 suggestedFix 原样保留；绝不拿建议兜底冒充作者指令或改写正文。
   const submitModify = (): void => {
     const issues: ReadonlyArray<ConsistencyIssueDto> = conflict.issues.map((issue, i) => {
       const typed = (drafts[i]?.instruction ?? '').trim();
-      const instruction = typed.length > 0 ? typed : (issue.suggestedFix ?? issue.description);
       return {
-        type: issue.type,
-        severity: issue.severity,
-        anchors: issue.anchors,
-        description: issue.description,
-        suggestedFix: instruction,
+        ...issue,
+        description: typed.length > 0 ? `${issue.description}\n作者修改要求：${typed}` : issue.description,
+        ...(typed.length > 0 ? { authorRewrittenInstruction: typed } : {}),
         requiresHumanDecision: false,
       };
     });
@@ -284,6 +321,8 @@ function ConflictPanel({
             updateDraft(index, { selectedOptionId: optionId, instruction: label })
           }
           onChangeInstruction={(text) => updateDraft(index, { instruction: text })}
+          onLocate={onLocate}
+          onAdopt={onAdopt}
         />
       ))}
       <div className="flex justify-end pt-1">
@@ -307,8 +346,11 @@ export function DialogueAxis({
   onApproveConflict,
   onRejectConflict,
   onModifyConflict,
+  onLocateConflict,
+  onAdoptConflict,
   onSelectFinding,
   onAdoptFinding,
+  onSummonExpert,
 }: DialogueAxisProps): JSX.Element {
   const [draft, setDraft] = useState('');
   const [mentionIndex, setMentionIndex] = useState(0);
@@ -414,6 +456,8 @@ export function DialogueAxis({
             onApprove={onApproveConflict}
             onReject={onRejectConflict}
             onModify={onModifyConflict}
+            onLocate={onLocateConflict}
+            onAdopt={onAdoptConflict}
           />
         )}
         {busy && activeRunId !== undefined && (
@@ -433,7 +477,19 @@ export function DialogueAxis({
           <span>
             发送给：<span className="font-medium text-foreground">{draftTargetLabel}</span>
           </span>
-          <span>输入 @专家名 可切换</span>
+          <span className="flex items-center gap-2">
+            {onSummonExpert !== undefined && (
+              <button
+                type="button"
+                onClick={onSummonExpert}
+                className="rounded px-1.5 py-0.5 text-primary transition-colors hover:bg-accent"
+                title="打开专家列表（⌘K）"
+              >
+                召唤专家
+              </button>
+            )}
+            <span>输入 @专家名 可切换</span>
+          </span>
         </div>
         <div className="relative">
           {mentionMenuOpen && (

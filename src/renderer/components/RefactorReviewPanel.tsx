@@ -25,6 +25,8 @@ import type { RefactorState, UseRefactorResult } from '../hooks/useRefactor.js';
 
 interface RefactorReviewPanelProps {
   readonly selectedNodeId: string | undefined;
+  /** 当前 content 实际所属章节；必须与问题锚点一致才允许计算 diff。 */
+  readonly contentNodeId: string | undefined;
   /** 当前章节正文（与后端锚点同源，用于定位原片段偏移）。 */
   readonly content: string;
   readonly loadingContent: boolean;
@@ -120,6 +122,7 @@ function HunkRow({
 
 export function RefactorReviewPanel({
   selectedNodeId,
+  contentNodeId,
   content,
   loadingContent,
   refactor,
@@ -153,7 +156,11 @@ export function RefactorReviewPanel({
   );
 
   const anchoredNodeId = prefill?.nodeId ?? selectedNodeId;
-  const anchorReady = anchoredNodeId !== undefined && selectedNodeId === anchoredNodeId && !loadingContent;
+  const anchorReady =
+    anchoredNodeId !== undefined &&
+    selectedNodeId === anchoredNodeId &&
+    contentNodeId === anchoredNodeId &&
+    !loadingContent;
   const canCompute = anchorReady && original.length > 0 && rewritten.length > 0 && !busy;
 
   const onCompute = (): void => {
@@ -198,9 +205,11 @@ export function RefactorReviewPanel({
             {anchoredNodeId !== undefined && selectedNodeId !== anchoredNodeId && (
               <span className="text-muted-foreground">正在切换到问题所在章节…</span>
             )}
-            {anchoredNodeId !== undefined && selectedNodeId === anchoredNodeId && loadingContent && (
-              <span className="text-muted-foreground">正在加载章节正文…</span>
-            )}
+            {anchoredNodeId !== undefined &&
+              selectedNodeId === anchoredNodeId &&
+              (loadingContent || contentNodeId !== anchoredNodeId) && (
+                <span className="text-muted-foreground">正在加载章节正文…</span>
+              )}
           </div>
 
           {(state.status === 'idle' || state.status === 'computing' || state.status === 'failed') && (

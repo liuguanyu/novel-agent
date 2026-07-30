@@ -14,6 +14,27 @@
 - **THEN** 系统 MUST 允许该运行只携带 `runId`
 - **AND** MUST NOT 强制创建虚假的 `workflowId` 或模板阶段
 
+### Requirement: 运行中可版本化更新作者目标且不改动阶段
+
+老书整理工作流 MUST 保存 objective 与可重复的作者要求清单。每条要求 MUST 独立包含 `kind`（`preserve` / `extract` / `remove`）与非空文本；同一 kind MUST 允许多条。更新 objective 或作者要求 MUST 经过乐观并发与 operation id 幂等保护，使 workflow version 递增，但 MUST NOT 直接修改 `currentStageId`、任一阶段状态或正文。
+
+#### Scenario: 同类要求保存多条
+- **WHEN** 作者提交多个 preserve、extract 或 remove 要求
+- **THEN** Main MUST 按独立记录及原有顺序持久化并返回快照
+- **AND** MUST NOT 将同类要求覆盖或拼接为单条文本
+
+#### Scenario: 更新要求不回退工作流
+- **WHEN** 作者在事实回填、诊断或修订阶段更新作者要求
+- **THEN** workflow version MUST 递增
+- **AND** `currentStageId` 与全部 stage status MUST 保持不变
+- **AND** 下一次依赖作者要求的诊断 MUST 读取最新版快照
+
+#### Scenario: 重放与过期更新
+- **WHEN** 相同 operation id 的目标更新被重放
+- **THEN** Main MUST 返回原操作结果且不得再次递增版本
+- **WHEN** 不同 operation id 使用过期 expected version 更新目标
+- **THEN** Main MUST 拒绝更新并返回最新快照或结构化冲突
+
 ### Requirement: 阶段实例具备精确状态、范围与证据
 
 每个 `WorkflowStageInstance` MUST 至少包含 `stageId`、`templateStageId`、`status`（`pending` / `ready` / `running` / `blocked` / `awaiting-confirmation` / `completed` / `skipped` / `failed`）、`actor`（`system` / `expert` / `author` / `quality-gate`）、`scope`、`runIds` 与 `artifactRefs`。`scope` MUST 为 project、chapter 或 issue 的可判别联合并使用稳定标识；阻塞、进入和完成信息 MUST 以可选强类型字段表达，MUST NOT 使用自由字符串替代状态。

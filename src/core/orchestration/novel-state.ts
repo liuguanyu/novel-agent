@@ -12,6 +12,7 @@
 import type { NodeRef } from '../manuscript/node-id.js';
 import type { ConsistencyIssue } from '../story-bible/consistency-issue.js';
 import type { OrchestrationAction, AgentStatus } from './action.js';
+import type { WorkflowRef } from '../workflow/types.js';
 import type { ContextRefs } from './context-refs.js';
 
 /** 对话历史中的一条消息（messages 风格）。 */
@@ -39,6 +40,8 @@ export interface NovelState {
   currentAction: OrchestrationAction;
   /** agent 运行状态 */
   agentStatus: AgentStatus;
+  /** Optional lightweight ownership for a long-running workflow stage. */
+  workflowRef?: WorkflowRef;
   /** 事实/素材上下文引用 */
   contextRefs: ContextRefs;
 }

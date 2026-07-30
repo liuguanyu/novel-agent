@@ -7,6 +7,7 @@
  */
 
 import type { StreamChannel } from './channels.js';
+import type { WorkflowRefDto } from './workflow-messages.js';
 
 /** 一次运行的唯一标识（关联同一 run 的所有消息，避免边写边聊串台） */
 export type RunId = string;
@@ -35,6 +36,7 @@ export interface StreamStartMessage {
   type: 'stream-start';
   runId: RunId;
   kind: StreamKind;
+  workflowRef?: WorkflowRefDto;
 }
 
 /** 增量分片 */
@@ -46,6 +48,7 @@ export interface StreamChunkMessage {
   delta: string;
   /** 分片序号，用于前端按序拼接与去重 */
   seq: number;
+  workflowRef?: WorkflowRefDto;
 }
 
 /** 运行正常结束 */
@@ -55,6 +58,7 @@ export interface StreamEndMessage {
   kind: StreamKind;
   /** 结束原因 */
   reason: 'completed' | 'aborted';
+  workflowRef?: WorkflowRefDto;
 }
 
 /** 运行出错（错误即消息，Task 2.4） */
@@ -63,6 +67,7 @@ export interface StreamErrorMessage {
   runId: RunId;
   kind: StreamKind;
   error: IpcError;
+  workflowRef?: WorkflowRefDto;
 }
 
 /**

@@ -12,6 +12,7 @@ import { resolveAgentEntry } from '../../core/shell/agent-catalog.js';
 import type {
   BackendControlEvent,
   BackendStreamMessage,
+  WorkflowRefDto,
   ConsistencyIssueDto,
   FrontendCommandMessage,
   ResumeRunCommand,
@@ -45,12 +46,14 @@ export interface SummonRequest {
   instruction?: string;
   /** writer 新草稿完成后是否触发事实抽取。 */
   autoExtractFacts?: boolean;
+  workflowRef?: WorkflowRefDto;
 }
 
 /** 某次召唤运行因 reviewer 抛出需人工裁决问题而挂起的待裁决态。 */
 export interface PendingConflict {
   runId: string;
   issues: ReadonlyArray<ConsistencyIssueDto>;
+  workflowRef?: WorkflowRefDto;
 }
 
 function newRunId(): string {
@@ -78,13 +81,14 @@ export interface UseDialogueResult {
 }
 
 /** 消费对话流并维护 turns 状态。 */
-export function useDialogue(): UseDialogueResult {
+export function useDialogue(workflowRef?: WorkflowRefDto): UseDialogueResult {
   const [turns, setTurns] = useState<ReadonlyArray<DialogueTurn>>([]);
   const [activeRunId, setActiveRunId] = useState<string | undefined>(undefined);
   const [pendingConflict, setPendingConflict] = useState<PendingConflict | undefined>(undefined);
   const activeRunIdRef = useRef<string | undefined>(undefined);
   /** 本 hook 发起的召唤 runId 集合：仅处理自己的 interrupt-raised，不抢抽取冲突（归 useFactExtraction）。 */
   const startedRunsRef = useRef<Set<string>>(new Set());
+  const runRefsRef = useRef<Map<string, WorkflowRefDto>>(new Map());
 
   const applyToRun = useCallback(
     (runId: string, updater: (turn: DialogueTurn) => DialogueTurn): void => {
@@ -142,7 +146,8 @@ export function useDialogue(): UseDialogueResult {
     const off = window.novelAgent.onControlEvent((event: BackendControlEvent) => {
       if (event.type !== 'interrupt-raised') return;
       if (!startedRunsRef.current.has(event.runId)) return;
-      setPendingConflict({ runId: event.runId, issues: event.issues });
+      setPendingConflict({ runId: event.runId, issues: event.issues, ...(event.workflowRef === undefined ? {} : { workflowRef: event.workflowRef }) });
+      if (event.workflowRef !== undefined) runRefsRef.current.set(event.runId, event.workflowRef);
     });
     return off;
   }, []);
@@ -183,7 +188,9 @@ export function useDialogue(): UseDialogueResult {
       ...(request.anchorNodeId !== undefined ? { anchorNodeId: request.anchorNodeId } : {}),
       ...(request.instruction !== undefined ? { instruction: request.instruction } : {}),
       ...(request.autoExtractFacts !== undefined ? { autoExtractFacts: request.autoExtractFacts } : {}),
+      ...(request.workflowRef === undefined ? (workflowRef === undefined ? {} : { workflowRef }) : { workflowRef: request.workflowRef }),
     };
+    if (command.workflowRef !== undefined) runRefsRef.current.set(runId, command.workflowRef);
     window.novelAgent.sendCommand(command);
     return runId;
   }, []);
@@ -208,7 +215,8 @@ export function useDialogue(): UseDialogueResult {
         activeRunIdRef.current = runId;
         setActiveRunId(runId);
       }
-      const command: ResumeRunCommand = { type: 'resume-run', runId, decision };
+      const ref = runRefsRef.current.get(runId);
+      const command: ResumeRunCommand = { type: 'resume-run', runId, decision, ...(ref === undefined ? {} : { workflowRef: ref }) };
       window.novelAgent.sendCommand(command);
     },
     [applyToRun],

@@ -20,7 +20,10 @@ import {
   SqliteDatabase,
   SqliteCheckpointer,
   SqliteFactStore,
+  WorkflowRepository, CreativeAssetRepository, WorkflowIssueRepository,
+  SqliteStageRunEvidenceRecorder, SqliteContinuationRecordService,
 } from './db/index.js';
+import { WorkflowApplicationService } from './workflow-application-service.js';
 
 const baseDir = dirname(fileURLToPath(import.meta.url));
 
@@ -94,6 +97,11 @@ function createWindow(): void {
 
 app.whenReady().then(
   async () => {
+    // 持久化与模型配置相互独立，并行初始化，两者失败均不阻断窗口创建。
+    const [, result] = await Promise.all([initPersistence(), loadModelsConfig()]);
+    const issueRepository = persistence === undefined ? undefined : new WorkflowIssueRepository(persistence.db);
+    const workflowRepository = persistence === undefined ? undefined : new WorkflowRepository(persistence.db);
+    const creativeAssetRepository = persistence === undefined ? undefined : new CreativeAssetRepository(persistence.db);
     orchestration = new OrchestrationRuntime({
       getModelResolver: () => modelResolver,
       getCheckpointer: () => persistence?.checkpointer,
@@ -102,10 +110,22 @@ app.whenReady().then(
       getDiffRunner: () => diffRunner,
       getEmbedRunner: () => embedRunner,
       getCorpusStore: () => corpusStore,
+      ...(issueRepository === undefined ? {} : { workflowIssues: issueRepository }),
+      ...(creativeAssetRepository === undefined ? {} : { creativeAssets: creativeAssetRepository }),
+      ...(workflowRepository === undefined || persistence === undefined ? {} : {
+        workflows: workflowRepository,
+        stageRunEvidence: new SqliteStageRunEvidenceRecorder(persistence.db),
+        continuationRecords: new SqliteContinuationRecordService(persistence.db),
+      }),
     });
-    registerIpcHandlers(orchestration);
-    // 持久化与模型配置相互独立，并行初始化，两者失败均不阻断窗口创建。
-    const [, result] = await Promise.all([initPersistence(), loadModelsConfig()]);
+    const workflowService = persistence === undefined || issueRepository === undefined
+      ? undefined
+      : new WorkflowApplicationService(
+        workflowRepository!,
+        creativeAssetRepository!,
+        issueRepository,
+      );
+    registerIpcHandlers(orchestration, workflowService);
     if (result.ok) {
       modelResolver = new ModelResolver(result.config);
     } else {

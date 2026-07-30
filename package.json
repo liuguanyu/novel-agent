@@ -23,7 +23,8 @@
     "lint:fix": "eslint . --fix",
     "smoke:persistence": "tsc -p tsconfig.smoke.json && node out-smoke/main/persistence-smoke.js",
     "smoke:orchestration": "tsc -p tsconfig.smoke.json && node out-smoke/main/orchestration-smoke.js",
-    "smoke:extraction": "tsc -p tsconfig.smoke.json && node out-smoke/main/extraction-smoke.js"
+    "smoke:extraction": "tsc -p tsconfig.smoke.json && node out-smoke/main/extraction-smoke.js",
+    "smoke:workflow": "tsc -p tsconfig.smoke.json && node out-smoke/main/workflow-smoke.js && node out-smoke/main/workflow-integration-smoke.js"
   },
   "dependencies": {
     "@langchain/core": "^1.2.3",

@@ -32,6 +32,9 @@ interface CommandPaletteProps {
   onSummon: (request: SummonRequest) => void;
   /** 打开架构看板（查阅、非召唤，不产 SummonCommand）。 */
   onOpenBoard: () => void;
+  /** 受控打开（供对话区「召唤专家」显式入口复用；⌘K 仍然可用）。 */
+  open?: boolean;
+  onOpenChange?: (open: boolean) => void;
 }
 
 /** 据目录条目 + 当前锚点构造统一召唤请求；要求锚点却无选中章节时返回 undefined（禁用）。 */
@@ -51,8 +54,21 @@ function buildRequest(
   return { agent: entry.agent, mode: entry.defaultMode, scope: entry.defaultScope };
 }
 
-export function CommandPalette({ selectedNodeId, onSummon, onOpenBoard }: CommandPaletteProps): JSX.Element {
-  const [open, setOpen] = useState(false);
+export function CommandPalette({
+  selectedNodeId,
+  onSummon,
+  onOpenBoard,
+  open: controlledOpen,
+  onOpenChange,
+}: CommandPaletteProps): JSX.Element {
+  const [uncontrolledOpen, setUncontrolledOpen] = useState(false);
+  const controlled = controlledOpen !== undefined;
+  const open = controlled ? controlledOpen : uncontrolledOpen;
+  const setOpen = (next: boolean | ((v: boolean) => boolean)): void => {
+    const value = typeof next === 'function' ? next(open) : next;
+    if (!controlled) setUncontrolledOpen(value);
+    onOpenChange?.(value);
+  };
 
   useEffect(() => {
     const handler = (e: KeyboardEvent): void => {
@@ -63,7 +79,7 @@ export function CommandPalette({ selectedNodeId, onSummon, onOpenBoard }: Comman
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, []);
+  });
 
   const run = (entry: AgentCatalogEntry): void => {
     const request = buildRequest(entry, selectedNodeId);

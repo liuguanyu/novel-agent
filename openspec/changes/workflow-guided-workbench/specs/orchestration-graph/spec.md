@@ -52,43 +52,42 @@ concept-generator、scene-outliner、researcher 等）。
 #### Scenario: architect 为已落地策划类节点
 - **WHEN** 作者召唤 `architect`（动作 `outline`）产出章节/场景大纲、情节推进与人物成长里程碑
 - **THEN** 图 MUST 路由到已落地的 architect 节点，该节点 MUST 产出中文自然语言策划文本，写入 currentDraft 并作为对话消息呈现给作者
-- **AND** 该节点 MUST 复用既有「抽取→ingest→写 story-bible」管线（`afterWriterDraft` 钩子）将策划产物落地为实体/属性/关系/伏笔/时间线：低风险不冲突者自动入库标 inferred，与既有 confirmed 冲突者标 conflicting 经手刹裁决
-- **AND** 策划产物 MUST 写入对应的版本化 CreativeAsset；当无 `currentChapterId` 时仅可跳过需要正文出处的 Story Bible ingest，MUST NOT 退化为仅对话呈现
+- **AND** 该节点 MUST 只产生待审阅的 change-set candidate，不得直接写入 CreativeAsset 或 Story Bible
+- **AND** 作者确认后 Main MUST 提交对应版本化 CreativeAsset；适用的 confirmed 约束再同步 Story Bible
 - **AND** 完成后 MUST 收敛 END，MUST NOT 进入写-审-改环
 
 #### Scenario: character-generator 为已落地策划类节点
 - **WHEN** 作者召唤 `character-generator`（动作 `generate-characters`）产出人物档案（背景/动机/性格/关系/口吻）
 - **THEN** 图 MUST 路由到已落地的 character-generator 节点，该节点 MUST 产出中文自然语言策划文本，写入 currentDraft 并作为对话消息呈现给作者
-- **AND** 该节点 MUST 复用既有「抽取→ingest→写 story-bible」管线（`afterWriterDraft` 钩子）将人物档案落地为实体/属性/关系；低风险不冲突者自动入库标 inferred，冲突者标 conflicting 经手刹裁决
-- **AND** 策划产物 MUST 写入对应的版本化 CreativeAsset；当无 `currentChapterId` 时仅可跳过需要正文出处的 Story Bible ingest，MUST NOT 退化为仅对话呈现
+- **AND** 该节点 MUST 只产生待审阅的 change-set candidate，不得直接写入 CreativeAsset 或 Story Bible
+- **AND** 作者确认后 Main MUST 提交 character asset；适用的 confirmed 约束再同步 Story Bible
 - **AND** 完成后 MUST 收敛 END，MUST NOT 进入写-审-改环
 
 #### Scenario: worldbuilding 为已落地策划类节点
 - **WHEN** 作者召唤 `worldbuilding`（动作 `build-world`）产出世界设定要素（地理/文化/历史/规则/组织）
 - **THEN** 图 MUST 路由到已落地的 worldbuilding 节点，该节点 MUST 产出中文自然语言策划文本，写入 currentDraft 并作为对话消息呈现给作者
-- **AND** 该节点 MUST 复用既有「抽取→ingest→写 story-bible」管线（`afterWriterDraft` 钩子）将世界设定落地为实体/属性/关系；低风险不冲突者自动入库标 inferred，冲突者标 conflicting 经手刹裁决
-- **AND** 策划产物 MUST 写入对应的版本化 CreativeAsset；当无 `currentChapterId` 时仅可跳过需要正文出处的 Story Bible ingest，MUST NOT 退化为仅对话呈现
+- **AND** 该节点 MUST 只产生待审阅的 worldbuilding change-set candidate，不得直接 ingest 或写入 CreativeAsset / Story Bible
+- **AND** 仅在作者确认 candidate 后，Main 才 MUST 提交版本化 worldbuilding asset，并将适用的 confirmed 约束同步到 Story Bible
 - **AND** 完成后 MUST 收敛 END，MUST NOT 进入写-审-改环
 
 #### Scenario: concept-generator 为已落地策划类节点
 - **WHEN** 作者召唤 `concept-generator`（动作 `generate-concept`）产出书籍立意（标题、一句话故事内核、主题、目标读者、独特卖点）
 - **THEN** 图 MUST 路由到已落地的 concept-generator 节点，该节点 MUST 产出中文自然语言策划文本，写入 currentDraft 并作为对话消息呈现给作者
-- **AND** 该节点 MUST 复用既有「抽取→ingest→写 story-bible」管线（`afterWriterDraft` 钩子）落地可抽取的设定；低风险不冲突者自动入库标 inferred，冲突者标 conflicting 经手刹裁决
-- **AND** 策划产物 MUST 写入对应的版本化 CreativeAsset；当无 `currentChapterId` 时仅可跳过需要正文出处的 Story Bible ingest，MUST NOT 退化为仅对话呈现
+- **AND** 该节点 MUST 只产生待审阅的 concept change-set candidate，不得直接 ingest 或写入 CreativeAsset / Story Bible
+- **AND** 仅在作者确认 candidate 后，Main 才 MUST 提交版本化 concept asset；不得把未确认候选同步到 Story Bible
 - **AND** 完成后 MUST 收敛 END，MUST NOT 进入写-审-改环
 
 #### Scenario: scene-outliner 为已落地策划类节点
 - **WHEN** 作者召唤 `scene-outliner`（动作 `outline-scenes`）在章内产分场大纲（场景目的/关键事件与冲突/人物互动/情绪节拍/场景与氛围/过场）
 - **THEN** 图 MUST 路由到已落地的 scene-outliner 节点，该节点 MUST 产出中文自然语言策划文本，写入 currentDraft 并作为对话消息呈现给作者
-- **AND** 该节点 MUST 复用既有「抽取→ingest→写 story-bible」管线（`afterWriterDraft` 钩子）落地可抽取的设定；低风险不冲突者自动入库标 inferred，冲突者标 conflicting 经手刹裁决
-- **AND** 策划产物 MUST 写入对应的版本化 CreativeAsset；当无 `currentChapterId` 时仅可跳过需要正文出处的 Story Bible ingest，MUST NOT 退化为仅对话呈现
+- **AND** 该节点 MUST 只产生待审阅的 scene-outline change-set candidate，不得直接 ingest 或写入 CreativeAsset / Story Bible
+- **AND** 仅在作者确认 candidate 后，Main 才 MUST 提交版本化 scene-outline asset；计划性内容 MUST NOT 自动写成 Story Bible 事实
 - **AND** 完成后 MUST 收敛 END，MUST NOT 进入写-审-改环
 
-#### Scenario: researcher 为已落地策划类节点
+#### Scenario: researcher 为 research artifact 节点
 - **WHEN** 作者召唤 `researcher`（动作 `research`）为题材做背景资料研究（关键史实/技术细节/可用角度）
 - **THEN** 图 MUST 路由到已落地的 researcher 节点，该节点 MUST 产出中文自然语言研究札记，写入 currentDraft 并作为对话消息呈现给作者
-- **AND** 该节点 MUST 复用既有「抽取→ingest→写 story-bible」管线（`afterWriterDraft` 钩子）落地可抽取的设定；低风险不冲突者自动入库标 inferred，冲突者标 conflicting 经手刹裁决
-- **AND** 策划产物 MUST 写入对应的版本化 CreativeAsset；当无 `currentChapterId` 时仅可跳过需要正文出处的 Story Bible ingest，MUST NOT 退化为仅对话呈现
+- **AND** 该节点 MUST 持久化为可寻址的 research artifact（含来源与版本），但 MUST NOT 写入 CreativeAsset、Story Bible 或 CreativeAsset change set
 - **AND** 完成后 MUST 收敛 END，MUST NOT 进入写-审-改环
 
 
@@ -116,9 +115,9 @@ concept-generator、scene-outliner、researcher 等）。
 - **AND** MUST NOT 静默将运行挂载到当前阶段或自动切换工作流阶段
 - **AND** 作者仍可明确选择以 standalone 模式召唤
 
-### Requirement: 策划专家产物写入对应创作资产
+### Requirement: 策划专家产物经作者确认后写入对应创作资产
 
-concept-generator、worldbuilding、character-generator、architect 与 scene-outliner 的经作者确认产物 MUST 写入对应的 concept、worldbuilding、character、book/chapter outline 或 scene-outline asset。项目级资产写入 MUST NOT 依赖 `currentChapterId`；可约束的 confirmed 人物/世界观字段 MUST 显式同步到 Story Bible，而计划性大纲内容 MUST 保持为资产。
+concept-generator、worldbuilding、character-generator、architect 与 scene-outliner MUST 先产生 change-set candidate；仅经作者确认后才可写入对应的 concept、worldbuilding、character、book/chapter outline 或 scene-outline asset。researcher MUST NOT 写入 CreativeAsset，仅可持久化 research artifact。项目级资产写入 MUST NOT 依赖 `currentChapterId`；可约束的 confirmed 人物/世界观字段 MUST 显式同步到 Story Bible，而计划性大纲内容 MUST 保持为资产。
 
 #### Scenario: 无章节锚点的人物澄清持久化
 - **WHEN** character-generator 在没有 `currentChapterId` 的项目上下文中完成作者确认的人物澄清

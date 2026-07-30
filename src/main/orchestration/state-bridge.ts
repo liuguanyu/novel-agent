@@ -26,6 +26,7 @@ import {
 } from '../../core/orchestration/index.js';
 import type { OrchestrationAction, AgentStatus } from '../../core/orchestration/index.js';
 import type { ContextRefs } from '../../core/orchestration/index.js';
+import type { WorkflowRef } from '../../core/workflow/index.js';
 
 /** 编译期穷尽性守卫：确保每个 reducer 语义标签都被桥接覆盖。 */
 function assertExhaustive(value: never): never {
@@ -74,6 +75,10 @@ export const NovelStateAnnotation = Annotation.Root({
     reducer: (_prev, next) => next,
     default: () => 'idle',
   }),
+  workflowRef: Annotation<WorkflowRef | undefined>({
+    reducer: (_prev, next) => next,
+    default: () => undefined,
+  }),
   contextRefs: Annotation<ContextRefs>({
     reducer: (_prev, next) => next,
     default: () => ({ facts: null, corpus: null }),
@@ -95,6 +100,7 @@ export function toNovelState(state: NovelStateType): NovelState {
     activeBugs: state.activeBugs,
     currentAction: state.currentAction,
     agentStatus: state.agentStatus,
+    ...(state.workflowRef !== undefined ? { workflowRef: state.workflowRef } : {}),
     contextRefs: state.contextRefs,
   };
 }

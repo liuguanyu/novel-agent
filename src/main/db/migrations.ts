@@ -139,4 +139,139 @@ export const MIGRATIONS: ReadonlyArray<Migration> = [
       );
     `,
   },
+  {
+    version: 2,
+    up: `
+      CREATE TABLE workflow_instances (
+        workflow_id TEXT PRIMARY KEY, project_id TEXT NOT NULL, kind TEXT NOT NULL,
+        template_version TEXT NOT NULL, objective TEXT NOT NULL, status TEXT NOT NULL,
+        current_stage_id TEXT, stages_json TEXT NOT NULL DEFAULT '[]', version INTEGER NOT NULL DEFAULT 1,
+        created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+      );
+      CREATE UNIQUE INDEX idx_workflow_active_project ON workflow_instances(project_id) WHERE status = 'active';
+      CREATE INDEX idx_workflow_project ON workflow_instances(project_id, updated_at DESC);
+      CREATE TABLE workflow_stages (
+        stage_id TEXT PRIMARY KEY, workflow_id TEXT NOT NULL, template_stage_id TEXT NOT NULL,
+        status TEXT NOT NULL, actor TEXT NOT NULL, scope_json TEXT NOT NULL, run_ids_json TEXT NOT NULL DEFAULT '[]',
+        artifact_refs_json TEXT NOT NULL DEFAULT '[]', impact_status TEXT, version INTEGER NOT NULL DEFAULT 1,
+        created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+        FOREIGN KEY(workflow_id) REFERENCES workflow_instances(workflow_id) ON DELETE CASCADE
+      );
+      CREATE INDEX idx_workflow_stages_workflow ON workflow_stages(workflow_id, updated_at);
+      CREATE TABLE workflow_stage_runs (
+        stage_id TEXT NOT NULL, run_id TEXT NOT NULL, status TEXT NOT NULL, evidence_json TEXT,
+        started_at INTEGER, finished_at INTEGER, PRIMARY KEY(stage_id, run_id),
+        FOREIGN KEY(stage_id) REFERENCES workflow_stages(stage_id) ON DELETE CASCADE
+      );
+      CREATE INDEX idx_stage_runs_run ON workflow_stage_runs(run_id);
+      CREATE TABLE workflow_artifacts (
+        artifact_id TEXT PRIMARY KEY, workflow_id TEXT NOT NULL, stage_id TEXT, kind TEXT NOT NULL,
+        ref_id TEXT NOT NULL, ref_version INTEGER, metadata_json TEXT NOT NULL DEFAULT '{}', created_at INTEGER NOT NULL,
+        FOREIGN KEY(workflow_id) REFERENCES workflow_instances(workflow_id) ON DELETE CASCADE
+      );
+      CREATE INDEX idx_artifacts_stage ON workflow_artifacts(stage_id);
+      CREATE TABLE creative_assets (
+        asset_id TEXT PRIMARY KEY, project_id TEXT NOT NULL, kind TEXT NOT NULL, scope_json TEXT NOT NULL,
+        current_version INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'draft',
+        created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+      );
+      CREATE INDEX idx_assets_project ON creative_assets(project_id, kind);
+      CREATE TABLE creative_asset_versions (
+        asset_id TEXT NOT NULL, version INTEGER NOT NULL, content_json TEXT NOT NULL, provenance_json TEXT NOT NULL,
+        status TEXT NOT NULL, created_at INTEGER NOT NULL, operation_id TEXT,
+        PRIMARY KEY(asset_id, version), FOREIGN KEY(asset_id) REFERENCES creative_assets(asset_id) ON DELETE CASCADE
+      );
+      CREATE TABLE creative_asset_dependencies (
+        asset_id TEXT NOT NULL, depends_on_asset_id TEXT NOT NULL, dependency_type TEXT NOT NULL,
+        asset_version INTEGER, created_at INTEGER NOT NULL, PRIMARY KEY(asset_id, depends_on_asset_id, dependency_type),
+        FOREIGN KEY(asset_id) REFERENCES creative_assets(asset_id) ON DELETE CASCADE
+      );
+      CREATE TABLE creative_asset_change_sets (
+        change_set_id TEXT PRIMARY KEY, asset_id TEXT NOT NULL, base_version INTEGER NOT NULL,
+        operations_json TEXT NOT NULL, clarification TEXT NOT NULL, source_run_id TEXT, status TEXT NOT NULL,
+        created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, FOREIGN KEY(asset_id) REFERENCES creative_assets(asset_id) ON DELETE CASCADE
+      );
+      CREATE TABLE creative_asset_impacts (
+        impact_id TEXT PRIMARY KEY, asset_id TEXT NOT NULL, asset_version INTEGER NOT NULL,
+        stage_id TEXT, target_type TEXT NOT NULL, target_id TEXT NOT NULL, status TEXT NOT NULL,
+        decision TEXT, created_at INTEGER NOT NULL, FOREIGN KEY(asset_id) REFERENCES creative_assets(asset_id) ON DELETE CASCADE
+      );
+      CREATE INDEX idx_asset_impacts_target ON creative_asset_impacts(target_type, target_id);
+      CREATE TABLE workflow_issues (
+        issue_id TEXT PRIMARY KEY, workflow_id TEXT NOT NULL, source_audit_run_id TEXT NOT NULL,
+        status TEXT NOT NULL, anchor_refs_json TEXT NOT NULL DEFAULT '[]', refactor_run_ids_json TEXT NOT NULL DEFAULT '[]',
+        checkpoint_ids_json TEXT NOT NULL DEFAULT '[]', verification_run_ids_json TEXT NOT NULL DEFAULT '[]',
+        resolution_reason TEXT, version INTEGER NOT NULL DEFAULT 1, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+        FOREIGN KEY(workflow_id) REFERENCES workflow_instances(workflow_id) ON DELETE CASCADE
+      );
+      CREATE INDEX idx_issues_workflow_status ON workflow_issues(workflow_id, status);
+      CREATE TABLE workflow_issue_history (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, issue_id TEXT NOT NULL, kind TEXT NOT NULL,
+        status TEXT, source_run_id TEXT, actor TEXT, evidence_json TEXT, reason TEXT, created_at INTEGER NOT NULL,
+        FOREIGN KEY(issue_id) REFERENCES workflow_issues(issue_id) ON DELETE CASCADE
+      );
+      CREATE INDEX idx_issue_history_issue ON workflow_issue_history(issue_id, created_at);
+      CREATE TABLE workflow_issue_checkpoints (issue_id TEXT NOT NULL, checkpoint_id TEXT NOT NULL, created_at INTEGER NOT NULL, PRIMARY KEY(issue_id, checkpoint_id));
+      CREATE TABLE workflow_issue_verifications (issue_id TEXT NOT NULL, verification_run_id TEXT NOT NULL, result TEXT NOT NULL, evidence_json TEXT, created_at INTEGER NOT NULL, PRIMARY KEY(issue_id, verification_run_id));
+      CREATE TABLE continuations (
+        continuation_id TEXT PRIMARY KEY, workflow_id TEXT NOT NULL, stage_id TEXT NOT NULL, run_id TEXT NOT NULL,
+        issue_id TEXT, source_node TEXT NOT NULL, continuation_kind TEXT NOT NULL, allowed_decisions_json TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending', created_at INTEGER NOT NULL, consumed_at INTEGER
+      );
+      CREATE INDEX idx_continuations_scope ON continuations(workflow_id, stage_id, status);
+      CREATE TABLE operation_ids (operation_id TEXT PRIMARY KEY, scope TEXT NOT NULL, result_json TEXT NOT NULL, created_at INTEGER NOT NULL);
+      CREATE INDEX idx_operations_created ON operation_ids(created_at);
+    `,
+  },
+  {
+    version: 3,
+    up: `
+      ALTER TABLE workflow_issues ADD COLUMN fingerprint TEXT;
+      CREATE UNIQUE INDEX idx_workflow_issue_fingerprint ON workflow_issues(workflow_id, fingerprint);
+      CREATE TABLE creative_asset_candidates (
+        candidate_id TEXT PRIMARY KEY, asset_id TEXT NOT NULL, base_version INTEGER NOT NULL,
+        content_json TEXT NOT NULL, provenance_json TEXT NOT NULL,
+        status TEXT NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+        FOREIGN KEY(asset_id) REFERENCES creative_assets(asset_id) ON DELETE CASCADE
+      );
+      CREATE INDEX idx_asset_candidates_asset_status ON creative_asset_candidates(asset_id, status);
+    `,
+  },
+  {
+    version: 4,
+    up: `
+      ALTER TABLE creative_asset_dependencies ADD COLUMN target_type TEXT NOT NULL DEFAULT 'asset';
+      ALTER TABLE creative_asset_dependencies ADD COLUMN target_id TEXT;
+      ALTER TABLE creative_asset_dependencies ADD COLUMN workflow_id TEXT;
+      ALTER TABLE creative_asset_dependencies ADD COLUMN stage_id TEXT;
+      ALTER TABLE creative_asset_dependencies ADD COLUMN scope_json TEXT NOT NULL DEFAULT '{}';
+      CREATE INDEX idx_asset_dependencies_version ON creative_asset_dependencies(asset_id, asset_version);
+      CREATE TABLE creative_asset_impact_analyses (
+        analysis_id TEXT PRIMARY KEY, asset_id TEXT NOT NULL, from_version INTEGER NOT NULL,
+        to_version INTEGER NOT NULL, impact_count INTEGER NOT NULL, created_at INTEGER NOT NULL,
+        FOREIGN KEY(asset_id) REFERENCES creative_assets(asset_id) ON DELETE CASCADE
+      );
+    `,
+  },
+  {
+    version: 5,
+    up: `
+      ALTER TABLE workflow_stages ADD COLUMN completion_evidence_json TEXT NOT NULL DEFAULT '[]';
+      ALTER TABLE workflow_stages ADD COLUMN blocking_reason_json TEXT;
+      ALTER TABLE workflow_stages ADD COLUMN entered_at TEXT;
+      ALTER TABLE workflow_stages ADD COLUMN completed_at TEXT;
+    `,
+  },
+  {
+    version: 6,
+    up: `
+      ALTER TABLE workflow_issues ADD COLUMN issue_payload_json TEXT;
+    `,
+  },
+  {
+    version: 7,
+    up: `
+      ALTER TABLE workflow_instances ADD COLUMN author_intents_json TEXT NOT NULL DEFAULT '[]';
+    `,
+  },
 ];
