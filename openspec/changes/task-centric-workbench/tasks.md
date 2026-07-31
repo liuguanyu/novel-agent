@@ -24,7 +24,7 @@
 
 - [x] 3.1 [Core/IPC] 定义并校验统一 UI Effect executor 契约及 effect 执行结果事件。（稳定 effectId、成功/失败回执、IPC schema、Main 归属校验、幂等持久化与重连防重放已完成）
 - [x] 3.2 [Renderer] 接入切章、滚动、原文高亮、诊断标记、Diff、Hunk 审核、checkpoint、事实底稿和复检报告效果。（切章等待正文读取、滚动/高亮真实命中及执行结果回执已完成；Diff/Hunk/checkpoint/事实底稿/复检报告五类 UI Effect 已在 `useTaskUiEffects` → `App.tsx` 的 `taskUiExecutors` 逐项真实接入：`show-diff` 先 `await selectChapter(nodeId)`（正文读取失败即抛出→回执 failed）再打开 `RefactorReviewPanel`（Diff 双栏 + 逐 hunk accept/reject 落点）；`show-hunk-review` 打开同面板对齐逐处审核；`show-checkpoint` 修正为打开改写审阅面板（checkpoint id 在其落盘态呈现），不再错误跳任务中心；`open-fact-sheet` 打开事实底稿抽屉；`open-dashboard` 打开质量仪表盘抽屉（复检报告）。每类执行成功/失败均经 `useTaskUiEffects` 上报 `report-task-ui-effect-result` 回执，Renderer 仅消费效果 DTO 与调用既有回调，不访问 DB/LLM/fs。Main 侧在 4.5 改写/复检流中真实下发这五类效果并端到端断言归 3.6。）
-- [ ] 3.3 [Renderer] 实现任务驱动的中栏状态/空状态，左栏支持章节、问题、人物、故事线和任务产物上下文切换。（中栏任务化空状态已由 4.5C 完成；左栏多上下文（问题/人物/故事线/产物）切换待补。）
+- [x] 3.3 [Renderer] 实现任务驱动的中栏状态/空状态，左栏支持章节、问题、人物、故事线和任务产物上下文切换。（中栏任务化空状态已由 4.5C 完成；左栏多上下文切换已补：`NavAxis` 顶部新增「章节/问题/人物/故事线/产物」五页签（受控 `activeContext`/`onContextChange`）；章节仍为真实卷/章树，其余四类为 `App.tsx` 从已有投影 DTO 派生的扁平清单：问题来自 `findingsByRun`（按 run 展平，带严重度红/黄牌，点击复用 `handleSelectFinding`+`handleLocateIssue` 选中并定位章节）、人物来自事实库 `type==='person'` 实体（点击开事实库抽屉）、故事线来自事实库 plot hook（点击优先跳埋设章，否则开抽屉）、产物来自任务活动流 `artifactRefs`（去重，`chapter:` 前缀跳章节、否则开任务中心）。人物/故事线所需事实库由一个只在切到该两个上下文时才拉取的 `useStoryBible` 实例懒加载，与事实库抽屉自己的实例不冲突；各空上下文展任务语言空态文案。Renderer 仅消费投影 DTO 与调既有回调，不访问 DB/LLM/fs。）
 - [ ] 3.4 [Renderer] 右栏切换为当前任务助手，作者补充约束成为任务新输入并进入活动流。（右栏助手角色标题/空状态已由 4.5D 完成；「作者补充约束成为任务新输入」属后端联动，待补。）
 - [ ] 3.5 [Main/Renderer] 将模型交互改为可审计摘要、引用、结构化结果和采用/拒绝/待确认结果；MUST NOT 下发 hidden CoT。
 - [ ] 3.6 [Test] 验证所有正文/产物操作都有 UI Effect，消息流反馈与工作区实际变化一致，Renderer 不访问 DB/LLM/fs。

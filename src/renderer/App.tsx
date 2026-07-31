@@ -6,7 +6,7 @@
  * 全部业务经 IPC 委派后端。视觉后置（task 7.5）：仅骨架级样式。
  */
 
-import { NavAxis } from './components/NavAxis.js';
+import { NavAxis, type NavContextId, type NavListEntry } from './components/NavAxis.js';
 import { ManuscriptAxis, type ManuscriptAxisHandle } from './components/ManuscriptAxis.js';
 import { DialogueAxis } from './components/DialogueAxis.js';
 import { CommandPalette } from './components/CommandPalette.js';
@@ -33,6 +33,7 @@ import {
 import { useChapters } from './hooks/useChapters.js';
 import { useDialogue, type SummonRequest } from './hooks/useDialogue.js';
 import { useReviewFindings } from './hooks/useReviewFindings.js';
+import { useStoryBible } from './hooks/useStoryBible.js';
 import { useFactExtraction } from './hooks/useFactExtraction.js';
 import { useModelTaskSessions } from './hooks/useModelTaskSessions.js';
 import { useRefactor } from './hooks/useRefactor.js';
@@ -140,6 +141,9 @@ export function App(): JSX.Element {
   const [factSheetOpen, setFactSheetOpen] = useState(false);
   const [taskActivityOpen, setTaskActivityOpen] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
+  // 左栏上下文切换（章节/问题/人物/故事线/产物）；人物与故事线按需拉取事实库投影。
+  const [navContext, setNavContext] = useState<NavContextId>('chapters');
+  const navStoryBible = useStoryBible(navContext === 'characters' || navContext === 'storylines');
 
   // 当前选中章节路径（读书/对话模式的上下文面包屑）。
   const selectedChapterPath = useMemo(() => {
@@ -456,6 +460,98 @@ export function App(): JSX.Element {
     });
   }, [findingsByRun, selectFinding, workflowRef, workflowState]);
 
+  // ── 左栏多上下文清单（3.3）：全部由后端投影 DTO 派生 + 绑定既有回调，Renderer 不查询 DB/LLM/fs。──
+  // 问题：审校结果按 run 展平；点击复用 handleSelectFinding（选中 + 若属工作流则 select-issue）并定位章节。
+  const navIssueEntries = useMemo((): ReadonlyArray<NavListEntry> => {
+    const entries: NavListEntry[] = [];
+    for (const [runId, finding] of findingsByRun) {
+      finding.issues.forEach((issue, index) => {
+        const active = activeFinding?.runId === runId && activeFinding.index === index;
+        entries.push({
+          id: `${runId}:${index}`,
+          title: issue.description,
+          subtitle: issue.type,
+          badge: issue.severity === 'critical' ? '红牌' : issue.severity === 'warning' ? '黄牌' : '提示',
+          badgeTone: issue.severity === 'critical' ? 'critical' : issue.severity === 'warning' ? 'warning' : 'info',
+          active,
+          onClick: () => {
+            handleSelectFinding(runId, index);
+            handleLocateIssue(issue);
+          },
+        });
+      });
+    }
+    return entries;
+  }, [findingsByRun, activeFinding, handleSelectFinding, handleLocateIssue]);
+
+  // 人物：事实库中 type==='person' 的实体；点击打开事实库抽屉查阅。
+  const navCharacterEntries = useMemo((): ReadonlyArray<NavListEntry> => {
+    const entities = navStoryBible.bible?.entities ?? [];
+    return entities
+      .filter((entity) => entity.type === 'person')
+      .map((entity) => ({
+        id: entity.id,
+        title: entity.canonicalName,
+        ...(entity.aliases.length > 0 ? { subtitle: `别名：${entity.aliases.join('、')}` } : {}),
+        badge: entity.status === 'conflicting' ? '冲突' : entity.status === 'inferred' ? '推断' : '已确认',
+        badgeTone: entity.status === 'conflicting' ? 'warning' : entity.status === 'inferred' ? 'muted' : 'info',
+        onClick: () => setBibleOpen(true),
+      }));
+  }, [navStoryBible.bible]);
+
+  // 故事线：事实库中的伏笔（plot hook）；点击优先跳其埋设章节，否则打开事实库抽屉。
+  const navStorylineEntries = useMemo((): ReadonlyArray<NavListEntry> => {
+    const hooks = navStoryBible.bible?.plotHooks ?? [];
+    const stateLabel: Readonly<Record<string, string>> = {
+      planted: '已埋设', pending: '待回收', paid_off: '已回收', abandoned: '已弃用',
+    };
+    return hooks.map((hook) => {
+      const plantedChapter = hook.plantedAt.kind === 'chapter' ? hook.plantedAt.id : undefined;
+      return {
+        id: hook.id,
+        title: hook.description,
+        ...(hook.status === 'conflicting' ? { subtitle: '存在冲突，待裁决' } : {}),
+        badge: stateLabel[hook.state] ?? hook.state,
+        badgeTone: hook.state === 'abandoned' ? 'muted' : hook.state === 'paid_off' ? 'info' : 'warning',
+        onClick: () => {
+          if (plantedChapter !== undefined) selectChapter(plantedChapter);
+          else setBibleOpen(true);
+        },
+      };
+    });
+  }, [navStoryBible.bible, selectChapter]);
+
+  // 任务产物：任务活动流里带产物引用的活动；点击跳章节产物（chapter: 前缀）或打开任务中心。
+  const navArtifactEntries = useMemo((): ReadonlyArray<NavListEntry> => {
+    const entries: NavListEntry[] = [];
+    const seen = new Set<string>();
+    const kindLabel: Readonly<Record<string, string>> = {
+      'source-location': '原文定位', 'source-location-candidates': '定位候选', diff: '改写差异',
+      checkpoint: '检查点', 'fact-sheet': '事实底稿', diagnosis: '诊断', draft: '草稿',
+    };
+    for (const activity of taskStream.activities) {
+      if (activity.type !== 'task-activity') continue;
+      for (const artifact of activity.artifactRefs ?? []) {
+        if (seen.has(artifact.ref)) continue;
+        seen.add(artifact.ref);
+        const chapterId = artifact.ref.startsWith('chapter:')
+          ? artifact.ref.slice('chapter:'.length).split(':')[0]
+          : undefined;
+        entries.push({
+          id: artifact.ref,
+          title: artifact.label,
+          badge: kindLabel[artifact.kind] ?? artifact.kind,
+          badgeTone: 'muted',
+          onClick: () => {
+            if (chapterId !== undefined && chapterId.length > 0) selectChapter(chapterId);
+            else setTaskActivityOpen(true);
+          },
+        });
+      }
+    }
+    return entries;
+  }, [taskStream.activities, selectChapter]);
+
   const chooseSourceLocation = useCallback((taskRunId: string, candidateId: string): void => {
     window.novelAgent.sendCommand({
       type: 'choose-source-location',
@@ -662,7 +758,17 @@ export function App(): JSX.Element {
           className="min-h-0 flex-1"
         >
           <ResizablePanel defaultSize={18} minSize={12} maxSize={34} className="min-h-0">
-            <NavAxis tree={tree} selectedNodeId={selectedNodeId} onSelect={selectChapter} />
+            <NavAxis
+              tree={tree}
+              selectedNodeId={selectedNodeId}
+              onSelect={selectChapter}
+              activeContext={navContext}
+              onContextChange={setNavContext}
+              issues={navIssueEntries}
+              characters={navCharacterEntries}
+              storylines={navStorylineEntries}
+              artifacts={navArtifactEntries}
+            />
           </ResizablePanel>
           <ResizableHandle withHandle />
           <ResizablePanel defaultSize={56} minSize={30} className="min-h-0">
