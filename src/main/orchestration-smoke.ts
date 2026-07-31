@@ -465,6 +465,25 @@ async function smokeWorkflowContinuationResume(): Promise<void> {
       softChapterNodeId: 'chapter-B', keywords: ['顾长风'], instruction: '写一段顾长风登场', workflowRef,
     });
     check('task 5.4：纠偏挂起 interrupt-raised', collectInterrupt(wc) !== undefined);
+
+    // task 5.7：工作流上下文下的 graph-node-activated 事件只能来自真实图节点（单一有状态图），
+    // 模板阶段（如 draft-writing/fact-extraction/chapter-plan）不得伪造虚假节点事件。
+    const REAL_GRAPH_NODES = new Set([
+      'supervisor', 'writer', 'reviewer', 'fact-checker', 'scene-generator', 'plagiarism-checker',
+      'editor', 'style-editor', 'architect', 'character-generator', 'worldbuilding',
+      'concept-generator', 'scene-outliner', 'researcher', 'awaitDecision',
+    ]);
+    const TEMPLATE_STAGE_ONLY_IDS = new Set([
+      'concept', 'character-design', 'book-outline', 'chapter-plan', 'scene-outline',
+      'draft-writing', 'fact-extraction', 'automatic-review', 'author-review', 'chapter-finalization', 'whole-book-audit',
+    ]);
+    const summonGraphNodes = collectGraphEvents(wc).map((event) => event.node);
+    check('task 5.7：graph-node 事件均为真实图节点（无模板阶段虚假节点）',
+      summonGraphNodes.length > 0 && summonGraphNodes.every((node) => REAL_GRAPH_NODES.has(node)),
+      `nodes=${[...new Set(summonGraphNodes)].join(',')}`);
+    check('task 5.7：图节点事件不含任何模板阶段专有 id',
+      summonGraphNodes.every((node) => !TEMPLATE_STAGE_ONLY_IDS.has(node)));
+
     const saved = await continuationRecords.getByRunId(runId);
     check('task 5.4：中断写入 continuation record（scope=workflow）',
       saved !== null && saved.scope.kind === 'workflow' && saved.continuation.kind === 'resume-source-node'
