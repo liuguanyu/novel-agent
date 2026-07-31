@@ -87,6 +87,28 @@ export interface TaskModelAuditDto {
   readonly adoption: 'adopted' | 'rejected' | 'pending';
 }
 
+/**
+ * 统一心跳契约（任务驱动工作台 2.4 / requirement §2.4）。
+ *
+ * 心跳只在超过 2 秒无新活动且任务仍 running 时下发，且 MUST 携带至少一项真实
+ * 进展信号（当前步骤 / 已处理量 / 当前处理对象 / 最近子步骤 / 外部等待中），
+ * 禁止虚假进度。字段均为可选，但发送方 MUST 至少提供其中一项（Main 以守卫拦住空心跳）。
+ */
+export interface TaskHeartbeatDto {
+  /** 当前正在执行的步骤（作者可读）。 */
+  readonly step?: string;
+  /** 已处理量（如已扫描章节数）。 */
+  readonly processedCount?: number;
+  /** 总处理量（与 processedCount 配合展现进度）。 */
+  readonly totalCount?: number;
+  /** 当前处理对象（如目标章节/实体）。 */
+  readonly currentObject?: string;
+  /** 最近完成的子步骤。 */
+  readonly recentSubStep?: string;
+  /** 正在等待的外部依赖（如模型/磁盘 IO）。 */
+  readonly waitingOnExternal?: string;
+}
+
 interface TaskUiEffectBaseDto {
   /** Main 生成的稳定标识，用于校验和幂等记录 Renderer 执行结果。 */
   readonly effectId: string;
@@ -138,6 +160,8 @@ export interface TaskActivityEvent extends TaskRunRefDto {
   readonly authorCandidates?: ReadonlyArray<TaskAuthorCandidateDto>;
   /** 模型交互可审计记录（仅白名单字段，MUST NOT 含 hidden CoT）。 */
   readonly modelAudit?: TaskModelAuditDto;
+  /** 结构化心跳进展（仅 phase==='heartbeat' 时携带，至少一项真实信号）。 */
+  readonly heartbeat?: TaskHeartbeatDto;
   readonly uiEffects?: ReadonlyArray<TaskUiEffectDto>;
   /** Main 持久化的 Renderer 执行结果；用于审计及重连时避免重复执行。 */
   readonly uiEffectResult?: TaskUiEffectResultDto;

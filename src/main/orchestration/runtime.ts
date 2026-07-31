@@ -36,6 +36,7 @@ import {
   type BackendTaskActivityEvent,
   type TaskActivityEvent,
   type TaskArtifactRefDto,
+  type TaskHeartbeatDto,
   type TaskModelAuditDto,
   type TaskRunCompletedEvent,
   type TaskRunFailedEvent,
@@ -279,11 +280,7 @@ interface TaskRuntimeSession {
   /** 作者请求的控制意图；在安全步骤边界据此收敛状态。 */
   requestedControl?: 'pause' | 'cancel';
   heartbeat?: ReturnType<typeof setInterval>;
-  heartbeatState?: {
-    readonly step: string;
-    readonly currentObject: string;
-    readonly recentAction: string;
-  };
+  heartbeatState?: TaskHeartbeatDto;
 }
 
 interface ActiveRun {
@@ -1589,15 +1586,9 @@ export class OrchestrationRuntime {
     this.#taskSessions.set(ref.taskRunId, session);
     session.heartbeat = setInterval(() => {
       if (session.run.status !== 'running' || Date.now() - session.lastActivityAt < 2_000) return;
-      const state = session.heartbeatState;
-      if (state === undefined) return;
-      void this.#publishTaskActivity(session, {
-        status: 'running',
-        phase: 'heartbeat',
-        title: '定位原文',
-        message: `仍在${state.step}：${state.currentObject}`,
-        feedback: `最近完成：${state.recentAction}`,
-      });
+      const activity = this.#buildHeartbeatActivity('定位原文', session.heartbeatState);
+      if (activity === undefined) return;
+      void this.#publishTaskActivity(session, activity);
     }, 500);
     return session;
   }
@@ -1628,6 +1619,44 @@ export class OrchestrationRuntime {
       ...event,
       createdAt: new Date().toISOString(),
     } satisfies TaskActivityEvent);
+  }
+
+  /**
+   * 由结构化心跳进展构建一条 heartbeat 活动，MUST 至少携带一项真实信号，否则返回 undefined（拒绝空心跳/虚假进度）。
+   * message/feedback 均由结构化字段派生，作者可读。
+   */
+  #buildHeartbeatActivity(
+    title: string,
+    state: TaskHeartbeatDto | undefined,
+  ): Omit<TaskActivityEvent, keyof TaskRunRefDto | 'type' | 'activityId' | 'createdAt'> | undefined {
+    if (state === undefined) return undefined;
+    const hasSignal =
+      state.step !== undefined ||
+      state.processedCount !== undefined ||
+      state.currentObject !== undefined ||
+      state.recentSubStep !== undefined ||
+      state.waitingOnExternal !== undefined;
+    if (!hasSignal) return undefined; // 无真实进展信号：不发心跳，避免虚假进度。
+    const progress =
+      state.processedCount !== undefined
+        ? state.totalCount !== undefined
+          ? `（${state.processedCount}/${state.totalCount}）`
+          : `（已处理 ${state.processedCount}）`
+        : '';
+    const objectPart = state.currentObject === undefined ? '' : `：${state.currentObject}`;
+    const stepPart = state.step ?? '处理中';
+    const message = state.waitingOnExternal === undefined
+      ? `仍在${stepPart}${objectPart}${progress}`
+      : `等待${state.waitingOnExternal}${progress}`;
+    const feedback = state.recentSubStep === undefined ? undefined : `最近完成：${state.recentSubStep}`;
+    return {
+      status: 'running',
+      phase: 'heartbeat',
+      title,
+      message,
+      ...(feedback === undefined ? {} : { feedback }),
+      heartbeat: state,
+    };
   }
 
   #closeTaskSession(session: TaskRuntimeSession): void {
@@ -1758,7 +1787,7 @@ export class OrchestrationRuntime {
         factBacking,
       });
       session.execution = run;
-      session.heartbeatState = { step: '读取目标章节并验证证据上下文', currentObject: `目标章节“${chapterId}”`, recentAction: '已声明诊断问题、证据引文和章节锤点' };
+      session.heartbeatState = { step: '读取目标章节并验证证据上下文', currentObject: `目标章节“${chapterId}”`, recentSubStep: '已声明诊断问题、证据引文和章节锤点' };
       const factBackingRefs = factBacking.map((item) => ({
         kind: 'fact' as const, label: `相关人物或事实–${item.name}`, ref: item.entityId,
       }));
@@ -1779,7 +1808,7 @@ export class OrchestrationRuntime {
       this.#assertNotControlled(session);
       const chapter = await (this.#deps.manuscript?.readChapterContent ?? readChapterContent)(chapterId);
       this.#assertNotControlled(session);
-      session.heartbeatState = { step: '匹配诊断证据', currentObject: `目标章节“${chapterId}”`, recentAction: '已读取目标章节正文' };
+      session.heartbeatState = { step: '匹配诊断证据', currentObject: `目标章节“${chapterId}”`, recentSubStep: '已读取目标章节正文' };
       await this.#publishTaskActivity(session, {
         status: 'running', phase: 'retrieval', title: '读取原文',
         message: '已读取目标章节，正在匹配诊断证据',
@@ -2304,19 +2333,7 @@ export class OrchestrationRuntime {
     // Restart heartbeat on the resumed session.
     session.run = resumedRun;
     await this.#deps.taskRuns?.save(resumedRun);
-    session.heartbeatState = { step: '重新匹配诊断证据', currentObject: `目标章节“${chapterId}”`, recentAction: '已从暂停点恢复任务' };
-    if (session.heartbeat === undefined) {
-      session.heartbeat = setInterval(() => {
-        if (session.run.status !== 'running' || Date.now() - session.lastActivityAt < 2_000) return;
-        const state = session.heartbeatState;
-        if (state === undefined) return;
-        void this.#publishTaskActivity(session, {
-          status: 'running', phase: 'heartbeat', title: '定位原文',
-          message: `仍在${state.step}：${state.currentObject}`,
-          feedback: `最近完成：${state.recentAction}`,
-        });
-      }, 500);
-    }
+    this.#startTaskHeartbeat(session, '定位原文', { step: '重新匹配诊断证据', currentObject: `目标章节“${chapterId}”`, recentSubStep: '已从暂停点恢复任务' });
     await this.#publishTaskActivity(session, {
       status: 'running', phase: 'validation', title: '恢复定位原文',
       message: '已从暂停点恢复，正在重新匹配诊断证据',
@@ -2378,7 +2395,7 @@ export class OrchestrationRuntime {
     const ref = this.#refFromRun(running);
     const session: TaskRuntimeSession = { run: running, ref, wc, lastActivityAt: Date.now(), execution: run };
     this.#taskSessions.set(taskRunId, session);
-    this.#startTaskHeartbeat(session, registration.title, { step: registration.title, currentObject: playbook.title, recentAction: '已接收任务输入' });
+    this.#startTaskHeartbeat(session, registration.title, { step: registration.title, currentObject: playbook.title, recentSubStep: '已接收任务输入' });
     let keepAlive = false;
     try {
       await this.#publishTaskActivity(session, {
@@ -2416,7 +2433,7 @@ export class OrchestrationRuntime {
       await this.#saveTaskRun(session, positioned);
       const handler = registration.handlers[step.id];
       if (handler === undefined) throw new Error(`playbook「${playbook.id}」缺少步骤「${step.id}」的执行器`);
-      session.heartbeatState = { step: step.title, currentObject: playbook.title, recentAction: `进入步骤「${step.title}」` };
+      session.heartbeatState = { step: step.title, currentObject: playbook.title, recentSubStep: `进入步骤「${step.title}」` };
       const ctx: PlaybookStepContext = {
         run: session.run,
         stepId: step.id,
@@ -2623,7 +2640,7 @@ export class OrchestrationRuntime {
     await this.#saveTaskRun(session, resumed);
     session.wc.send(IPC_CHANNELS.taskActivityEvent, receivedEvent);
     session.lastActivityAt = Date.now();
-    this.#startTaskHeartbeat(session, registration.title, { step: playbook.steps[stepIndex]?.title ?? stepId, currentObject: playbook.title, recentAction: '已收到作者决策' });
+    this.#startTaskHeartbeat(session, registration.title, { step: playbook.steps[stepIndex]?.title ?? stepId, currentObject: playbook.title, recentSubStep: '已收到作者决策' });
     let keepAlive = false;
     try {
       const ctx: PlaybookStepContext = { run: session.run, stepId, inputs: session.run.inputs, signal: run.controller.signal };
@@ -2661,7 +2678,7 @@ export class OrchestrationRuntime {
     const resumedAt = new Date().toISOString();
     const resumed = transitionTaskRun(persisted, { status: 'running', occurredAt: resumedAt });
     await this.#saveTaskRun(session, resumed);
-    this.#startTaskHeartbeat(session, registration.title, { step: registration.title, currentObject: registration.playbook.title, recentAction: '已从暂停点恢复任务' });
+    this.#startTaskHeartbeat(session, registration.title, { step: registration.title, currentObject: registration.playbook.title, recentSubStep: '已从暂停点恢复任务' });
     let keepAlive = false;
     try {
       await this.#publishTaskActivity(session, {
@@ -2683,23 +2700,19 @@ export class OrchestrationRuntime {
     }
   }
 
-  /** 通用心跳：>2s 无活动且仍在运行时下发 heartbeat 活动，避免让作者以为产品卡死。 */
+  /** 通用心跳：>2s 无活动且仍在运行时下发 heartbeat 活动，携带结构化真实进展，避免让作者以为产品卡死。 */
   #startTaskHeartbeat(
     session: TaskRuntimeSession,
     title: string,
-    state: { step: string; currentObject: string; recentAction: string },
+    state: TaskHeartbeatDto,
   ): void {
     session.heartbeatState = state;
     if (session.heartbeat !== undefined) return;
     session.heartbeat = setInterval(() => {
       if (session.run.status !== 'running' || Date.now() - session.lastActivityAt < 2_000) return;
-      const current = session.heartbeatState;
-      if (current === undefined) return;
-      void this.#publishTaskActivity(session, {
-        status: 'running', phase: 'heartbeat', title,
-        message: `仍在${current.step}：${current.currentObject}`,
-        feedback: `最近完成：${current.recentAction}`,
-      });
+      const activity = this.#buildHeartbeatActivity(title, session.heartbeatState);
+      if (activity === undefined) return;
+      void this.#publishTaskActivity(session, activity);
     }, 500);
   }
 

@@ -2217,6 +2217,15 @@ async function smokeLocateSourceTask(): Promise<void> {
     await new Promise<void>((resolve) => setTimeout(resolve, 2_100));
     const heartbeatEvent = heartbeatWc.taskActivity.find((event) => event.type === 'task-activity' && event.phase === 'heartbeat');
     check('heartbeat 超过两秒后基于真实步骤发送', heartbeatEvent?.type === 'task-activity' && heartbeatEvent.status === 'running' && heartbeatEvent.message.includes('读取目标章节并验证') && (heartbeatEvent.feedback?.includes('已声明诊断问题') ?? false));
+    check(
+      'heartbeat 携带结构化真实进展信号（step/currentObject/recentSubStep）',
+      heartbeatEvent?.type === 'task-activity'
+        && heartbeatEvent.heartbeat !== undefined
+        && heartbeatEvent.heartbeat.step === '读取目标章节并验证证据上下文'
+        && (heartbeatEvent.heartbeat.currentObject?.includes('目标章节') ?? false)
+        && heartbeatEvent.heartbeat.recentSubStep !== undefined
+        && (heartbeatEvent.heartbeat.step !== undefined || heartbeatEvent.heartbeat.processedCount !== undefined || heartbeatEvent.heartbeat.currentObject !== undefined || heartbeatEvent.heartbeat.recentSubStep !== undefined || heartbeatEvent.heartbeat.waitingOnExternal !== undefined),
+    );
     await heartbeatPromise;
     const heartbeatCountAtCompletion = heartbeatWc.taskActivity.filter((event) => event.type === 'task-activity' && event.phase === 'heartbeat').length;
     await new Promise<void>((resolve) => setTimeout(resolve, 700));

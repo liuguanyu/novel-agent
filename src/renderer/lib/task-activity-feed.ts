@@ -157,6 +157,15 @@ function runtimeItems(events: ReadonlyArray<BackendTaskActivityEvent>): Readonly
         ...(event.error.recovery === undefined ? {} : { feedback: event.error.recovery }),
       };
     }
+    const heartbeatDetails = event.heartbeat === undefined ? [] : [
+      ...(event.heartbeat.step === undefined ? [] : [`当前步骤：${event.heartbeat.step}`]),
+      ...(event.heartbeat.processedCount === undefined ? [] : [`已处理：${event.heartbeat.processedCount}${event.heartbeat.totalCount === undefined ? '' : ` / ${event.heartbeat.totalCount}`}`]),
+      ...(event.heartbeat.currentObject === undefined ? [] : [`当前对象：${event.heartbeat.currentObject}`]),
+      ...(event.heartbeat.recentSubStep === undefined ? [] : [`最近子步骤：${event.heartbeat.recentSubStep}`]),
+      ...(event.heartbeat.waitingOnExternal === undefined ? [] : [`等待外部：${event.heartbeat.waitingOnExternal}`]),
+    ];
+    const evidenceDetails = event.evidenceRefs === undefined ? [] : event.evidenceRefs.map((item) => `${item.label}：${item.ref}`);
+    const details = [...evidenceDetails, ...heartbeatDetails];
     return {
       id: `task:${event.taskRunId}:${event.activityId}`, source: 'task' as const, label: event.title,
       message: event.message,
@@ -166,7 +175,7 @@ function runtimeItems(events: ReadonlyArray<BackendTaskActivityEvent>): Readonly
       ...(event.feedback === undefined && event.nextAction === undefined
         ? {}
         : { feedback: [event.feedback, event.nextAction].filter((item): item is string => item !== undefined).join('；') }),
-      ...(event.evidenceRefs === undefined ? {} : { details: event.evidenceRefs.map((item) => `${item.label}：${item.ref}`) }),
+      ...(details.length === 0 ? {} : { details }),
       ...(event.modelAudit === undefined ? {} : {
         modelAudit: {
           goal: event.modelAudit.goal,
