@@ -77,8 +77,15 @@ import { NEW_BOOK_CREATION_TEMPLATE } from '../core/workflow/templates.js';
 import {
   NEW_BOOK_PLANNING_PLAYBOOKS,
   NEW_BOOK_STAGE_PLAYBOOKS,
+  NEW_BOOK_WRITING_PLAYBOOKS,
+  NEW_BOOK_WRITING_STAGE_PLAYBOOKS,
   type NewBookPlanningStageId,
+  type NewBookWritingStageId,
 } from '../core/task-runtime/new-book-playbooks.js';
+import {
+  buildNewBookWritingRegistrations,
+  type NewBookModelResolver,
+} from './orchestration/new-book-playbook-executors.js';
 import {
   LEGACY_LOCATE_SOURCE_PLAYBOOK,
   NEW_BOOK_CHARACTER_DESIGN_PLAYBOOK,
@@ -2518,6 +2525,118 @@ async function smokeGenericPlaybookTask(): Promise<void> {
 }
 
 /**
+ * 5.2 新书写作/审校循环生产执行器冲烟：
+ * 用 fake NewBookModelResolver 注入模型能力，经工厂构建真实四份注册项，
+ * 驱动「章节初稿生成」全生命周期（run→awaiting-author→submit→completed），
+ * 并校验其余三份（作者修订/连贯性检查/事实底稿更新）结构对齐、可实例化。
+ * 守卫红线：产物为作者可见结构化结果、作者决策可追踪、真实事件有序。
+ */
+async function smokeNewBookWritingPlaybooks(): Promise<void> {
+  // stage 映射覆盖模板中分场大纲之后的四个写作/审校 stage。
+  const writingStageIds: ReadonlyArray<NewBookWritingStageId> = [
+    'draft-writing',
+    'author-review',
+    'automatic-review',
+    'fact-extraction',
+  ];
+  const templateStageIds = new Set(NEW_BOOK_CREATION_TEMPLATE.stages.map((stage) => stage.id));
+  check(
+    '新书写作 stage 映射全部存在于模板',
+    writingStageIds.every((id) => id in NEW_BOOK_WRITING_STAGE_PLAYBOOKS && templateStageIds.has(id)),
+  );
+  check(
+    '新书写作 playbook 均为 new-book 族且 id 唯一',
+    NEW_BOOK_WRITING_PLAYBOOKS.every((playbook) => playbook.kind === 'new-book') &&
+      new Set(NEW_BOOK_WRITING_PLAYBOOKS.map((playbook) => playbook.id)).size === NEW_BOOK_WRITING_PLAYBOOKS.length,
+  );
+
+  const dir = await mkdtemp(join(tmpdir(), 'na-new-book-writing-'));
+  const opened = await openDatabase(join(dir, 'new-book-writing.db'));
+  if (!opened.ok) {
+    check('new-book-writing SQLite 可用', false, opened.message);
+    await rm(dir, { recursive: true, force: true });
+    return;
+  }
+  const db = opened.db;
+  try {
+    const taskRuns = new TaskRunRepository(db);
+    // fake 模型：不接真实 provider，逐 agent/tier 回可核对的确定性文本。
+    const seen: Array<{ agentId: string; tier: CapabilityTier }> = [];
+    const fakeResolver: NewBookModelResolver = {
+      createAdapter: (agentId: string, tier: CapabilityTier): Pick<ModelAdapter, 'complete'> => {
+        seen.push({ agentId, tier });
+        return {
+          complete: async () => ({ text: `【${agentId}/${tier} 生成结果】`, finishReason: 'stop' as const }),
+        };
+      },
+    };
+    const registrations = buildNewBookWritingRegistrations(fakeResolver);
+    check('工厂产出四份写作循环注册项', registrations.length === 4);
+    const draftRegistration = registrations.find((item) => item.playbook.id === 'new-book.draft-writing');
+    if (draftRegistration === undefined) throw new Error('缺少章节初稿生成注册项');
+
+    const runtime = new OrchestrationRuntime({
+      getModelResolver: () => undefined,
+      getCheckpointer: () => undefined,
+      getFactStore: () => undefined,
+      taskRuns,
+    });
+    for (const registration of registrations) runtime.registerPlaybook(registration);
+
+    // 章节初稿生成：compose-draft(auto)→author-accept-draft(author) 全生命周期。
+    const wc = new FakeWebContents();
+    const runId = randomUUID();
+    await runtime.runPlaybookTask(wc.asWebContents(), {
+      registration: draftRegistration,
+      taskRunId: runId,
+      inputs: { sceneOutline: [{ beat: '开场冲突' }] },
+    });
+    const awaiting = await taskRuns.get(runId);
+    check('初稿生成收敛 awaiting-author 且停在作者确认步',
+      awaiting?.status === 'awaiting-author' && awaiting.currentStepId === 'author-accept-draft');
+    check('初稿生成首步经真实模型产出可追踪产物',
+      awaiting?.artifacts.some((artifact) => artifact.outputKey === 'chapterDraft') === true);
+    check('初稿生成调用 writer/prose 档',
+      seen.some((call) => call.agentId === 'writer' && call.tier === 'prose'));
+    check('初稿生成 kind 为 new-book-planning',
+      wc.taskActivity.every((event) => event.kind === 'new-book-planning'));
+    // 真实事件有序：input 先于 awaiting-author。
+    const inputIdx = wc.taskActivity.findIndex((event) => event.type === 'task-activity' && event.phase === 'input');
+    const awaitingIdx = wc.taskActivity.findIndex((event) => event.type === 'task-activity' && event.status === 'awaiting-author');
+    check('初稿生成事件有序：输入先于等待作者', inputIdx !== -1 && awaitingIdx !== -1 && inputIdx < awaitingIdx);
+
+    await runtime.submitPlaybookAuthorDecision(wc.asWebContents(), runId, 'author-accept-draft', { accepted: true }, `decision:${runId}:1`);
+    const completed = await taskRuns.get(runId);
+    check('初稿生成经作者确认收敛 completed 且复用同一 taskRunId',
+      completed?.id === runId && completed.status === 'completed');
+    check('初稿生成作者决策可追踪',
+      completed?.authorDecisions.length === 1 && completed.authorDecisions[0]?.stepId === 'author-accept-draft');
+    check('初稿生成下发完成事件', wc.taskActivity.some((event) => event.type === 'task-run-completed'));
+
+    // 作者修订：三步含 apply-revisions 依赖前一步作者决策，验证决策可被后续步骤消费。
+    const revisionRegistration = registrations.find((item) => item.playbook.id === 'new-book.author-revision');
+    if (revisionRegistration === undefined) throw new Error('缺少作者修订注册项');
+    const revWc = new FakeWebContents();
+    const revId = randomUUID();
+    await runtime.runPlaybookTask(revWc.asWebContents(), {
+      registration: revisionRegistration,
+      taskRunId: revId,
+      inputs: { chapterDraft: { text: '初稿正文' } },
+    });
+    check('作者修订收敛 awaiting-author 停在作者取舍步',
+      (await taskRuns.get(revId))?.currentStepId === 'author-approve-revisions');
+    await runtime.submitPlaybookAuthorDecision(revWc.asWebContents(), revId, 'author-approve-revisions', { accept: ['r1'] }, `decision:${revId}:1`);
+    const revDone = await taskRuns.get(revId);
+    check('作者修订经决策后 apply-revisions 产出修订稿并 completed',
+      revDone?.status === 'completed' && revDone.artifacts.some((artifact) => artifact.outputKey === 'revisedDraft'));
+    check('作者修订调用 editor 档', seen.some((call) => call.agentId === 'editor'));
+  } finally {
+    await db.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+}
+
+/**
  * 4.4 [Integration Test] locate-source 端到端验收：
  * 单条 issue 贯穿「选择问题 → 创建任务 → 展示输入 → 读取证据 → 查找/匹配正文 →
  * 真实活动 → UI Effect → 作者确认 → 进入局部改写」的有序旅程。
@@ -3095,6 +3214,7 @@ async function main(): Promise<void> {
   await smokeRefactorLoopBoundaries();
   await smokeLocateCandidateOverflow();
   await smokeGenericPlaybookTask();
+  await smokeNewBookWritingPlaybooks();
   await smokeExplicitFactExtraction();
   await smokeAutoExtractAfterWriter();
   await smokeBackfillFacts();

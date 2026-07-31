@@ -10,6 +10,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { registerIpcHandlers, loadModelsConfig, ModelResolver } from './ipc-handlers.js';
 import { OrchestrationRuntime } from './orchestration/runtime.js';
+import { buildNewBookWritingRegistrations } from './orchestration/new-book-playbook-executors.js';
 import { UtilityProcessAuditRunner } from './audit/utility-process-audit-runner.js';
 import { UtilityProcessDiffRunner } from './refactor/utility-process-diff-runner.js';
 import { UtilityProcessEmbedRunner } from './corpus/utility-process-embed-runner.js';
@@ -129,6 +130,10 @@ app.whenReady().then(
     registerIpcHandlers(orchestration, workflowService);
     if (result.ok) {
       modelResolver = new ModelResolver(result.config);
+      // 模型就绪后注册新书写作/审校循环执行器（初稿/修订/连贯性/事实底稿）。
+      for (const registration of buildNewBookWritingRegistrations(modelResolver)) {
+        orchestration.registerPlaybook(registration);
+      }
     } else {
       // 配置缺失不崩溃：窗口照常创建，对话请求时经 IPC 回结构化错误
       console.warn(`[model-config] ${result.message}`);
