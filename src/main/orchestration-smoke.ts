@@ -11,7 +11,7 @@
  * 编译进 out-smoke/ 后用 `node out-smoke/main/orchestration-smoke.js` 运行。
  */
 
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, readdir, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -3690,6 +3690,66 @@ async function smokeModelAuditNoCoT(): Promise<void> {
   }
 }
 
+/**
+ * 3.6 冲烟（静态守卫）：Renderer 不得直接访问 DB/LLM/fs 或主进程模块。
+ * 递归扫描 src/renderer 下所有 .ts/.tsx 源文件，断言无任何 import 命中禁用模块白名单以外的副作用源：
+ * node 内置（node: 前缀、fs/path/os 等）、electron、sqlite/better-sqlite3、模型适配层、main/ 与 core/ 的 db/model 模块。
+ * 正文落盘等副作用 MUST 由 Main 侧任务命令完成；Renderer 只能经 `window.novelAgent` 桥与投影 DTO 交互。
+ */
+async function smokeRendererIsolation(): Promise<void> {
+  const rendererRoot = join(process.cwd(), 'src', 'renderer');
+  // import 语句的模块说明符（import ... from 'X' / export ... from 'X' / import 'X'）。
+  const importSpecifierPattern = /(?:from|import)\s+['"]([^'"]+)['"]/g;
+  // 禁用模块判定：node 内置、electron、sqlite 驱动、模型/db 与任何相对 main/ 路径。
+  const isForbidden = (spec: string): boolean => {
+    if (spec.startsWith('node:')) return true;
+    if (/^(fs|path|os|crypto|child_process|worker_threads|net|http|https)(\/|$)/.test(spec)) return true;
+    if (spec === 'electron' || spec.startsWith('electron/') || spec.startsWith('electron-')) return true;
+    if (/better-sqlite3|(^|\/)sqlite(\/|$)/.test(spec)) return true;
+    // 相对路径指向 main/ 或 core 的 db/model 实现（Renderer 不得跨层引用副作用层）。
+    if (/(^|\/)main\//.test(spec)) return true;
+    if (/core\/(model|db)(\/|$)/.test(spec)) return true;
+    return false;
+  };
+  const files: string[] = [];
+  const walk = async (dir: string): Promise<void> => {
+    for (const entry of await readdir(dir, { withFileTypes: true })) {
+      const full = join(dir, entry.name);
+      if (entry.isDirectory()) await walk(full);
+      else if (entry.name.endsWith('.ts') || entry.name.endsWith('.tsx')) files.push(full);
+    }
+  };
+  try {
+    await walk(rendererRoot);
+  } catch {
+    check('3.6 Renderer 隔离：能定位 src/renderer 源树', false, `未找到 ${rendererRoot}`);
+    return;
+  }
+  check('3.6 Renderer 隔离：扫描到源文件', files.length > 0, `files=${files.length}`);
+
+  const violations: string[] = [];
+  for (const file of files) {
+    const source = await readFile(file, 'utf8');
+    let match: RegExpExecArray | null;
+    importSpecifierPattern.lastIndex = 0;
+    while ((match = importSpecifierPattern.exec(source)) !== null) {
+      const spec = match[1];
+      if (spec !== undefined && isForbidden(spec)) {
+        violations.push(`${file.replace(rendererRoot, 'src/renderer')} → ${spec}`);
+      }
+    }
+  }
+  check('3.6 Renderer 不直接 import DB/LLM/fs/electron/main 模块',
+    violations.length === 0, violations.join('; '));
+
+  // 正面性：Renderer 确实经 window.novelAgent 桥与 Main 交互（而非本地副作用）。
+  let usesBridge = false;
+  for (const file of files) {
+    if ((await readFile(file, 'utf8')).includes('window.novelAgent')) { usesBridge = true; break; }
+  }
+  check('3.6 Renderer 经 window.novelAgent 桥发命令/查询（不本地写正文）', usesBridge);
+}
+
 async function main(): Promise<void> {
   console.log('=== orchestration-runtime 冲烟 ===');
   smokeReviewerJsonDefence();
@@ -3710,6 +3770,7 @@ async function main(): Promise<void> {
   await smokeGenericPlaybookTask();
   await smokeSupplementTaskInput();
   await smokeModelAuditNoCoT();
+  await smokeRendererIsolation();
   await smokeNewBookWritingPlaybooks();
   await smokeNewBookMainPathEndToEnd();
   await smokePlaybookExtensionNoRegression();
