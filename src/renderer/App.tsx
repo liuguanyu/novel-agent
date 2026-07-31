@@ -49,7 +49,7 @@ import {
   resolveAgentMention,
 } from '../core/shell/agent-catalog.js';
 import type { ToolboxBoardId, ToolboxActionId } from '../core/shell/toolbox-catalog.js';
-import type { ChapterTreeNodeDto, ConsistencyIssueDto } from '../shared/ipc/index.js';
+import type { ChapterTreeNodeDto, ConsistencyIssueDto, RunId } from '../shared/ipc/index.js';
 import { useWorkbenchActivities } from './hooks/useWorkbenchActivities.js';
 import { useWorkflowSnapshot } from './hooks/useWorkflowSnapshot.js';
 import { useAssetReview } from './hooks/useAssetReview.js';
@@ -572,6 +572,29 @@ export function App(): JSX.Element {
     });
   }, []);
 
+  // 3.4：作者向当前活动任务补充约束。runId 从该任务最新一条事件的 executionRunId 派生（Main 仅按 operationId 幂等、不校验 runId）。
+  const supplementRunId = useMemo((): string | undefined => {
+    const active = taskStream.activeTaskRunId;
+    if (active === undefined) return undefined;
+    for (let i = taskStream.events.length - 1; i >= 0; i -= 1) {
+      const event = taskStream.events[i];
+      if (event !== undefined && event.taskRunId === active) return event.runId;
+    }
+    return undefined;
+  }, [taskStream.activeTaskRunId, taskStream.events]);
+
+  const supplementTask = useCallback((constraint: string): void => {
+    const taskRunId = taskStream.activeTaskRunId;
+    if (taskRunId === undefined) return;
+    window.novelAgent.sendCommand({
+      type: 'supplement-task-input',
+      runId: (supplementRunId ?? crypto.randomUUID()) as RunId,
+      operationId: `supplement-task-input:${taskRunId}:${crypto.randomUUID()}`,
+      taskRunId,
+      constraint,
+    });
+  }, [supplementRunId, taskStream.activeTaskRunId]);
+
   const locateSourceIssueId = workflowState.snapshot?.selectedIssueId ?? activeIssue?.issueId;
   const runLocateSource = useCallback((): void => {
     if (workflowRef === undefined || locateSourceIssueId === undefined) return;
@@ -607,6 +630,8 @@ export function App(): JSX.Element {
       onSelectFinding={handleSelectFinding}
       onAdoptFinding={handleAdoptIssue}
       onSummonExpert={() => setPaletteOpen(true)}
+      canSupplementTask={taskStream.activeTaskRunId !== undefined}
+      onSupplementTask={supplementTask}
     />
   );
 

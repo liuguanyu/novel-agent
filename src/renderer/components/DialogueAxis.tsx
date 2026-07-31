@@ -55,6 +55,10 @@ interface DialogueAxisProps {
   onAdoptFinding: (issue: ConsistencyIssueDto) => void;
   /** 显式召唤专家入口（打开命令面板；task 10.6）。 */
   onSummonExpert?: () => void;
+  /** 3.4：当前是否存在可补充约束的活动任务（有则显示补充入口）。 */
+  canSupplementTask?: boolean;
+  /** 3.4：作者向当前任务补充可审计约束（Main 落库为新输入并进入活动流）。 */
+  onSupplementTask?: (constraint: string) => void;
 }
 
 function ReasoningBlock({ reasoning }: { reasoning: string }): JSX.Element | null {
@@ -357,9 +361,13 @@ export function DialogueAxis({
   onSelectFinding,
   onAdoptFinding,
   onSummonExpert,
+  canSupplementTask,
+  onSupplementTask,
 }: DialogueAxisProps): JSX.Element {
   const [draft, setDraft] = useState('');
   const [mentionIndex, setMentionIndex] = useState(0);
+  // 3.4：补充约束受控输入（独立于对话输入框，专用于向当前任务追加可审计约束）。
+  const [supplementDraft, setSupplementDraft] = useState('');
   const busy = activeRunId !== undefined;
   const mention = resolveAgentMention(draft);
   const mentionToken = draft.trimStart().match(/^@([^\s，,。.!！?？:：]*)$/u)?.[1];
@@ -465,6 +473,43 @@ export function DialogueAxis({
             onLocate={onLocateConflict}
             onAdopt={onAdoptConflict}
           />
+        )}
+        {canSupplementTask === true && onSupplementTask !== undefined && (
+          <div className="mb-2 rounded-md border border-dashed border-border bg-muted/40 p-2">
+            <div className="mb-1 text-[11px] font-medium text-muted-foreground">
+              向当前任务补充约束（作为新输入进入活动流）
+            </div>
+            <div className="flex items-end gap-2">
+              <textarea
+                value={supplementDraft}
+                onChange={(e) => setSupplementDraft(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.nativeEvent.isComposing) return;
+                  if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+                    const text = supplementDraft.trim();
+                    if (text.length === 0) return;
+                    onSupplementTask(text);
+                    setSupplementDraft('');
+                  }
+                }}
+                placeholder="例如：主角这一段要保持克制，不要煽情…"
+                rows={2}
+                className="w-full resize-none rounded-md border border-input bg-background px-2 py-1 text-xs outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50"
+              />
+              <Button
+                size="sm"
+                disabled={supplementDraft.trim().length === 0}
+                onClick={() => {
+                  const text = supplementDraft.trim();
+                  if (text.length === 0) return;
+                  onSupplementTask(text);
+                  setSupplementDraft('');
+                }}
+              >
+                补充
+              </Button>
+            </div>
+          </div>
         )}
         {busy && activeRunId !== undefined && (
           <div className="mb-2 flex items-center justify-between text-xs text-muted-foreground">

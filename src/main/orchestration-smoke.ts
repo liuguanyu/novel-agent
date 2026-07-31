@@ -3514,6 +3514,100 @@ async function smokeLocateSourceFactBacking(): Promise<void> {
   }
 }
 
+/**
+ * 3.4 冲烟：作者补充约束成为任务新输入并进入活动流。
+ * 覆盖：① 下发 phase:'input' 且 title==='作者补充约束'、inputSummary 含约束文本；
+ * ② inputs.authorSupplements 追加该项（只追加、不改既有输入）；③ 同 operationId 幂等；④ 终态拒绝。
+ */
+async function smokeSupplementTaskInput(): Promise<void> {
+  const dir = await mkdtemp(join(tmpdir(), 'na-supplement-'));
+  const opened = await openDatabase(join(dir, 'supplement.db'));
+  if (!opened.ok) {
+    check('supplement SQLite 可用', false, opened.message);
+    await rm(dir, { recursive: true, force: true });
+    return;
+  }
+  const db = opened.db;
+  try {
+    const taskRuns = new TaskRunRepository(db);
+    const runtime = new OrchestrationRuntime({
+      getModelResolver: () => undefined,
+      getCheckpointer: () => undefined,
+      getFactStore: () => undefined,
+      taskRuns,
+    });
+
+    // 非终态（queued）任务：可接受补充。
+    const run = createTaskRunFromPlaybook(TEMPORARY_EDITORIAL_PLAYBOOK, {
+      id: 'task-supplement-1',
+      executionRunId: 'run-supplement-1',
+      inputs: { text: '一段独立文本', editorialBrief: '润色语气' },
+      now: '2026-01-01T00:00:00.000Z',
+    });
+    await taskRuns.create(run);
+
+    const wc = new FakeWebContents();
+    const constraint = '主角这一段要保持克制，不要煽情';
+    const opId = `supplement:${run.id}:1`;
+    await runtime.supplementTaskInput(wc.asWebContents(), run.id, constraint, opId);
+
+    const inputEvent = wc.taskActivity.find(
+      (event): event is Extract<BackendTaskActivityEvent, { type: 'task-activity' }> =>
+        event.type === 'task-activity' && event.phase === 'input',
+    );
+    check('3.4 补充约束下发 input 活动',
+      inputEvent !== undefined &&
+        inputEvent.title === '作者补充约束' &&
+        inputEvent.inputSummary === constraint &&
+        inputEvent.kind === 'temporary-task');
+
+    const afterFirst = await taskRuns.get(run.id);
+    const supplementsAfterFirst = Array.isArray(afterFirst?.inputs['authorSupplements'])
+      ? (afterFirst?.inputs['authorSupplements'] as ReadonlyArray<unknown>)
+      : [];
+    const firstSupplement = supplementsAfterFirst[0] as { text?: string } | undefined;
+    check('3.4 补充约束追加到 authorSupplements 且不改既有输入',
+      supplementsAfterFirst.length === 1 &&
+        firstSupplement?.text === constraint &&
+        afterFirst?.inputs['text'] === '一段独立文本' &&
+        afterFirst?.inputs['editorialBrief'] === '润色语气');
+
+    // 重复同一 operationId：幂等（不重复下发、不重复追加）。
+    const wc2 = new FakeWebContents();
+    await runtime.supplementTaskInput(wc2.asWebContents(), run.id, constraint, opId);
+    const afterDup = await taskRuns.get(run.id);
+    const supplementsAfterDup = Array.isArray(afterDup?.inputs['authorSupplements'])
+      ? (afterDup?.inputs['authorSupplements'] as ReadonlyArray<unknown>)
+      : [];
+    check('3.4 同 operationId 重复补充幂等',
+      supplementsAfterDup.length === 1 &&
+        !wc2.taskActivity.some((event) => event.type === 'task-activity' && event.phase === 'input'));
+
+    // 不同 operationId：可再次追加（只追加、历史保留）。
+    const wc3 = new FakeWebContents();
+    await runtime.supplementTaskInput(wc3.asWebContents(), run.id, '另一条：保持第三人称叙述', `supplement:${run.id}:2`);
+    const afterSecond = await taskRuns.get(run.id);
+    const supplementsAfterSecond = Array.isArray(afterSecond?.inputs['authorSupplements'])
+      ? (afterSecond?.inputs['authorSupplements'] as ReadonlyArray<unknown>)
+      : [];
+    check('3.4 不同 operationId 可多次追加且保留历史', supplementsAfterSecond.length === 2);
+
+    // 终态任务（completed）：拒绝补充。
+    const completedRun: TaskRun = { ...run, id: 'task-supplement-done', status: 'completed' };
+    await taskRuns.create(completedRun);
+    let rejected = false;
+    try {
+      await runtime.supplementTaskInput(new FakeWebContents().asWebContents(), completedRun.id, constraint, `supplement:${completedRun.id}:1`);
+    } catch {
+      rejected = true;
+    }
+    check('3.4 终态任务拒绝补充', rejected);
+  } finally {
+    await db.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+}
+
 async function main(): Promise<void> {
   console.log('=== orchestration-runtime 冲烟 ===');
   smokeReviewerJsonDefence();
@@ -3532,6 +3626,7 @@ async function main(): Promise<void> {
   await smokeRefactorLoopBoundaries();
   await smokeLocateCandidateOverflow();
   await smokeGenericPlaybookTask();
+  await smokeSupplementTaskInput();
   await smokeNewBookWritingPlaybooks();
   await smokeNewBookMainPathEndToEnd();
   await smokePlaybookExtensionNoRegression();

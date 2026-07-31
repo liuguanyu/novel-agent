@@ -82,6 +82,13 @@ const controlTaskRunCommandSchema = z.object({
   taskRunId: idSchema,
   action: z.enum(['pause', 'resume', 'cancel']),
 }).strict();
+const supplementTaskInputCommandSchema = z.object({
+  type: z.literal('supplement-task-input'),
+  runId: idSchema,
+  operationId: idSchema,
+  taskRunId: idSchema,
+  constraint: z.string().trim().min(1).max(4_000),
+}).strict();
 const authorIntentSchema = z.object({ kind: z.enum(['preserve', 'extract', 'remove']), text: z.string().trim().min(1).max(2_000) }).strict();
 const startWorkflowSchema = z.object({ ...metaShape, requestId: idSchema, operationId: idSchema, type: z.literal('start-workflow'), projectId: idSchema, workflowId: idSchema.optional(), kind: z.enum(['new-book-creation', 'legacy-book-revision']).optional(), objective: z.string().trim().min(1).max(10_000), authorIntents: z.array(authorIntentSchema).max(100).optional() }).strict();
 const workflowActionSchema = z.object({
@@ -299,6 +306,14 @@ export function registerIpcHandlers(runtime: OrchestrationRuntime, workflowServi
         if (!parsed.success) return;
         void runtime.reportTaskUiEffectResult(wc, parsed.data.operationId, parsed.data.result).catch(() => {
           // Invalid or stale effect receipts are rejected without creating an unhandled rejection.
+        });
+        return;
+      }
+      case 'supplement-task-input': {
+        const parsed = supplementTaskInputCommandSchema.safeParse(raw);
+        if (!parsed.success) return;
+        void runtime.supplementTaskInput(wc, parsed.data.taskRunId, parsed.data.constraint, parsed.data.operationId).catch(() => {
+          // 无效/陈旧的补充请求静默拒绝，不产生未处理的 rejection。
         });
         return;
       }

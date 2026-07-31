@@ -1959,6 +1959,75 @@ export class OrchestrationRuntime {
     if (inserted) wc.send(IPC_CHANNELS.taskActivityEvent, event);
   }
 
+  /**
+   * 3.4：作者在右栏助手补充的约束 → 落库为当前任务的新输入，并进入活动流。
+   * 约束仅追加到 `inputs.authorSupplements`（作者可审计输入，绝不改写既有输入/隐藏思维链），
+   * 并下发一条 `input` 阶段活动。经 `appendEventForOperation` 幂等去重；任务终态则拒绝补充。
+   * 会话无关（重连后仍可补充）：不依赖 in-memory session，直接读写持久化 TaskRun。
+   */
+  async supplementTaskInput(
+    wc: WebContents,
+    taskRunId: string,
+    constraint: string,
+    operationId: string,
+  ): Promise<void> {
+    const repository = this.#deps.taskRuns;
+    if (repository === undefined) throw new Error('任务运行仓储尚未就绪');
+    const trimmed = constraint.trim();
+    if (trimmed.length === 0) throw new Error('补充约束不能为空');
+    const run = await repository.get(taskRunId);
+    if (run === null) throw new Error('任务运行不存在');
+    if (run.status === 'completed' || run.status === 'cancelled' || run.status === 'failed') {
+      throw new Error('任务已结束，无法追加补充约束');
+    }
+    const now = new Date().toISOString();
+    const priorSupplements = Array.isArray(run.inputs['authorSupplements'])
+      ? (run.inputs['authorSupplements'] as ReadonlyArray<unknown>).filter((item): item is Record<string, unknown> => typeof item === 'object' && item !== null)
+      : [];
+    const nextRun: TaskRun = {
+      ...run,
+      inputs: {
+        ...run.inputs,
+        authorSupplements: [...priorSupplements, { text: trimmed, addedAt: now }],
+      },
+    };
+    const kind = ipcTaskKindFor(run.refs.playbookId, run.kind);
+    const workflowRef = run.refs.workflowId === null || run.refs.workflowStageId === null
+      ? undefined
+      : {
+          workflowId: run.refs.workflowId,
+          stageId: run.refs.workflowStageId,
+          ...(run.refs.issueId === null ? {} : { issueId: run.refs.issueId }),
+        };
+    const event = {
+      taskRunId,
+      taskId: `${kind}:${run.refs.issueId ?? taskRunId}`,
+      kind,
+      runId: run.refs.executionRunId as RunId,
+      ...(workflowRef === undefined ? {} : { workflowRef }),
+      ...(run.refs.issueId === null ? {} : { issueId: run.refs.issueId }),
+      type: 'task-activity' as const,
+      activityId: randomUUID(),
+      status: run.status,
+      phase: 'input' as const,
+      title: '作者补充约束',
+      message: `已收到你的补充约束，将作为当前任务的新输入：${trimmed}`,
+      inputSummary: trimmed,
+      feedback: '补充约束已加入任务输入，后续步骤会据此执行',
+      createdAt: now,
+    } satisfies TaskActivityEvent;
+    const inserted = await repository.appendEventForOperation(
+      event,
+      operationId,
+      `task-run:${taskRunId}:supplement`,
+    );
+    if (!inserted) return; // 重复 operationId：已收敛。
+    await repository.save(nextRun);
+    const session = this.#taskSessions.get(taskRunId);
+    if (session !== undefined) session.run = nextRun;
+    wc.send(IPC_CHANNELS.taskActivityEvent, event);
+  }
+
   async chooseSourceLocationCommand(
     wc: WebContents,
     taskRunId: string,

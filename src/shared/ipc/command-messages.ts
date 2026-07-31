@@ -200,6 +200,16 @@ export interface ReportTaskUiEffectResultCommand {
   result: TaskUiEffectResultDto;
 }
 
+/** 作者在右栏助手补充的约束：Main 落库为当前任务的新输入并进入活动流（3.4）。 */
+export interface SupplementTaskInputCommand {
+  type: 'supplement-task-input';
+  runId: RunId;
+  operationId: string;
+  taskRunId: string;
+  /** 作者可读的补充约束文本（不含隐藏提示/思维链）。 */
+  constraint: string;
+}
+
 /** Story Bible 事实定位器：Renderer 只能提交受限目标，Main 侧验证后写库。 */
 export type StoryBibleFactLocatorDto =
   | { kind: 'entity'; entityId: string }
@@ -332,6 +342,7 @@ export type FrontendCommandMessage =
   | ChooseSourceLocationCommand
   | ControlTaskRunCommand
   | ReportTaskUiEffectResultCommand
+  | SupplementTaskInputCommand
   | ConfirmStoryBibleFactCommand
   | EditStoryBibleFactCommand
   | DeleteStoryBibleFactCommand

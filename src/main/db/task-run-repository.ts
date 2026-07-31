@@ -100,10 +100,10 @@ export class TaskRunRepository {
 
   async save(run: TaskRun): Promise<TaskRun> {
     const result = await this.db.run(
-      `UPDATE task_runs SET status=?,current_step_id=?,current_step_index=?,artifacts_json=?,
+      `UPDATE task_runs SET status=?,current_step_id=?,current_step_index=?,inputs_json=?,artifacts_json=?,
        author_decisions_json=?,failure_json=?,updated_at=?,started_at=?,awaiting_author_at=?,paused_at=?,ended_at=?
        WHERE task_run_id=?`,
-      run.status, run.currentStepId, run.currentStepIndex, JSON.stringify(run.artifacts),
+      run.status, run.currentStepId, run.currentStepIndex, JSON.stringify(run.inputs), JSON.stringify(run.artifacts),
       JSON.stringify(run.authorDecisions), run.failure === null ? null : JSON.stringify(run.failure),
       run.timestamps.updatedAt, run.timestamps.startedAt, run.timestamps.awaitingAuthorAt,
       run.timestamps.pausedAt, run.timestamps.endedAt, run.id,
