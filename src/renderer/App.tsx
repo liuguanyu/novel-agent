@@ -251,9 +251,15 @@ export function App(): JSX.Element {
       }
       throw new Error('目标章节已打开，但诊断引文未能在当前正文中高亮');
     },
-    showDiff: async (_nodeId: string, _diffId: string): Promise<void> => { setRefactorOpen(true); },
+    // Diff 效果：先切到差异所属章节（正文读取失败则抛出，回执为失败），再打开改写审阅面板（Diff 双栏 + 逐 hunk）。
+    showDiff: async (nodeId: string, _diffId: string): Promise<void> => {
+      await selectChapter(nodeId);
+      setRefactorOpen(true);
+    },
+    // Hunk 审核效果：改写审阅面板即逐处 accept/reject 的落点。
     showHunkReview: async (_refactorRunId: string): Promise<void> => { setRefactorOpen(true); },
-    showCheckpoint: async (_checkpointId: string): Promise<void> => { setTaskActivityOpen(true); },
+    // checkpoint 效果：检查点在改写审阅面板的落盘态呈现（含可回滚 checkpoint id），而非任务中心。
+    showCheckpoint: async (_checkpointId: string): Promise<void> => { setRefactorOpen(true); },
     openFactSheet: async (): Promise<void> => { setFactSheetOpen(true); },
     openDashboard: async (): Promise<void> => { setDashOpen(true); },
   }), [selectChapter]);
