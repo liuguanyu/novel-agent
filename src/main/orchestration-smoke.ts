@@ -1382,6 +1382,22 @@ async function smokeWorkflowReviewerIssuePersistence(): Promise<void> {
     check('workflow reviewer 使用 manifest 章节锚点', dto?.anchors[0]?.id === chapterId);
     check('stage-run quality evidence 使用真实 issueId', evidence?.completion?.issueIds?.[0] === dto?.issueId);
 
+    // task 5.2：mutate 模式下召唤不在 allowedExperts 内的专家，启动阶段运行前即被校验拒绝（不进 stage-run）。
+    const disallowedWc = new FakeWebContents();
+    const disallowedRunId = randomUUID() as RunId;
+    await runtime(new FakeModelResolver('unused', '[]').asResolver()).summon(disallowedWc.asWebContents(), {
+      runId: disallowedRunId, mode: 'mutate', agent: 'writer',
+      instruction: '在立意阶段直接写正文', workflowRef,
+    });
+    const disallowedError = disallowedWc.stream.find((item) => item.type === 'stream-error');
+    check(
+      'task 5.2：disallowed expert 启动前被拒（validation stream-error）',
+      disallowedError?.type === 'stream-error' && disallowedError.error.category === 'validation'
+      && /is not allowed in stage/.test(disallowedError.error.message),
+    );
+    const disallowedStageRun = await db.get('SELECT 1 FROM workflow_stage_runs WHERE run_id=?', disallowedRunId);
+    check('task 5.2：被拒的 disallowed expert 不写 stage-run', disallowedStageRun === null);
+
     if (dto?.issueId === undefined) throw new Error('reviewer did not persist issue');
     await workflowIssues.select(dto.issueId, 'author', 'targeted-fix-pass');
     await workflowIssues.linkCheckpointAndMarkVerifying(dto.issueId, 'checkpoint-targeted-pass');

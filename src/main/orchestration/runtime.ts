@@ -56,6 +56,8 @@ import {
   locateSourceEvidence,
   type WorkflowIssueRecord,
   type WorkflowRef,
+  getBuiltinWorkflowTemplate,
+  type WorkflowKind,
 } from '../../core/workflow/index.js';
 import type { CandidateFact, ConsistencyIssue, ExtractionInput, FactView } from '../../core/story-bible/index.js';
 import {
@@ -664,6 +666,25 @@ export class OrchestrationRuntime {
     }
   }
 
+  /**
+   * task 5.2：启动阶段运行前校验模板允许专家。
+   * 仅当 mutate 模式（专家实际承担阶段写入工作）且运行归属某 expert 阶段、该阶段声明了非空
+   * allowedExperts 时，才强制召唤的专家 agent 必须在列表内；diagnose 模式（reviewer/fact-checker 审校诊断）
+   * 不声称承担阶段专家工作，不受此约束。
+   */
+  async #assertStageActorAllowed(ref: WorkflowRef, mode: SummonParams['mode'], agent: string | undefined): Promise<void> {
+    if (mode !== 'mutate' || agent === undefined) return;
+    const workflow = await this.#deps.workflows?.get(ref.workflowId);
+    const stage = workflow?.stages.find((item) => item.stageId === ref.stageId);
+    if (workflow === null || workflow === undefined || stage === undefined) return;
+    const template = getBuiltinWorkflowTemplate(workflow.kind as WorkflowKind, Number(workflow.templateVersion));
+    const definition = template?.stages.find((item) => item.id === stage.templateStageId);
+    if (definition === undefined || definition.actor !== 'expert' || definition.allowedExperts.length === 0) return;
+    if (!definition.allowedExperts.includes(agent)) {
+      throw new Error(`expert ${agent} is not allowed in stage ${stage.templateStageId}`);
+    }
+  }
+
   async #assertIssueAnchor(ref: WorkflowRef | undefined, nodeId: string): Promise<void> {
     if (ref?.issueId === undefined) return;
     const issue = await this.#deps.workflowIssues?.get(ref.issueId);
@@ -1016,7 +1037,10 @@ export class OrchestrationRuntime {
   async summon(wc: WebContents, params: SummonParams): Promise<void> {
     const { runId } = params;
     if (params.workflowRef !== undefined) {
-      try { await this.#assertWorkflowRef(params.workflowRef, undefined, true); }
+      try {
+        await this.#assertWorkflowRef(params.workflowRef, undefined, true);
+        await this.#assertStageActorAllowed(params.workflowRef, params.mode, params.agent);
+      }
       catch (err) {
         this.#send(wc, { type: 'stream-error', runId, kind: 'dialogue', error: { category: 'validation', message: err instanceof Error ? err.message : String(err) } });
         return;

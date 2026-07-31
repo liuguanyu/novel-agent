@@ -36,8 +36,8 @@
 
 ## 5. LangGraph 阶段归属与恢复路由
 
-- [ ] 5.1 [Core/Main] 在 `NovelState` 及 LangGraph annotation 桥接中加入可选 `workflowRef`，不复制完整 WorkflowInstance 或问题队列
-- [ ] 5.2 [Main] 启动阶段运行前校验模板允许专家/动作，并在 start/complete/fail/interrupt 时记录 stage-run 与完成证据
+- [x] 5.1 [Core/Main] 在 `NovelState` 及 LangGraph annotation 桥接中加入可选 `workflowRef`，不复制完整 WorkflowInstance 或问题队列（`src/core/orchestration/novel-state.ts` `NovelState` 加可选 `workflowRef?: WorkflowRef`（仅 workflowId/stageId/可选 issueId 轻量归属，不嵌入完整实例/问题队列）；runtime `ActiveRun.workflowRef` 与 `#initialState` 条件 spread 注入，`#withWorkflow` 将其投影到下行事件。）
+- [x] 5.2 [Main] 启动阶段运行前校验模板允许专家/动作，并在 start/complete/fail/interrupt 时记录 stage-run 与完成证据（stage-run 记录：`OrchestrationRuntime.#recordStageRun` 在 summon/resume/runGlobalAudit/locateSource/runTargetedVerification/backfillFacts 等路径 start/resumed/completed/failed/interrupted 全覆盖，经 `SqliteStageRunEvidenceRecorder` 原子写 `workflow_stage_runs` 并驱动状态机 transition（quality-gate 携 completion 证据）；允许专家校验：本次新增 `#assertStageActorAllowed`，`summon` 在 `#assertWorkflowRef` 后、驱动图之前调用——仅 mutate 模式（专家实际承担阶段写入）且归属 expert 阶段、该阶段 allowedExperts 非空时，强制召唤 agent 必须在列表内，否则抛 `expert X is not allowed in stage Y` 并以 validation stream-error 中断、不写 stage-run；diagnose 模式（reviewer/fact-checker 审校）不受此约束。`smokeWorkflowReviewerIssuePersistence` 新增：disallowed expert（concept 阶段 mutate agent=writer）启动前被 validation stream-error 拒绝且不写 workflow_stage_runs。）
 - [ ] 5.3 [Main] 将普通后续意见/`@专家` 区分为当前阶段内运行、目标资产澄清或 standalone：跨阶段人物/世界观/大纲澄清优先消歧目标资产并保持主阶段，非资产调用才返回 standalone/暂停或切换选择
 - [ ] 5.4 [Main] 定义并持久化 interrupt continuation record（source node、workflow/stage/issue、continuation kind、allowed decisions）
 - [ ] 5.5 [Main] 实现 continuation resolver，按阶段与中断来源决定恢复目标，移除 `correct` / `modify` 固定导向 writer 的通用假设
