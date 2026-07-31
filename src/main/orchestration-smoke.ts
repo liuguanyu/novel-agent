@@ -2516,6 +2516,45 @@ async function smokeGenericPlaybookTask(): Promise<void> {
     await cancelRuntime.controlTaskRun(cancelWc.asWebContents(), cancelId, 'cancel', `control:${cancelId}:cancel:2`);
     check('通用任务重复取消幂等', (await taskRuns.get(cancelId))?.status === 'cancelled');
 
+    // 2.6：通用引擎路径也发结构化心跳（>2s 无活动，携带至少一项真实进展信号，禁止虚假进度）。
+    let releaseHeartbeat: (() => void) | undefined;
+    const heartbeatGate = new Promise<void>((resolve) => { releaseHeartbeat = resolve; });
+    const heartbeatRegistration: PlaybookRegistration = {
+      playbook: TEMPORARY_EDITORIAL_PLAYBOOK,
+      title: '慢速临时任务',
+      completedSummary: '慢速任务已完成',
+      handlers: {
+        'review-text': {
+          run: async () => {
+            await heartbeatGate; // 阻塞至心跳阈值触发后再释放。
+            return { message: '审阅完成', artifacts: [{ outputKey: 'editorialNotes', value: 'ok', ref: { kind: 'draft', label: '意见', ref: 'note' } }] };
+          },
+        },
+      },
+    };
+    const hbWc = new FakeWebContents();
+    const hbRuntime = makeRuntime();
+    hbRuntime.registerPlaybook(heartbeatRegistration);
+    const hbId = randomUUID();
+    const hbPromise = hbRuntime.runPlaybookTask(hbWc.asWebContents(), {
+      registration: heartbeatRegistration, taskRunId: hbId, inputs: { text: 't', editorialBrief: 'b' },
+    });
+    await new Promise<void>((resolve) => setTimeout(resolve, 100));
+    check('通用任务心跳两秒阈值前不提前发送', !hbWc.taskActivity.some((event) => event.type === 'task-activity' && event.phase === 'heartbeat'));
+    await new Promise<void>((resolve) => setTimeout(resolve, 2_200));
+    const genericHeartbeat = hbWc.taskActivity.find((event) => event.type === 'task-activity' && event.phase === 'heartbeat');
+    check(
+      '通用任务超过两秒发结构化心跳且携带至少一项真实信号',
+      genericHeartbeat?.type === 'task-activity'
+        && genericHeartbeat.status === 'running'
+        && genericHeartbeat.heartbeat !== undefined
+        && (genericHeartbeat.heartbeat.step !== undefined || genericHeartbeat.heartbeat.processedCount !== undefined || genericHeartbeat.heartbeat.currentObject !== undefined || genericHeartbeat.heartbeat.recentSubStep !== undefined || genericHeartbeat.heartbeat.waitingOnExternal !== undefined),
+    );
+    releaseHeartbeat?.();
+    await hbPromise;
+    const hbCompleted = await taskRuns.get(hbId);
+    check('通用任务心跳后仍收敛 completed', hbCompleted?.status === 'completed');
+
     // 缺必填输入 → failed。
     const missingWc = new FakeWebContents();
     const missingRuntime = makeRuntime();
