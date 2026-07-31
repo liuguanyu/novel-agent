@@ -754,6 +754,7 @@ export function App(): JSX.Element {
         <CurrentTaskCard
           workflow={workflowState.snapshot}
           events={taskStream.events}
+          {...(activeIssue === undefined ? {} : { activeIssue })}
           onOpenTaskCenter={() => setTaskActivityOpen(true)}
           onChooseSourceLocation={chooseSourceLocation}
           onControlTask={controlTask}

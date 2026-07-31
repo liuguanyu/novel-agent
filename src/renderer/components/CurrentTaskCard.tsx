@@ -1,11 +1,13 @@
 import { CircleAlert, CircleX, Loader2, Pause, Play, Route, Target, X } from 'lucide-react';
 import { Button } from '@/components/ui/button';
-import type { BackendTaskActivityEvent, WorkflowSnapshotDto } from '../../shared/ipc/index.js';
+import type { BackendTaskActivityEvent, ConsistencyIssueDto, WorkflowSnapshotDto } from '../../shared/ipc/index.js';
 import { WORKFLOW_TASK_GOAL } from './WorkflowGraph.js';
 
 interface CurrentTaskCardProps {
   readonly workflow: WorkflowSnapshotDto | null;
   readonly events: ReadonlyArray<BackendTaskActivityEvent>;
+  /** 当前任务所针对的诊断问题（若有），用于在任务卡展示“问题详情”。 */
+  readonly activeIssue?: ConsistencyIssueDto;
   readonly onOpenTaskCenter: () => void;
   readonly onChooseSourceLocation: (taskRunId: string, candidateId: string) => void;
   readonly onControlTask: (taskRunId: string, action: 'pause' | 'resume' | 'cancel') => void;
@@ -99,7 +101,7 @@ const TASK_DETAILS: Readonly<Record<string, {
   },
 };
 
-export function CurrentTaskCard({ workflow, events, onOpenTaskCenter, onChooseSourceLocation, onControlTask, onEnterRefactor }: CurrentTaskCardProps): JSX.Element | null {
+export function CurrentTaskCard({ workflow, events, activeIssue, onOpenTaskCenter, onChooseSourceLocation, onControlTask, onEnterRefactor }: CurrentTaskCardProps): JSX.Element | null {
   if (workflow === null) return null;
   const stage = workflow.stages.find((item) => item['stageId'] === workflow.currentStageId);
   if (stage === undefined) return null;
@@ -125,6 +127,14 @@ export function CurrentTaskCard({ workflow, events, onOpenTaskCenter, onChooseSo
   const paused = status === 'paused';
   const failed = status === 'failed';
   const cancelled = status === 'cancelled';
+
+  // 统一 playbook 进度（1.4）：从 workflow 各阶段派生“已完成 n / 共 m 步 · 当前第 k 步”，与 Workflow Graph 轻量摘要一致。
+  const totalSteps = workflow.stages.length;
+  const completedSteps = workflow.stages.filter((item) => {
+    const s = String(item['status'] ?? '');
+    return s === 'completed' || s === 'skipped';
+  }).length;
+  const currentStepNumber = workflow.stages.findIndex((item) => item['stageId'] === workflow.currentStageId) + 1;
 
   // 4.3 定位完成后的「进入局部改写」下一步入口：从最近完成的 locate-source run 取章节/问题/证据引文。
   let locatedSource: { readonly chapterId: string; readonly quote: string; readonly issueId?: string } | undefined;
@@ -161,6 +171,19 @@ export function CurrentTaskCard({ workflow, events, onOpenTaskCenter, onChooseSo
           </div>
           <h2 className="mt-1 text-base font-semibold text-foreground">{goal}</h2>
           <p className="mt-1 text-sm text-muted-foreground">{details.purpose}</p>
+          {totalSteps > 0 && (
+            <div className="mt-1.5 text-xs text-muted-foreground" aria-label="任务进度">
+              进度：已完成 {completedSteps}/{totalSteps} 步{currentStepNumber > 0 ? ` · 当前第 ${currentStepNumber} 步` : ''}
+            </div>
+          )}
+          {activeIssue !== undefined && (
+            <div className="mt-1.5 flex items-start gap-1.5 text-xs" aria-label="针对问题">
+              <span className={`shrink-0 rounded px-1.5 py-0.5 font-medium ${activeIssue.severity === 'critical' ? 'bg-destructive/10 text-destructive' : activeIssue.severity === 'warning' ? 'bg-amber-500/10 text-amber-700 dark:text-amber-400' : 'bg-primary/10 text-primary'}`}>
+                {activeIssue.severity === 'critical' ? '红牌' : activeIssue.severity === 'warning' ? '黄牌' : '提示'}
+              </span>
+              <span className="text-foreground/85">针对问题：{activeIssue.description}</span>
+            </div>
+          )}
         </div>
         <Button size="sm" variant="outline" onClick={onOpenTaskCenter}>
           <Route className="size-3.5" aria-hidden />
@@ -230,6 +253,16 @@ export function CurrentTaskCard({ workflow, events, onOpenTaskCenter, onChooseSo
               <div className="mt-2 text-xs font-medium text-primary">确认这个位置</div>
             </button>
           ))}
+        </div>
+      )}
+      {latest?.type === 'task-activity' && latest.status === 'awaiting-author' && (latest.authorCandidates === undefined || latest.authorCandidates.length === 0) && (
+        <div className="mt-2 flex flex-wrap items-center gap-2 rounded border border-amber-500/30 bg-amber-500/5 px-2.5 py-2 text-xs" aria-label="等待作者处理">
+          <CircleAlert className="size-3.5 text-amber-600 dark:text-amber-400" aria-hidden />
+          <span className="text-foreground/85">{latest.nextAction ?? '这一步需要你确认后才会继续'}</span>
+          <Button type="button" size="xs" onClick={onOpenTaskCenter}>
+            <Route className="size-3.5" aria-hidden />
+            前往处理
+          </Button>
         </div>
       )}
       {locatedSource !== undefined && (
