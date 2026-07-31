@@ -17,7 +17,7 @@
 - [ ] 2.2 [Main/IPC] 发布真实 `task-activity-event`，覆盖开始、输入、步骤、工具、模型、输出、等待作者、完成和失败事件。（`locate-source` 与通用 playbook 引擎均发布真实输入/步骤/输出/等待/完成/失败事件；剩余仅是把各具体任务的真实 handler 迁移到通用引擎）
 - [ ] 2.3 [Renderer] 新增统一 activity store，直接消费真实 Task Runtime 事件；迁移期间兼容快照但不从快照伪造活动。（真实事件 store 已接入，支持启动/重连加载持久活动并与实时事件去重合并；旧 snapshot feed 仍处于迁移兼容期）
 - [x] 2.4 [Main] 实现超过 2 秒无新活动时的真实 heartbeat，携带步骤/处理量/当前对象/最近子步骤/外部等待中的至少一项，禁止虚假进度。（`locate-source` 已验证两秒阈值、真实步骤上下文和任务完成后停止发送）
-- [ ] 2.5 [Main/Renderer] 实现暂停、中断、失败、等待作者、恢复和取消的活动与任务中心展示。（`locate-source` 已完成失败状态、失败原因、已完成步骤、恢复建议、任务中心入口，以及运行中/等待作者态的暂停、恢复、取消：运行中在安全步骤边界收敛、恢复复用同一 taskRunId、当前任务卡提供暂停/恢复/取消操作；通用引擎已把运行中暂停、awaiting-author 取消、从 currentStepIndex 恢复、通用失败收敛推广到 new-book/temporary 任务；剩余为 Renderer 侧通用任务卡展示对接）
+- [x] 2.5 [Main/Renderer] 实现暂停、中断、失败、等待作者、恢复和取消的活动与任务中心展示。（`locate-source` 已完成失败状态、失败原因、已完成步骤、恢复建议、任务中心入口，以及运行中/等待作者态的暂停、恢复、取消；通用引擎已把运行中暂停、awaiting-author 取消、从 currentStepIndex 恢复、通用失败收敛推广到 new-book/temporary 任务。Renderer 侧通用任务卡展示对接已完成：`CurrentTaskCard` 的暂停/恢复/取消控制、失败态恢复建议/任务详情入口、awaiting-author 主操作、进度/问题详情均以 `status`/`latest`/workflow 快照驱动与 `kind` 无关，`controlTask` 仅按 taskRunId/action 下发（不区分族），`TaskActivityDrawer`（任务中心）按 running/waiting（paused/awaiting）/error（failed）/idle（cancelled）/done 区分色调展示全活动历史，亦与 kind 无关；new-book/temporary playbook run 绑定工作流阶段时经 `#refFromRun` 携带 workflowRef 即可自然浮现到同一任务卡与任务中心。仅“进入局部改写”入口适当地限 templateStageId==='generate-rewrite'（新书族不命中）。Renderer 纯展示不访问 DB/LLM/fs。）
 - [ ] 2.6 [Test] 覆盖真实事件顺序、重连查询、heartbeat 阈值、状态收敛、失败恢复和重复 operation 幂等。（`locate-source` 已覆盖真实事件顺序、重连查询、heartbeat 阈值、等待/完成收敛、失败原因持久化、候选确认幂等，以及运行中暂停安全收敛、恢复复用同一 taskRunId、等待作者取消和重复暂停/取消 operation 幂等；通用引擎 smoke 已补 temporary 单步收敛、new-book 作者决策、暂停/恢复复用同一 taskRunId、awaiting-author 取消、缺必填失败、重复 author-decision/control operation 幂等）
 
 ## Phase 3：工作区响应
