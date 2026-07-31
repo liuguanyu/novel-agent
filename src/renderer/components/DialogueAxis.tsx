@@ -37,6 +37,10 @@ interface DialogueAxisProps {
   onAsk: (instruction: string) => void;
   /** 当前输入提交后将交给的专家，避免隐式切换路由。 */
   askTargetLabel: string;
+  /** 右栏任务助手角色标题（§7.6）：随当前阶段切换；缺省为「对话」。 */
+  assistantTitle?: string;
+  /** 无对话时的任务语言空状态引导（§7.6）。 */
+  assistantEmptyHint?: string;
   onAbort: (runId: string) => void;
   onApproveConflict: (runId: string) => void;
   onRejectConflict: (runId: string) => void;
@@ -342,6 +346,8 @@ export function DialogueAxis({
   activeFinding,
   onAsk,
   askTargetLabel,
+  assistantTitle,
+  assistantEmptyHint,
   onAbort,
   onApproveConflict,
   onRejectConflict,
@@ -415,7 +421,7 @@ export function DialogueAxis({
 
   return (
     <aside className="flex h-full min-h-0 flex-col overflow-hidden border-l border-border bg-card">
-      <div className="border-b border-border px-3 py-2 font-semibold text-foreground">对话</div>
+      <div className="border-b border-border px-3 py-2 font-semibold text-foreground">{assistantTitle ?? '对话'}</div>
       <div className="relative min-h-0 flex-1">
         <div
           ref={scrollRef}
@@ -423,7 +429,7 @@ export function DialogueAxis({
           className="h-full overflow-y-auto px-3 py-3"
         >
           {turns.length === 0 ? (
-            <p className="text-sm text-muted-foreground">选中章节后，在下方向助手提问或发起召唤。</p>
+            <p className="text-sm text-muted-foreground">{assistantEmptyHint ?? '选中章节后，在下方向助手提问或发起召唤。'}</p>
           ) : (
             turns.map((turn, i) => (
               <TurnView

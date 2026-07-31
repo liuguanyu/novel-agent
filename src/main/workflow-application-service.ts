@@ -132,7 +132,10 @@ export class WorkflowApplicationService {
       }
       const issue = await this.issues.get(command.issueId);
       if (issue === null || issue.workflowId !== record.workflowId) throw new Error('issue does not belong to workflow');
-      if (action === 'select-issue') await this.issues.select(command.issueId, 'author', command.runId);
+      if (action === 'select-issue') {
+        await this.issues.select(command.issueId, 'author', command.runId);
+        await this.workflows.selectIssue(record.workflowId, command.issueId);
+      }
       if (action === 'dismiss-issue') await this.issues.dismiss(command.issueId, command.reason ?? '');
       if (action === 'verify-issue') {
         throw new Error('verification result is Main-owned; use run-targeted-verification');

@@ -28,6 +28,7 @@ export interface WorkflowRecord {
   readonly authorIntents: ReadonlyArray<AuthorIntent>;
   readonly status: string;
   readonly currentStageId: string | null;
+  readonly selectedIssueId?: string;
   readonly stages: ReadonlyArray<WorkflowStageRecord>;
   readonly version: number;
   readonly createdAt: number;
@@ -149,6 +150,19 @@ export class WorkflowRepository {
     });
   }
 
+  async selectIssue(workflowId: string, issueId: string): Promise<WorkflowRecord> {
+    const result = await this.db.run(
+      'UPDATE workflow_instances SET selected_issue_id=?,updated_at=? WHERE workflow_id=?',
+      issueId,
+      Date.now(),
+      workflowId,
+    );
+    if (result.changes !== 1) throw new Error(`unknown workflow ${workflowId}`);
+    const record = await this.get(workflowId);
+    if (record === null) throw new Error(`workflow ${workflowId} disappeared`);
+    return record;
+  }
+
   async setStageImpactStatus(stageId: string, impactStatus: string): Promise<void> {
     const result = await this.db.run('UPDATE workflow_stages SET impact_status=?,version=version+1,updated_at=? WHERE stage_id=?', impactStatus, Date.now(), stageId);
     if (result.changes !== 1) throw new Error(`unknown stage ${stageId}`);
@@ -181,7 +195,7 @@ export class WorkflowRepository {
     await tx.run(`UPDATE workflow_stages SET status=?,run_ids_json=?,artifact_refs_json=?,impact_status=?,completion_evidence_json=?,blocking_reason_json=?,entered_at=?,completed_at=?,version=version+1,updated_at=? WHERE stage_id=?`, stage.status, json(stage.runIds), json(stage.artifactRefs), stage.impactStatus, json(stage.completionEvidence), stage.blockingReason === undefined ? null : json(stage.blockingReason), stage.enteredAt ?? null, stage.completedAt ?? null, now, stage.stageId);
   }
   private toRecord(row: SqlRow, stages: ReadonlyArray<WorkflowStageRecord>): WorkflowRecord {
-    return { workflowId:String(row['workflow_id']), projectId:String(row['project_id']), kind:String(row['kind']), templateVersion:String(row['template_version']), objective:String(row['objective']), authorIntents: row['author_intents_json'] === undefined || row['author_intents_json'] === null ? [] : JSON.parse(String(row['author_intents_json'])) as ReadonlyArray<AuthorIntent>, status:String(row['status']), currentStageId:row['current_stage_id']===null?null:String(row['current_stage_id']), stages, version:Number(row['version']), createdAt:Number(row['created_at']), updatedAt:Number(row['updated_at']) };
+    return { workflowId:String(row['workflow_id']), projectId:String(row['project_id']), kind:String(row['kind']), templateVersion:String(row['template_version']), objective:String(row['objective']), authorIntents: row['author_intents_json'] === undefined || row['author_intents_json'] === null ? [] : JSON.parse(String(row['author_intents_json'])) as ReadonlyArray<AuthorIntent>, status:String(row['status']), currentStageId:row['current_stage_id']===null?null:String(row['current_stage_id']), ...(row['selected_issue_id'] === undefined || row['selected_issue_id'] === null ? {} : { selectedIssueId: String(row['selected_issue_id']) }), stages, version:Number(row['version']), createdAt:Number(row['created_at']), updatedAt:Number(row['updated_at']) };
   }
   private async operationResult(tx: SqliteDatabase, id: string): Promise<unknown | null> { const row=await tx.get('SELECT result_json FROM operation_ids WHERE operation_id=?',id); return row===null?null:JSON.parse(String(row['result_json'])) as unknown; }
   private async saveOperation(tx: SqliteDatabase,id:string,scope:string,result:unknown):Promise<void>{ await tx.run('INSERT INTO operation_ids(operation_id,scope,result_json,created_at) VALUES(?,?,?,?)',id,scope,json(result),Date.now()); }

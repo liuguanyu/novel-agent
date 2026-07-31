@@ -9,6 +9,7 @@ import type { BackendStreamMessage } from './stream-messages.js';
 import type { FrontendCommandMessage } from './command-messages.js';
 import type { BackendControlEvent } from './control-messages.js';
 import type { BackendModelTaskEvent } from './model-task-messages.js';
+import type { BackendTaskActivityEvent } from './task-activity-messages.js';
 import type {
   ChapterTreeDto,
   ChapterContentDto,
@@ -18,6 +19,8 @@ import type {
   StoryBibleDto,
   ArchitectBoardDto,
   WorkspaceProjectContextDto,
+  GetTaskCenterRequest,
+  TaskCenterSnapshotDto,
 } from './query-messages.js';
 import type { WorkflowSnapshotResponse, GetWorkflowSnapshotRequest, WorkflowCommand, WorkflowAssetQuery, WorkflowAssetResponse } from './workflow-messages.js';
 
@@ -42,12 +45,16 @@ export interface NovelAgentBridge {
   onControlEvent(listener: (event: BackendControlEvent) => void): Unsubscribe;
   /** 订阅自动模型任务的结构化活动；该记录与专家对话历史完全分离。 */
   onModelTaskEvent(listener: (event: BackendModelTaskEvent) => void): Unsubscribe;
+  /** 订阅所有业务任务的作者可读活动与工作区效果。 */
+  onTaskActivityEvent(listener: (event: BackendTaskActivityEvent) => void): Unsubscribe;
   /** 取 checkpoint 历史链（time-travel）。 */
   getCheckpointHistory(request?: GetCheckpointHistoryRequest): Promise<CheckpointHistoryDto>;
   /** 取当前 Story Bible 事实视图（只读 DTO）。 */
   getStoryBible(): Promise<StoryBibleDto>;
   /** 取 architect 架构看板视图（只读投影 DTO：时间线轴/情节线/人设集）。 */
   getArchitectBoard(): Promise<ArchitectBoardDto>;
+  /** 取持久化任务中心快照，用于启动和重连恢复。 */
+  getTaskCenter(request?: GetTaskCenterRequest): Promise<TaskCenterSnapshotDto>;
   getWorkflowSnapshot(request: GetWorkflowSnapshotRequest): Promise<WorkflowSnapshotResponse>;
   getActiveWorkflow(projectId: string): Promise<WorkflowSnapshotResponse>;
   getWorkflowAsset(request: WorkflowAssetQuery): Promise<WorkflowAssetResponse>;

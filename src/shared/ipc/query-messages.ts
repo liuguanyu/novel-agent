@@ -22,9 +22,35 @@ export const QUERY_CHANNELS = {
   getStoryBible: 'query:get-story-bible',
   /** 取 architect 架构看板视图（只读投影 DTO：时间线轴/情节线/人设集）。 */
   getArchitectBoard: 'query:get-architect-board',
+  /** 取持久化任务运行摘要、作者可见活动及待确认候选。 */
+  getTaskCenter: 'query:get-task-center',
 } as const;
 
 export type QueryChannel = (typeof QUERY_CHANNELS)[keyof typeof QUERY_CHANNELS];
+
+export interface GetTaskCenterRequest {
+  readonly projectId?: string;
+  readonly workflowId?: string;
+  readonly limit?: number;
+}
+
+export interface TaskRunSummaryDto {
+  readonly taskRunId: string;
+  readonly kind: 'legacy-book' | 'new-book' | 'temporary';
+  readonly playbookId: string;
+  readonly status: 'queued' | 'running' | 'awaiting-author' | 'paused' | 'completed' | 'failed' | 'cancelled';
+  readonly workflowId: string | null;
+  readonly workflowStageId: string | null;
+  readonly issueId: string | null;
+  readonly currentStepId: string | null;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+}
+
+export interface TaskCenterSnapshotDto {
+  readonly runs: ReadonlyArray<TaskRunSummaryDto>;
+  readonly events: ReadonlyArray<import('./task-activity-messages.js').BackendTaskActivityEvent>;
+}
 
 export interface WorkspaceProjectContextDto {
   readonly projectId: string;

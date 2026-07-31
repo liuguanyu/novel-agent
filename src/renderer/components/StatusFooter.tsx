@@ -1,6 +1,5 @@
-/** 底部实时任务活动流：展示最近活动并自动滚动到最新一条。 */
+/** 底部工作脉搏：常驻展示最近 2-3 条高价值活动。 */
 
-import { useEffect, useRef } from 'react';
 import { CircleAlert, FileText, Loader2 } from 'lucide-react';
 import type { TaskActivityFeedItem } from '../lib/task-activity-feed.js';
 
@@ -34,16 +33,10 @@ export function StatusFooter({
   onOpenActivities,
   onOpenFactSheet,
 }: StatusFooterProps): JSX.Element {
-  const feedRef = useRef<HTMLDivElement>(null);
-  const latestId = items.at(-1)?.id;
 
-  useEffect(() => {
-    const feed = feedRef.current;
-    if (feed !== null) feed.scrollTop = feed.scrollHeight;
-  }, [latestId]);
 
   return (
-    <footer className="grid h-32 shrink-0 grid-cols-[minmax(0,1fr)_auto] border-t border-border bg-card text-xs text-muted-foreground">
+    <footer className="grid h-28 shrink-0 grid-cols-[minmax(0,1fr)_auto] border-t border-border bg-card text-xs text-muted-foreground">
       <button
         type="button"
         onClick={onOpenActivities}
@@ -51,10 +44,10 @@ export function StatusFooter({
         title="打开实时任务中心"
       >
         <div className="mb-1 flex items-center justify-between gap-2">
-          <span className="font-semibold text-foreground/90">实时任务 · 输入 / 输出 / 反馈</span>
-          <span className="text-[10px] opacity-60">点击查看全部活动</span>
+          <span className="font-semibold text-foreground/90">工作脉搏</span>
+          <span className="text-[10px] opacity-60">最近 {items.length} 条 · 点击查看任务中心</span>
         </div>
-        <div ref={feedRef} className="h-20 space-y-2 overflow-y-auto pr-2" aria-live="polite" aria-atomic="false">
+        <div className="h-16 space-y-1.5 overflow-hidden pr-2" aria-live="polite" aria-atomic="false">
           {items.map((item) => (
             <div key={item.id} className="min-w-0 leading-4">
               <div className="flex min-w-0 items-center gap-2">

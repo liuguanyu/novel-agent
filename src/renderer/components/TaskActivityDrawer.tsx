@@ -13,6 +13,7 @@ interface TaskActivityDrawerProps {
 }
 
 const SOURCE_LABEL: Readonly<Record<TaskActivitySource, string>> = {
+  task: '任务运行',
   workflow: '工作流程',
   fact: '事实底稿',
   audit: '诊断结果',
@@ -56,8 +57,8 @@ export function TaskActivityDrawer({
     <Sheet open={open} onOpenChange={onOpenChange}>
       <SheetContent side="bottom" className="max-h-[72vh] overflow-y-auto">
         <SheetHeader>
-          <SheetTitle>实时任务</SheetTitle>
-          <SheetDescription>按“输入 → 处理 → 输出 → 反馈”追踪工作流程、模型任务、全书诊断和专家协作。</SheetDescription>
+          <SheetTitle>任务中心</SheetTitle>
+          <SheetDescription>查看当前任务、等待作者的事项，以及按“输入 → 执行 → 输出 → 反馈”记录的完整活动历史。</SheetDescription>
         </SheetHeader>
         <div className="space-y-2 px-4 pb-4">
           {items.map((item) => (
@@ -83,7 +84,7 @@ export function TaskActivityDrawer({
                   )}
                 </div>
               </div>
-              {item.source !== 'workflow' && (
+              {item.source !== 'workflow' && item.source !== 'task' && (
                 <Button size="xs" variant="outline" onClick={() => openSource(item.source)}>
                   打开{SOURCE_LABEL[item.source]}
                 </Button>

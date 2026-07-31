@@ -274,4 +274,37 @@ export const MIGRATIONS: ReadonlyArray<Migration> = [
       ALTER TABLE workflow_instances ADD COLUMN author_intents_json TEXT NOT NULL DEFAULT '[]';
     `,
   },
+  {
+    version: 8,
+    up: `
+      ALTER TABLE workflow_instances ADD COLUMN selected_issue_id TEXT;
+    `,
+  },
+  {
+    version: 9,
+    up: `
+      CREATE TABLE task_runs (
+        task_run_id TEXT PRIMARY KEY, playbook_id TEXT NOT NULL, execution_run_id TEXT NOT NULL, task_kind TEXT NOT NULL,
+        status TEXT NOT NULL, current_step_id TEXT, current_step_index INTEGER,
+        project_id TEXT, book_id TEXT, manuscript_id TEXT, workflow_id TEXT, workflow_stage_id TEXT, issue_id TEXT,
+        inputs_json TEXT NOT NULL DEFAULT '{}', artifacts_json TEXT NOT NULL DEFAULT '[]',
+        author_decisions_json TEXT NOT NULL DEFAULT '[]', failure_json TEXT,
+        created_at TEXT NOT NULL, updated_at TEXT NOT NULL, started_at TEXT,
+        awaiting_author_at TEXT, paused_at TEXT, ended_at TEXT
+      );
+      CREATE INDEX idx_task_runs_workflow ON task_runs(workflow_id, updated_at DESC);
+      CREATE INDEX idx_task_runs_status ON task_runs(status, updated_at DESC);
+      CREATE TABLE task_activities (
+        activity_id TEXT PRIMARY KEY, task_run_id TEXT NOT NULL, event_json TEXT NOT NULL, created_at TEXT NOT NULL,
+        FOREIGN KEY(task_run_id) REFERENCES task_runs(task_run_id) ON DELETE CASCADE
+      );
+      CREATE INDEX idx_task_activities_run ON task_activities(task_run_id, created_at);
+      CREATE TABLE task_author_candidates (
+        candidate_id TEXT PRIMARY KEY, task_run_id TEXT NOT NULL, kind TEXT NOT NULL, label TEXT NOT NULL,
+        payload_json TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending', created_at TEXT NOT NULL,
+        FOREIGN KEY(task_run_id) REFERENCES task_runs(task_run_id) ON DELETE CASCADE
+      );
+      CREATE INDEX idx_task_candidates_run ON task_author_candidates(task_run_id, status, created_at);
+    `,
+  },
 ];

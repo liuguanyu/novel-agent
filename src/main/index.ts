@@ -21,7 +21,7 @@ import {
   SqliteCheckpointer,
   SqliteFactStore,
   WorkflowRepository, CreativeAssetRepository, WorkflowIssueRepository,
-  SqliteStageRunEvidenceRecorder, SqliteContinuationRecordService,
+  SqliteStageRunEvidenceRecorder, SqliteContinuationRecordService, TaskRunRepository,
 } from './db/index.js';
 import { WorkflowApplicationService } from './workflow-application-service.js';
 
@@ -111,6 +111,7 @@ app.whenReady().then(
       getEmbedRunner: () => embedRunner,
       getCorpusStore: () => corpusStore,
       ...(issueRepository === undefined ? {} : { workflowIssues: issueRepository }),
+      ...(persistence === undefined ? {} : { taskRuns: new TaskRunRepository(persistence.db) }),
       ...(creativeAssetRepository === undefined ? {} : { creativeAssets: creativeAssetRepository }),
       ...(workflowRepository === undefined || persistence === undefined ? {} : {
         workflows: workflowRepository,

@@ -1,0 +1,10 @@
+schema: spec-driven
+created: 2026-07-30
+# 任务驱动工作台：以当前任务为主叙事，先打通 locate-source 真实端到端闭环。
+depends_on:
+  - orchestration-runtime
+  - persistence-sqlite
+  - story-workspace
+  - story-bible
+  - ipc-contract
+  - human-in-the-loop

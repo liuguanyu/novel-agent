@@ -33,6 +33,13 @@ import {
   type StoryBibleFactDeleteLocatorDto,
   type StoryBibleFactEditDto,
   type StoryBibleFactLocatorDto,
+  type BackendTaskActivityEvent,
+  type TaskActivityEvent,
+  type TaskArtifactRefDto,
+  type TaskRunCompletedEvent,
+  type TaskRunFailedEvent,
+  type TaskRunRefDto,
+  type TaskUiEffectDto,
 } from '../../shared/ipc/index.js';
 import type { ResumeDecision, WorkflowRefDto } from '../../shared/ipc/index.js';
 import type { CapabilityTier } from '../../core/model/index.js';
@@ -44,15 +51,25 @@ import {
   type InterruptContinuationRecord,
   type WorkflowContinuation,
   buildLegacyRevisionDiagnosis,
+  locateSourceEvidence,
   type WorkflowIssueRecord,
   type WorkflowRef,
 } from '../../core/workflow/index.js';
 import type { CandidateFact, ConsistencyIssue, ExtractionInput, FactView } from '../../core/story-bible/index.js';
+import {
+  createTaskRunFromPlaybook,
+  positionTaskRunAtStep,
+  taskRunHasRequiredInputs,
+  transitionTaskRun,
+  type TaskPlaybook,
+  type TaskRun,
+  type TaskRunArtifact,
+} from '../../core/task-runtime/index.js';
 import { asCheckpointId, asFactVersionId } from '../../core/story-bible/index.js';
 import { asNodeId } from '../../core/manuscript/node-id.js';
 import type { ModelResolver } from '../model-resolver.js';
 import { appendOrchestrationLog } from '../local-log.js';
-import type { CreativeAssetRepository, SqliteCheckpointer, SqliteFactStore, WorkflowIssueRepository, WorkflowRepository } from '../db/index.js';
+import type { CreativeAssetRepository, SqliteCheckpointer, SqliteFactStore, TaskRunRepository, WorkflowIssueRepository, WorkflowRepository } from '../db/index.js';
 import {
   assembleContext,
   type AssemblyRequest,
@@ -200,6 +217,7 @@ export interface RuntimeDeps {
   workflowIssues?: WorkflowIssueRepository;
   workflows?: WorkflowRepository;
   creativeAssets?: CreativeAssetRepository;
+  taskRuns?: TaskRunRepository;
   /** 可注入正文 I/O，供隔离 E2E 使用；未注入时使用默认小说工作区。 */
   manuscript?: {
     readonly readChapterContent: (nodeId: string) => Promise<ChapterContentDto>;
@@ -250,6 +268,23 @@ interface PendingExtractionConflictRun {
 }
 
 /** 一次运行的可变账本（seq/里程碑 parent 游标随节点推进而变）。 */
+interface TaskRuntimeSession {
+  run: TaskRun;
+  ref: TaskRunRefDto;
+  wc: WebContents;
+  lastActivityAt: number;
+  /** 当前活跃执行运行（在安全边界据此收敛 pause/cancel 而非只改 DB 状态）。 */
+  execution?: ActiveRun;
+  /** 作者请求的控制意图；在安全步骤边界据此收敛状态。 */
+  requestedControl?: 'pause' | 'cancel';
+  heartbeat?: ReturnType<typeof setInterval>;
+  heartbeatState?: {
+    readonly step: string;
+    readonly currentObject: string;
+    readonly recentAction: string;
+  };
+}
+
 interface ActiveRun {
   readonly controller: AbortController;
   readonly wc: WebContents;
@@ -289,6 +324,9 @@ function assemblyBaseFrom(params: SummonParams): RunAssemblyBase {
   };
 }
 
+/** 4.1 相关人物或事实底稿：单次定位最多附带的相关实体数，避免淹没作者。 */
+const MAX_FACT_BACKING = 5;
+
 /**
  * 关键词投影为 FactRetrievalQuery：空数组返回 undefined（无关键词=不过滤实体/伏笔/时间线）。
  * 否则把关键词 join 成一个词，同时填进三类字段——让每类各按自己的字段子串匹配（实体名/伏笔/时间线）。
@@ -303,6 +341,77 @@ function keywordsToQuery(keywords: ReadonlyArray<string>): FactRetrievalQuery | 
   };
 }
 
+/** 作者在安全边界主动中断任务（pause/cancel）时抛出，区别于真实失败。 */
+class TaskControlAbort extends Error {
+  readonly intent: 'pause' | 'cancel';
+  constructor(intent: 'pause' | 'cancel') {
+    super(intent === 'pause' ? '作者已暂停当前任务' : '作者已取消当前任务');
+    this.name = 'TaskControlAbort';
+    this.intent = intent;
+  }
+}
+
+/** 把领域任务族映射到 IPC 任务种类；供通用引擎构造 TaskRunRefDto。 */
+function ipcTaskKindFor(playbookId: string, kind: TaskRun['kind']): TaskRunRefDto['kind'] {
+  if (playbookId === 'legacy.locate-source') return 'locate-source';
+  if (kind === 'new-book') return 'new-book-planning';
+  return 'temporary-task';
+}
+
+/**
+ * 通用 playbook 执行引擎的上下文：执行器据此产出结构化产物或作者可读候选，
+ * 但 MUST NOT 直接读写 DB/正文——真实模型/工具接入在后续 Phase 由注入的执行器完成。
+ */
+export interface PlaybookStepContext {
+  readonly run: TaskRun;
+  readonly stepId: string;
+  readonly inputs: Readonly<Record<string, unknown>>;
+  readonly signal: AbortSignal;
+}
+
+/** 单个执行步骤的产出：作者可见产物引用与结构化输出（禁止隐藏思维链/整章正文）。 */
+export interface PlaybookStepOutput {
+  readonly message: string;
+  readonly outputSummary?: string;
+  readonly artifacts?: ReadonlyArray<{ readonly outputKey: string; readonly value: unknown; readonly ref: TaskArtifactRefDto }>;
+}
+
+/** 需要作者决策的步骤：先产出等待作者的提示，作者提交后再产出结果。 */
+export interface PlaybookAuthorStep {
+  readonly requiresAuthor: true;
+  /** 进入等待作者态时的活动内容。 */
+  readonly prompt: (ctx: PlaybookStepContext) => Promise<{ readonly message: string; readonly nextAction: string }>;
+  /** 作者提交决策后据此产出结果。 */
+  readonly apply: (ctx: PlaybookStepContext, decision: unknown) => Promise<PlaybookStepOutput>;
+}
+
+/** 纯执行步骤（不需要作者决策）。 */
+export interface PlaybookAutoStep {
+  readonly requiresAuthor?: false;
+  readonly run: (ctx: PlaybookStepContext) => Promise<PlaybookStepOutput>;
+}
+
+export type PlaybookStepHandler = PlaybookAutoStep | PlaybookAuthorStep;
+
+/** 一个可执行 playbook 的注册：声明 + 每步执行器 + 完成文案。 */
+export interface PlaybookRegistration {
+  readonly playbook: TaskPlaybook;
+  readonly handlers: Readonly<Record<string, PlaybookStepHandler>>;
+  readonly title: string;
+  readonly completedSummary: string;
+}
+
+export interface RunPlaybookTaskOptions {
+  readonly registration: PlaybookRegistration;
+  readonly taskRunId: string;
+  readonly inputs: Readonly<Record<string, unknown>>;
+  readonly refs?: {
+    readonly projectId?: string | null;
+    readonly bookId?: string | null;
+    readonly manuscriptId?: string | null;
+  };
+}
+
 export class OrchestrationRuntime {
   readonly #graph: CompiledOrchestrationGraph;
   readonly #deps: RuntimeDeps;
@@ -314,10 +423,21 @@ export class OrchestrationRuntime {
   readonly #factTasks = new Map<string, FactTaskRecord>();
   /** Diff preview binds apply to the exact fragment observed for this run. */
   readonly #fragmentBases = new Map<RunId, { nodeId: string; from: number; to: number; hash: string }>();
+  readonly #taskSessions = new Map<string, TaskRuntimeSession>();
+  /** 可执行 playbook 注册表（新任务通过注册接入，不复制工作台）。 */
+  readonly #playbooks = new Map<string, PlaybookRegistration>();
 
   constructor(deps: RuntimeDeps) {
     this.#graph = createOrchestrationGraph();
     this.#deps = deps;
+  }
+
+  /**
+   * 注册一个可执行 playbook。旧作/新书/临时任务均通过此接入；
+   * 真实模型/工具的每步执行器由调用方注入（与 smoke 的 fake ModelResolver 同构）。
+   */
+  registerPlaybook(registration: PlaybookRegistration): void {
+    this.#playbooks.set(registration.playbook.id, registration);
   }
 
   /** 精确中断某运行（拉手刹）。节点在提交里程碑前抛出，故不落 checkpoint（干净态）。 */
@@ -398,6 +518,22 @@ export class OrchestrationRuntime {
   disposeAll(): void {
     for (const run of this.#runs.values()) run.controller.abort();
     this.#runs.clear();
+    for (const session of [...this.#taskSessions.values()]) this.#closeTaskSession(session);
+  }
+
+  async getTaskCenter(request: { readonly projectId?: string; readonly workflowId?: string; readonly limit?: number }) {
+    const repository = this.#deps.taskRuns;
+    if (repository === undefined) return { runs: [], events: [] };
+    const limit = Math.min(Math.max(request.limit ?? 20, 1), 100);
+    const runs = await repository.listRecent({
+      limit,
+      ...(request.projectId === undefined ? {} : { projectId: request.projectId }),
+      ...(request.workflowId === undefined ? {} : { workflowId: request.workflowId }),
+    });
+    return {
+      runs,
+      events: await repository.listEventsForRuns(runs.map((run) => run.taskRunId)),
+    };
   }
 
   /** 只读查询入口使用的事实库句柄；Renderer 仍只能通过 Main 投影后的 DTO 访问。 */
@@ -1358,6 +1494,1120 @@ export class OrchestrationRuntime {
     } finally {
       this.#runs.delete(runId);
     }
+  }
+
+  /**
+   * 4.1「相关人物或事实底稿」：从事实库按证据引文/问题描述召回被提及的实体，
+   * 作为定位原文的只读输入之一，帮助作者判断此处正文应对齐哪些既定人物设定。
+   * 纯读取投影，绝不改事实库；事实库未就绪或无命中时返回空，任务照常进行。
+   */
+  async #collectSourceFactBacking(
+    quote: string,
+    description: string,
+  ): Promise<ReadonlyArray<{ readonly entityId: string; readonly name: string; readonly type: string }>> {
+    const factStore = this.#deps.getFactStore();
+    if (factStore === undefined) return [];
+    const version = await factStore.getLatestVersion();
+    if (version === null) return [];
+    const view = await factStore.getView(version);
+    const haystack = `${quote}${description}`;
+    const backing: Array<{ readonly entityId: string; readonly name: string; readonly type: string }> = [];
+    for (const entity of view.entities) {
+      const names = [entity.canonicalName, ...entity.aliasSet.aliases];
+      const mentioned = names.some((name) => name.length > 0 && haystack.includes(name));
+      if (mentioned) {
+        backing.push({ entityId: entity.id as string, name: entity.canonicalName, type: entity.type });
+        if (backing.length >= MAX_FACT_BACKING) break;
+      }
+    }
+    return backing;
+  }
+
+  async #createTaskSession(
+    wc: WebContents,
+    ref: TaskRunRefDto,
+    projectId: string | null,
+    inputs: Readonly<Record<string, unknown>>,
+  ): Promise<TaskRuntimeSession> {
+    const now = new Date().toISOString();
+    const queued: TaskRun = {
+      id: ref.taskRunId,
+      kind: 'legacy-book',
+      refs: {
+        playbookId: 'legacy.locate-source',
+        executionRunId: ref.runId,
+        projectId,
+        bookId: null,
+        manuscriptId: null,
+        workflowId: ref.workflowRef?.workflowId ?? null,
+        workflowStageId: ref.workflowRef?.stageId ?? null,
+        issueId: ref.issueId ?? null,
+      },
+      inputs,
+      status: 'queued',
+      currentStepId: 'read-chapter',
+      currentStepIndex: 0,
+      artifacts: [],
+      authorDecisions: [],
+      timestamps: {
+        createdAt: now,
+        updatedAt: now,
+        startedAt: null,
+        awaitingAuthorAt: null,
+        pausedAt: null,
+        endedAt: null,
+      },
+      failure: null,
+    };
+    await this.#deps.taskRuns?.create(queued);
+    const running = transitionTaskRun(queued, { status: 'running', occurredAt: now });
+    await this.#deps.taskRuns?.save(running);
+    const session: TaskRuntimeSession = { run: running, ref, wc, lastActivityAt: Date.now() };
+    this.#taskSessions.set(ref.taskRunId, session);
+    session.heartbeat = setInterval(() => {
+      if (session.run.status !== 'running' || Date.now() - session.lastActivityAt < 2_000) return;
+      const state = session.heartbeatState;
+      if (state === undefined) return;
+      void this.#publishTaskActivity(session, {
+        status: 'running',
+        phase: 'heartbeat',
+        title: '定位原文',
+        message: `仍在${state.step}：${state.currentObject}`,
+        feedback: `最近完成：${state.recentAction}`,
+      });
+    }, 500);
+    return session;
+  }
+
+  async #saveTaskRun(session: TaskRuntimeSession, run: TaskRun): Promise<void> {
+    session.run = run;
+    await this.#deps.taskRuns?.save(run);
+    if (run.status !== 'running' && session.heartbeat !== undefined) {
+      clearInterval(session.heartbeat);
+      delete session.heartbeat;
+    }
+  }
+
+  async #publishTaskEvent(session: TaskRuntimeSession, event: BackendTaskActivityEvent): Promise<void> {
+    await this.#deps.taskRuns?.appendEvent(event);
+    session.lastActivityAt = Date.now();
+    session.wc.send(IPC_CHANNELS.taskActivityEvent, event);
+  }
+
+  async #publishTaskActivity(
+    session: TaskRuntimeSession,
+    event: Omit<TaskActivityEvent, keyof TaskRunRefDto | 'type' | 'activityId' | 'createdAt'>,
+  ): Promise<void> {
+    await this.#publishTaskEvent(session, {
+      ...session.ref,
+      type: 'task-activity',
+      activityId: randomUUID(),
+      ...event,
+      createdAt: new Date().toISOString(),
+    } satisfies TaskActivityEvent);
+  }
+
+  #closeTaskSession(session: TaskRuntimeSession): void {
+    if (session.heartbeat !== undefined) clearInterval(session.heartbeat);
+    delete session.heartbeat;
+    this.#taskSessions.delete(session.run.id);
+  }
+
+  #taskRef(runId: RunId, workflowRef: WorkflowRef, taskRunId: string, chapterId?: string) {
+    return {
+      taskRunId,
+      taskId: `locate-source:${workflowRef.issueId ?? taskRunId}`,
+      kind: 'locate-source' as const,
+      runId,
+      workflowRef,
+      ...(workflowRef.issueId === undefined ? {} : { issueId: workflowRef.issueId }),
+      ...(chapterId === undefined ? {} : { chapterId }),
+    };
+  }
+
+  /** 从持久化 run 派生 IPC ref（任意 playbook 通用）：无 session 时的控制/回执事件据此构造。 */
+  #refFromRun(run: TaskRun): TaskRunRefDto {
+    const kind = ipcTaskKindFor(run.refs.playbookId, run.kind);
+    const workflowRef = run.refs.workflowId === null || run.refs.workflowStageId === null
+      ? undefined
+      : { workflowId: run.refs.workflowId, stageId: run.refs.workflowStageId, ...(run.refs.issueId === null ? {} : { issueId: run.refs.issueId }) };
+    const taskId = kind === 'locate-source'
+      ? `locate-source:${run.refs.issueId ?? run.id}`
+      : `${run.refs.playbookId}:${run.id}`;
+    return {
+      taskRunId: run.id,
+      taskId,
+      kind,
+      runId: run.refs.executionRunId as RunId,
+      ...(workflowRef === undefined ? {} : { workflowRef }),
+      ...(run.refs.issueId === null ? {} : { issueId: run.refs.issueId }),
+    };
+  }
+
+
+
+  async #completeLocatedSource(
+    session: TaskRuntimeSession,
+    stageRun: ActiveRun,
+    workflowRef: WorkflowRef & { readonly issueId: string },
+    candidate: { readonly from: number; readonly to: number; readonly quote: string },
+    matchMethod: 'exact' | 'context' | 'author',
+  ): Promise<void> {
+    const chapterId = session.ref.chapterId;
+    if (chapterId === undefined) throw new Error('原文定位任务缺少目标章节');
+    const artifactRef = `chapter:${chapterId}:${candidate.from}-${candidate.to}`;
+    const artifacts: ReadonlyArray<TaskArtifactRefDto> = [{ kind: 'source-location', label: '原文定位结果', ref: artifactRef }];
+    const uiEffects: ReadonlyArray<TaskUiEffectDto> = [
+      { effectId: randomUUID(), kind: 'select-chapter', chapterId, reason: '已找到诊断问题对应的目标章节' },
+      { effectId: randomUUID(), kind: 'scroll-to-evidence', chapterId, quote: candidate.quote },
+      { effectId: randomUUID(), kind: 'highlight-quote', chapterId, quote: candidate.quote, reason: '已验证诊断证据对应的原文位置' },
+    ];
+    await this.#publishTaskActivity(session, {
+      status: 'running', phase: 'ui-effect', title: '更新工作区',
+      message: '已定位原文，正在切换章节、滚动并高亮证据',
+      outputSummary: matchMethod === 'author' ? '作者已确认候选原文位置' : `通过${matchMethod === 'exact' ? '精确匹配' : '上下文校验'}找到唯一位置`,
+      artifactRefs: artifacts,
+      uiEffects,
+    });
+    const now = new Date().toISOString();
+    const artifact: TaskRunArtifact = { id: randomUUID(), outputKey: 'sourceLocation', value: { chapterId, from: candidate.from, to: candidate.to }, createdAt: now };
+    const completedRun = transitionTaskRun({
+      ...session.run,
+      currentStepId: null,
+      currentStepIndex: null,
+      artifacts: [...session.run.artifacts, artifact],
+    }, { status: 'completed', occurredAt: now });
+    await this.#recordStageRun(stageRun, 'completed', { sourceLocation: artifactRef });
+    await this.#saveTaskRun(session, completedRun);
+    await this.#publishTaskEvent(session, {
+      ...session.ref,
+      type: 'task-run-completed', status: 'completed', title: '原文定位完成',
+      summary: '已找到可修订的原文位置，正在等待正文工作区确认更新结果',
+      artifactRefs: artifacts,
+      completedAt: now,
+    } satisfies TaskRunCompletedEvent);
+    const latest = await this.#deps.workflows?.get(workflowRef.workflowId);
+    if (latest !== null && latest !== undefined) {
+      this.#sendControl(session.wc, {
+        type: 'workflow-snapshot', runId: session.ref.runId,
+        snapshot: { ...latest, authorIntents: latest.authorIntents as import('../../shared/ipc/workflow-messages.js').AuthorIntentDto[], stages: latest.stages as unknown as ReadonlyArray<Record<string, unknown>> },
+      });
+    }
+    this.#closeTaskSession(session);
+  }
+
+  /**
+   * 将诊断问题确定性定位到当前正文。该任务只读取 issue/正文，不调用模型；
+   * 多候选时不会猜测，而是持久化候选并等待作者明确选择。
+   */
+  async locateSource(
+    wc: WebContents,
+    runId: RunId,
+    workflowRef: WorkflowRef & { readonly issueId: string },
+  ): Promise<void> {
+    const run = this.#startUtilityRun(wc, runId, workflowRef);
+    const taskRunId = randomUUID();
+    let ref = this.#taskRef(runId, workflowRef, taskRunId);
+    let session: TaskRuntimeSession | undefined;
+    let awaitingAuthor = false;
+    try {
+      await this.#assertWorkflowRef(workflowRef, undefined, true);
+      const workflow = await this.#deps.workflows?.get(workflowRef.workflowId);
+      const stage = workflow?.stages.find((item) => item.stageId === workflowRef.stageId);
+      if (stage?.templateStageId !== 'locate-source') throw new Error('当前任务不是定位原文');
+      await this.#recordStageRun(run, 'started');
+      const repository = this.#deps.workflowIssues;
+      if (repository === undefined) throw new Error('诊断问题仓储尚未就绪');
+      const issue = await repository.get(workflowRef.issueId);
+      const payload = await repository.getPayload(workflowRef.issueId);
+      if (issue === null || payload === null) throw new Error('诊断问题或证据已失效，请重新运行诊断');
+      const chapterAnchor = payload.anchors.find((anchor) => anchor.kind === 'chapter');
+      if (chapterAnchor === undefined) throw new Error('诊断问题缺少章节锚点，无法定位原文');
+      if (payload.evidence === undefined) throw new Error('诊断问题缺少原文证据，请重新运行诊断');
+      const chapterId = chapterAnchor.id as string;
+      ref = this.#taskRef(runId, workflowRef, taskRunId, chapterId);
+      // 4.1「相关人物或事实底稿」：定位前先从事实库召回证据中提及的已知实体，作为只读输入。
+      const factBacking = await this.#collectSourceFactBacking(payload.evidence.quote, payload.description);
+      session = await this.#createTaskSession(wc, ref, workflow?.projectId ?? null, {
+        issue: { description: payload.description, issueId: workflowRef.issueId },
+        evidence: payload.evidence,
+        chapterAnchor: chapterId,
+        factBacking,
+      });
+      session.execution = run;
+      session.heartbeatState = { step: '读取目标章节并验证证据上下文', currentObject: `目标章节“${chapterId}”`, recentAction: '已声明诊断问题、证据引文和章节锤点' };
+      const factBackingRefs = factBacking.map((item) => ({
+        kind: 'fact' as const, label: `相关人物或事实–${item.name}`, ref: item.entityId,
+      }));
+      await this.#publishTaskActivity(session, {
+        status: 'running', phase: 'input', title: '定位原文',
+        message: `开始定位“${payload.description}”对应的原文`,
+        inputSummary: factBacking.length > 0
+          ? `诊断问题、证据引文、章节锤点、当前正文，以及 ${factBacking.length} 项相关人物或事实底稿`
+          : '诊断问题、证据引文、章节锤点和当前正文',
+        nextAction: '读取目标章节并匹配证据引文',
+        evidenceRefs: [
+          { kind: 'issue', label: '当前诊断问题', ref: workflowRef.issueId },
+          { kind: 'chapter', label: '目标章节', ref: chapterId },
+          { kind: 'quote', label: '诊断证据', ref: payload.evidence.quote },
+          ...factBackingRefs,
+        ],
+      });
+      this.#assertNotControlled(session);
+      const chapter = await (this.#deps.manuscript?.readChapterContent ?? readChapterContent)(chapterId);
+      this.#assertNotControlled(session);
+      session.heartbeatState = { step: '匹配诊断证据', currentObject: `目标章节“${chapterId}”`, recentAction: '已读取目标章节正文' };
+      await this.#publishTaskActivity(session, {
+        status: 'running', phase: 'retrieval', title: '读取原文',
+        message: '已读取目标章节，正在匹配诊断证据',
+        inputSummary: `章节正文与证据引文“${payload.evidence.quote}”`,
+        nextAction: '验证引文前后文，排除重复位置',
+      });
+      awaitingAuthor = await this.#matchAndResolveSource(session, run, workflowRef, chapterId, chapter.content, payload.evidence);
+    } catch (error) {
+      const controlIntent = error instanceof TaskControlAbort
+        ? error.intent
+        : (session?.requestedControl ?? (run.controller.signal.aborted ? 'cancel' : undefined));
+      if (controlIntent === 'pause' && session !== undefined) {
+        awaitingAuthor = await this.#pauseTaskSession(session, run);
+      } else {
+        await this.#failLocateSource(wc, ref, session, run, error, controlIntent === 'cancel');
+      }
+    } finally {
+      if (!awaitingAuthor) this.#runs.delete(runId);
+    }
+  }
+
+  /**
+   * 确定性匹配证据到正文：唯一命中直接完成；多候选持久化并等待作者。
+   * 初次运行与恢复后重新执行共用此确定性逻辑（不新建第二条 TaskRun）。
+   * 返回是否进入等待作者状态。
+   */
+  async #matchAndResolveSource(
+    session: TaskRuntimeSession,
+    run: ActiveRun,
+    workflowRef: WorkflowRef & { readonly issueId: string },
+    chapterId: string,
+    content: string,
+    evidence: import('../../core/story-bible/index.js').IssueEvidence,
+  ): Promise<boolean> {
+    const taskRunId = session.run.id;
+    const located = locateSourceEvidence(content, evidence);
+    if (located.status === 'not-found') throw new Error(located.reason);
+    if (located.status === 'ambiguous') {
+      if (located.matchMethod === 'approximate') {
+        // 忠实§15.4：精确匹配未命中时显式告知正在近似匹配，避免作者误以为任务卡住。
+        await this.#publishTaskActivity(session, {
+          status: 'running', phase: 'retrieval', title: '近似匹配',
+          message: '引文与当前正文存在差异，正在近似匹配相近段落',
+          nextAction: '汇总近似候选并等待作者确认',
+        });
+      }
+      const createdAt = new Date().toISOString();
+      const candidates = located.candidates.map((candidate, index) => ({
+        candidateId: createHash('sha256').update(`${taskRunId}:${chapterId}:${candidate.from}:${candidate.to}`).digest('hex').slice(0, 24),
+        taskRunId,
+        kind: 'source-location' as const,
+        label: `候选位置 ${index + 1}`,
+        payload: {
+          chapterId,
+          from: candidate.from,
+          to: candidate.to,
+          quote: candidate.quote,
+          preview: content.slice(Math.max(0, candidate.from - 40), Math.min(content.length, candidate.to + 40)),
+        },
+        status: 'pending' as const,
+        createdAt,
+      }));
+      await this.#deps.taskRuns?.replaceCandidates(taskRunId, candidates);
+      const waitingRun = transitionTaskRun({ ...session.run, currentStepId: 'confirm-location', currentStepIndex: 2 }, { status: 'awaiting-author', occurredAt: createdAt });
+      await this.#saveTaskRun(session, waitingRun);
+      await this.#publishTaskActivity(session, {
+        status: 'awaiting-author', phase: 'awaiting-author', title: '需要确认原文位置',
+        message: located.reason,
+        outputSummary: located.matchMethod === 'approximate'
+          ? `近似匹配到 ${located.candidates.length} 处相近原文`
+          : `找到 ${located.candidates.length} 处候选原文`,
+        feedback: located.matchMethod === 'approximate'
+          ? '近似结果不确定，系统没有自动选择，请作者确认真实修改位置'
+          : '系统没有自动选择，避免修改错误位置',
+        nextAction: '请从候选原文中确认正确位置',
+        artifactRefs: [{ kind: 'source-location-candidates', label: '待确认原文候选', ref: `task:${taskRunId}:candidates` }],
+        authorCandidates: candidates.map((candidate) => ({
+          candidateId: candidate.candidateId,
+          kind: candidate.kind,
+          label: candidate.label,
+          chapterId,
+          preview: String(candidate.payload['preview']),
+        })),
+      });
+      return true;
+    }
+    await this.#completeLocatedSource(session, run, workflowRef, located.candidate, located.matchMethod);
+    return false;
+  }
+
+  /** 将提醒错误或取消收敛为 failed/cancelled，并下发作者可读恢复信息。 */
+  async #failLocateSource(
+    wc: WebContents,
+    ref: TaskRunRefDto,
+    session: TaskRuntimeSession | undefined,
+    run: ActiveRun,
+    error: unknown,
+    cancelled: boolean,
+  ): Promise<void> {
+    try {
+      await this.#recordStageRun(run, 'failed', { reason: error instanceof Error ? error.message : String(error) });
+    } catch {
+      // Preserve the original task failure when the workflow has already moved.
+    }
+    const failedAt = new Date().toISOString();
+    const failedEvent = {
+      ...ref,
+      type: 'task-run-failed', status: cancelled ? 'cancelled' : 'failed', title: cancelled ? '原文定位已取消' : '原文定位未完成',
+      error: {
+        category: cancelled ? 'aborted' : 'validation',
+        message: cancelled ? '作者已取消原文定位任务' : (error instanceof Error ? error.message : String(error)),
+        recovery: cancelled ? '如需重新定位，可在任务中心重新发起原文定位' : '检查诊断问题的章节锚点和证据引文，然后重新定位',
+      },
+      failedAt,
+    } satisfies TaskRunFailedEvent;
+    if (session === undefined) wc.send(IPC_CHANNELS.taskActivityEvent, failedEvent);
+    else {
+      const failedRun = transitionTaskRun(session.run, {
+        status: cancelled ? 'cancelled' : 'failed',
+        occurredAt: failedAt,
+        ...(cancelled ? {} : { failure: { code: 'source-location-failed', message: failedEvent.error.message } }),
+      });
+      await this.#saveTaskRun(session, failedRun);
+      await this.#publishTaskEvent(session, failedEvent);
+      this.#closeTaskSession(session);
+    }
+  }
+
+  /** 在安全边界将运行中任务收敛为 paused（不产生 UI Effect/产物/工作流推进）。 */
+  async #pauseTaskSession(session: TaskRuntimeSession, run: ActiveRun): Promise<boolean> {
+    const pausedAt = new Date().toISOString();
+    const pausedRun = transitionTaskRun(session.run, { status: 'paused', occurredAt: pausedAt });
+    await this.#saveTaskRun(session, pausedRun);
+    delete session.requestedControl;
+    // 丢弃已中断的执行运行；恢复时会新建干净的 AbortController。
+    run.controller.abort();
+    this.#runs.delete(session.ref.runId);
+    delete session.execution;
+    await this.#publishTaskActivity(session, {
+      status: 'paused', phase: 'paused', title: '任务已暂停',
+      message: '已在安全步骤边界暂停当前任务，正文未发生任何修改',
+      feedback: '任务输入与已完成步骤已保留',
+      nextAction: '可在当前任务卡或任务中心恢复或取消本任务',
+    });
+    // Keep the session alive so resume can reuse the same taskRunId.
+    return true;
+  }
+
+  /** 若作者已请求 pause/cancel，在安全步骤边界中断当前执行。 */
+  #assertNotControlled(session: TaskRuntimeSession): void {
+    if (session.requestedControl !== undefined) throw new TaskControlAbort(session.requestedControl);
+  }
+
+  async reportTaskUiEffectResult(
+    wc: WebContents,
+    operationId: string,
+    result: import('../../shared/ipc/index.js').TaskUiEffectResultDto,
+  ): Promise<void> {
+    const repository = this.#deps.taskRuns;
+    if (repository === undefined) return;
+    const run = await repository.get(result.taskRunId);
+    if (run === null) throw new Error('任务运行不存在');
+    const activities = await repository.listEvents(result.taskRunId);
+    const source = activities.find(
+      (event): event is TaskActivityEvent => event.type === 'task-activity' && event.activityId === result.activityId,
+    );
+    const effect = source?.uiEffects?.find((candidate) => candidate.effectId === result.effectId);
+    if (effect === undefined || effect.kind !== result.effectKind) throw new Error('UI Effect 不属于该任务活动');
+    const now = new Date().toISOString();
+    const workflowRef = run.refs.workflowId === null || run.refs.workflowStageId === null
+      ? undefined
+      : {
+          workflowId: run.refs.workflowId,
+          stageId: run.refs.workflowStageId,
+          ...(run.refs.issueId === null ? {} : { issueId: run.refs.issueId }),
+        };
+    const event = {
+      taskRunId: result.taskRunId,
+      taskId: `locate-source:${run.refs.issueId ?? result.taskRunId}`,
+      kind: 'locate-source' as const,
+      runId: run.refs.executionRunId as RunId,
+      ...(workflowRef === undefined ? {} : { workflowRef }),
+      ...(run.refs.issueId === null ? {} : { issueId: run.refs.issueId }),
+      type: 'task-activity' as const,
+      activityId: randomUUID(),
+      status: run.status,
+      phase: 'ui-effect' as const,
+      title: result.status === 'applied' ? '工作区已更新' : '工作区更新未完成',
+      message: result.message,
+      feedback: result.status === 'applied' ? 'Renderer 已确认实际执行成功' : '任务产物已保留，正文没有因此被修改',
+      ...(result.status === 'failed' ? { nextAction: '可重新打开任务中心并再次定位原文' } : {}),
+      uiEffectResult: result,
+      createdAt: now,
+    } satisfies TaskActivityEvent;
+    const inserted = await repository.appendEventForOperation(
+      event,
+      operationId,
+      `task-run:${result.taskRunId}:ui-effect:${result.effectId}`,
+    );
+    if (inserted) wc.send(IPC_CHANNELS.taskActivityEvent, event);
+  }
+
+  async chooseSourceLocationCommand(
+    wc: WebContents,
+    taskRunId: string,
+    candidateId: string,
+    operationId: string,
+  ): Promise<void> {
+    try {
+      await this.chooseSourceLocation(wc, taskRunId, candidateId, operationId);
+    } catch (error) {
+      const run = await this.#deps.taskRuns?.get(taskRunId);
+      if (run === null || run === undefined) return;
+      const workflowRef = run.refs.workflowId === null || run.refs.workflowStageId === null
+        ? undefined
+        : {
+            workflowId: run.refs.workflowId,
+            stageId: run.refs.workflowStageId,
+            ...(run.refs.issueId === null ? {} : { issueId: run.refs.issueId }),
+          };
+      const event = {
+        taskRunId,
+        taskId: `locate-source:${run.refs.issueId ?? taskRunId}`,
+        kind: 'locate-source' as const,
+        runId: run.refs.executionRunId as RunId,
+        ...(workflowRef === undefined ? {} : { workflowRef }),
+        ...(run.refs.issueId === null ? {} : { issueId: run.refs.issueId }),
+        type: 'task-activity' as const,
+        activityId: randomUUID(),
+        status: run.status,
+        phase: 'failed' as const,
+        title: '原文位置确认未完成',
+        message: error instanceof Error ? error.message : String(error),
+        feedback: '任务状态和候选已保留，没有修改正文',
+        nextAction: '刷新任务中心后重新选择仍待确认的候选',
+        createdAt: new Date().toISOString(),
+      } satisfies TaskActivityEvent;
+      await this.#deps.taskRuns?.appendEvent(event);
+      wc.send(IPC_CHANNELS.taskActivityEvent, event);
+    }
+  }
+
+  async chooseSourceLocation(
+    wc: WebContents,
+    taskRunId: string,
+    candidateId: string,
+    operationId: string,
+  ): Promise<void> {
+    const repository = this.#deps.taskRuns;
+    if (repository === undefined) throw new Error('任务运行仓储尚未就绪');
+    const persisted = await repository.get(taskRunId);
+    const priorCandidate = await repository.getSelectedCandidateOperation(taskRunId, candidateId, operationId);
+    if (priorCandidate !== null && persisted?.status === 'completed') return;
+    if (persisted === null || persisted.status !== 'awaiting-author') throw new Error('原文定位任务不在等待确认状态');
+    const workflowId = persisted.refs.workflowId;
+    const stageId = persisted.refs.workflowStageId;
+    const issueId = persisted.refs.issueId;
+    if (workflowId === null || stageId === null || issueId === null) throw new Error('原文定位任务缺少工作流归属');
+    const workflowRef = { workflowId, stageId, issueId };
+    await this.#assertWorkflowRef(workflowRef, undefined, true);
+    const selected = await repository.selectCandidate(taskRunId, candidateId, operationId);
+    const candidate = selected.candidate;
+    const chapterId = typeof candidate.payload['chapterId'] === 'string' ? candidate.payload['chapterId'] : undefined;
+    const from = typeof candidate.payload['from'] === 'number' ? candidate.payload['from'] : undefined;
+    const to = typeof candidate.payload['to'] === 'number' ? candidate.payload['to'] : undefined;
+    const quote = typeof candidate.payload['quote'] === 'string' ? candidate.payload['quote'] : undefined;
+    if (chapterId === undefined || from === undefined || to === undefined || quote === undefined) throw new Error('原文定位候选数据已失效');
+    const executionRunId = persisted.refs.executionRunId as RunId;
+    const stageRun = this.#runs.get(executionRunId) ?? this.#startUtilityRun(wc, executionRunId, workflowRef);
+    const ref = this.#taskRef(executionRunId, workflowRef, taskRunId, chapterId);
+    const session = this.#taskSessions.get(taskRunId) ?? {
+      run: persisted,
+      ref,
+      wc,
+      lastActivityAt: Date.now(),
+    };
+    session.wc = wc;
+    session.ref = ref;
+    this.#taskSessions.set(taskRunId, session);
+    const decidedAt = new Date().toISOString();
+    const resumed = transitionTaskRun({
+      ...persisted,
+      authorDecisions: [...persisted.authorDecisions, {
+        id: randomUUID(),
+        stepId: 'confirm-location',
+        prompt: '请选择诊断问题对应的正确原文位置',
+        decision: { candidateId },
+        decidedAt,
+      }],
+    }, { status: 'running', occurredAt: decidedAt });
+    await this.#saveTaskRun(session, resumed);
+    await this.#publishTaskActivity(session, {
+      status: 'running', phase: 'validation', title: '确认原文位置',
+      message: '已收到作者选择，正在验证候选归属并更新正文工作区',
+      inputSummary: candidate.label,
+      nextAction: '切换章节、滚动并高亮已确认的原文',
+    });
+    await this.#completeLocatedSource(session, stageRun, workflowRef, { from, to, quote }, 'author');
+    this.#runs.delete(executionRunId);
+  }
+
+  /**
+   * 作者控制持久化任务运行：暂停、恢复或取消。
+   * MUST：不只改 DB 状态，而是真正协作中断当前运行；恢复复用同一 taskRunId，不新建第二条。
+   * operation 幂等：重复同一 operationId 不重复收敛状态。
+   */
+  async controlTaskRun(
+    wc: WebContents,
+    taskRunId: string,
+    action: 'pause' | 'resume' | 'cancel',
+    operationId: string,
+  ): Promise<void> {
+    try {
+      await this.#controlTaskRun(wc, taskRunId, action, operationId);
+    } catch (error) {
+      const run = await this.#deps.taskRuns?.get(taskRunId);
+      if (run === null || run === undefined) return;
+      const event = {
+        ...this.#refFromRun(run),
+        type: 'task-activity' as const,
+        activityId: randomUUID(),
+        status: run.status,
+        phase: 'failed' as const,
+        title: '任务控制未完成',
+        message: error instanceof Error ? error.message : String(error),
+        feedback: '任务状态未变更，没有修改正文',
+        nextAction: '刷新任务中心后重试暂停、恢复或取消',
+        createdAt: new Date().toISOString(),
+      } satisfies TaskActivityEvent;
+      await this.#deps.taskRuns?.appendEvent(event);
+      wc.send(IPC_CHANNELS.taskActivityEvent, event);
+    }
+  }
+
+  async #controlTaskRun(
+    wc: WebContents,
+    taskRunId: string,
+    action: 'pause' | 'resume' | 'cancel',
+    operationId: string,
+  ): Promise<void> {
+    const repository = this.#deps.taskRuns;
+    if (repository === undefined) throw new Error('任务运行仓储尚未就绪');
+    const scope = `task-run:${taskRunId}:control:${action}`;
+    const persisted = await repository.get(taskRunId);
+    if (persisted === null) throw new Error('任务运行不存在');
+    const session = this.#taskSessions.get(taskRunId);
+
+    if (action === 'pause') {
+      // 已处于终态/已暂停：幂等返回。
+      if (persisted.status === 'paused' || persisted.status === 'completed' || persisted.status === 'cancelled' || persisted.status === 'failed') return;
+      if (session !== undefined && session.execution !== undefined && persisted.status === 'running') {
+        // 运行中：记录控制请求并中断执行，在安全步骤边界收敛为 paused。
+        session.requestedControl = 'pause';
+        session.execution.controller.abort();
+        return;
+      }
+      // awaiting-author：可立即持久化为 paused。
+      await this.#persistControlTransition(wc, repository, persisted, session, 'paused', operationId, scope, {
+        title: '任务已暂停',
+        message: '已暂停原文定位，候选与输入已保留，正文未发生修改',
+        nextAction: '可随时恢复或取消本任务',
+      });
+      return;
+    }
+
+    if (action === 'cancel') {
+      if (persisted.status === 'completed' || persisted.status === 'cancelled' || persisted.status === 'failed') return;
+      if (session !== undefined && session.execution !== undefined && persisted.status === 'running') {
+        session.requestedControl = 'cancel';
+        session.execution.controller.abort();
+        return;
+      }
+      await this.#persistControlTransition(wc, repository, persisted, session, 'cancelled', operationId, scope, {
+        title: '任务已取消',
+        message: '已取消原文定位任务，正文未发生修改',
+        nextAction: '如需重新定位，可在任务中心重新发起原文定位',
+      });
+      return;
+    }
+
+    // resume：仅允许从 paused 恢复；复用同一 taskRunId 与持久输入，从当前阶段重新执行。
+    if (persisted.status !== 'paused') {
+      if (persisted.status === 'running' || persisted.status === 'awaiting-author') return; // 已在进行/等待，幂等。
+      throw new Error('任务不处于已暂停状态，无法恢复');
+    }
+    if (persisted.refs.playbookId === 'legacy.locate-source') {
+      await this.#resumeLocateSource(wc, persisted);
+    } else {
+      await this.#resumePlaybookRun(wc, persisted);
+    }
+  }
+
+  /** 将等待作者/无活跃执行的任务幂等收敛为 paused/cancelled。 */
+  async #persistControlTransition(
+    wc: WebContents,
+    repository: TaskRunRepository,
+    persisted: TaskRun,
+    session: TaskRuntimeSession | undefined,
+    target: 'paused' | 'cancelled',
+    operationId: string,
+    scope: string,
+    copy: { readonly title: string; readonly message: string; readonly nextAction: string },
+  ): Promise<void> {
+    const now = new Date().toISOString();
+    const nextRun = transitionTaskRun(persisted, { status: target, occurredAt: now });
+    const ref = this.#refFromRun(persisted);
+    const event = {
+      ...ref,
+      type: 'task-activity' as const,
+      activityId: randomUUID(),
+      status: target,
+      phase: target === 'paused' ? 'paused' as const : 'cancelled' as const,
+      title: copy.title,
+      message: copy.message,
+      feedback: '任务输入与已完成步骤已保留',
+      nextAction: copy.nextAction,
+      createdAt: now,
+    } satisfies TaskActivityEvent;
+    const inserted = await repository.appendEventForOperation(event, operationId, scope);
+    if (!inserted) return; // 重复 operationId：已收敛，不重复。
+    await repository.save(nextRun);
+    if (session !== undefined) {
+      session.run = nextRun;
+      if (target === 'cancelled') this.#closeTaskSession(session);
+      else if (session.heartbeat !== undefined) { clearInterval(session.heartbeat); delete session.heartbeat; }
+    }
+    wc.send(IPC_CHANNELS.taskActivityEvent, event);
+  }
+
+  /** 从 paused 恢复原文定位：复用同一 taskRunId、持久输入、工作流归属，重新确定性执行。 */
+  async #resumeLocateSource(wc: WebContents, persisted: TaskRun): Promise<void> {
+    const workflowId = persisted.refs.workflowId;
+    const stageId = persisted.refs.workflowStageId;
+    const issueId = persisted.refs.issueId;
+    if (workflowId === null || stageId === null || issueId === null) throw new Error('原文定位任务缺少工作流归属');
+    const workflowRef = { workflowId, stageId, issueId };
+    await this.#assertWorkflowRef(workflowRef, undefined, true);
+    const inputs = persisted.inputs as Readonly<Record<string, unknown>>;
+    const evidence = inputs['evidence'] as import('../../core/story-bible/index.js').IssueEvidence | undefined;
+    const chapterId = typeof inputs['chapterAnchor'] === 'string' ? inputs['chapterAnchor'] : undefined;
+    if (evidence === undefined || chapterId === undefined) throw new Error('原文定位输入已失效，无法恢复');
+    const executionRunId = persisted.refs.executionRunId as RunId;
+    const run = this.#runs.get(executionRunId) ?? this.#startUtilityRun(wc, executionRunId, workflowRef);
+    const ref = this.#taskRef(executionRunId, workflowRef, persisted.id, chapterId);
+    const session: TaskRuntimeSession = this.#taskSessions.get(persisted.id) ?? { run: persisted, ref, wc, lastActivityAt: Date.now() };
+    session.wc = wc;
+    session.ref = ref;
+    session.execution = run;
+    delete session.requestedControl;
+    this.#taskSessions.set(persisted.id, session);
+    const resumedAt = new Date().toISOString();
+    const resumedRun = transitionTaskRun(persisted, { status: 'running', occurredAt: resumedAt });
+    // Restart heartbeat on the resumed session.
+    session.run = resumedRun;
+    await this.#deps.taskRuns?.save(resumedRun);
+    session.heartbeatState = { step: '重新匹配诊断证据', currentObject: `目标章节“${chapterId}”`, recentAction: '已从暂停点恢复任务' };
+    if (session.heartbeat === undefined) {
+      session.heartbeat = setInterval(() => {
+        if (session.run.status !== 'running' || Date.now() - session.lastActivityAt < 2_000) return;
+        const state = session.heartbeatState;
+        if (state === undefined) return;
+        void this.#publishTaskActivity(session, {
+          status: 'running', phase: 'heartbeat', title: '定位原文',
+          message: `仍在${state.step}：${state.currentObject}`,
+          feedback: `最近完成：${state.recentAction}`,
+        });
+      }, 500);
+    }
+    await this.#publishTaskActivity(session, {
+      status: 'running', phase: 'validation', title: '恢复定位原文',
+      message: '已从暂停点恢复，正在重新匹配诊断证据',
+      inputSummary: '持久化的诊断问题、证据引文与章节锚点',
+      nextAction: '重新验证引文前后文，排除重复位置',
+    });
+    try {
+      const chapter = await (this.#deps.manuscript?.readChapterContent ?? readChapterContent)(chapterId);
+      this.#assertNotControlled(session);
+      const awaitingAuthor = await this.#matchAndResolveSource(session, run, workflowRef, chapterId, chapter.content, evidence);
+      if (!awaitingAuthor) this.#runs.delete(executionRunId);
+    } catch (error) {
+      const controlIntent = error instanceof TaskControlAbort ? error.intent : (session.requestedControl ?? undefined);
+      if (controlIntent === 'pause') {
+        await this.#pauseTaskSession(session, run);
+      } else {
+        await this.#failLocateSource(wc, ref, session, run, error, controlIntent === 'cancel');
+        this.#runs.delete(executionRunId);
+      }
+    }
+  }
+
+  // ===========================================================================
+  // 通用 playbook 执行引擎（task 2.1）：任意 kind（legacy-book/new-book/temporary）
+  // 复用同一 Task Runtime。生产不注册 model-backed 执行器，仅提供能力；真实模型
+  // 接入是后续 Phase。这里只负责状态收敛、产物持久化、作者决策与暂停恢复的幂等。
+  // ===========================================================================
+
+  /** 从注册的 playbook 起一次通用任务运行（queued→running→…→completed）。 */
+  async runPlaybookTask(wc: WebContents, options: RunPlaybookTaskOptions): Promise<void> {
+    const repository = this.#deps.taskRuns;
+    if (repository === undefined) throw new Error('任务运行仓储尚未就绪');
+    const { registration, taskRunId } = options;
+    const playbook = registration.playbook;
+    const executionRunId = randomUUID() as RunId;
+    const run = this.#startUtilityRun(wc, executionRunId);
+    const now = new Date().toISOString();
+    const queued = createTaskRunFromPlaybook(playbook, {
+      id: taskRunId,
+      executionRunId,
+      inputs: options.inputs,
+      now,
+      ...(options.refs === undefined ? {} : { refs: options.refs }),
+    });
+    if (!taskRunHasRequiredInputs(playbook, queued)) {
+      const missing = playbook.inputs
+        .filter((input) => input.required && queued.inputs[input.key] === undefined)
+        .map((input) => input.label)
+        .join('、');
+      run.controller.abort();
+      this.#runs.delete(executionRunId);
+      const ref = this.#refFromRun(queued);
+      await this.#failPlaybookRun(wc, ref, undefined, queued, new Error(`缺少必填输入：${missing}`), false);
+      return;
+    }
+    await repository.create(queued);
+    const running = transitionTaskRun(queued, { status: 'running', occurredAt: now });
+    await repository.save(running);
+    const ref = this.#refFromRun(running);
+    const session: TaskRuntimeSession = { run: running, ref, wc, lastActivityAt: Date.now(), execution: run };
+    this.#taskSessions.set(taskRunId, session);
+    this.#startTaskHeartbeat(session, registration.title, { step: registration.title, currentObject: playbook.title, recentAction: '已接收任务输入' });
+    let keepAlive = false;
+    try {
+      await this.#publishTaskActivity(session, {
+        status: 'running', phase: 'input', title: registration.title,
+        message: `已接收「${playbook.title}」的任务输入，开始执行`,
+        inputSummary: playbook.inputs.map((input) => input.label).join('、') || '无显式输入',
+      });
+      await this.#advancePlaybook(session, registration, 0);
+      keepAlive = session.run.status === 'awaiting-author' || session.run.status === 'paused';
+    } catch (error) {
+      const controlIntent = error instanceof TaskControlAbort ? error.intent : (session.requestedControl ?? undefined);
+      if (controlIntent === 'pause') {
+        keepAlive = await this.#pauseTaskSession(session, run);
+      } else {
+        await this.#failPlaybookRun(wc, ref, session, running, error, controlIntent === 'cancel');
+      }
+    } finally {
+      if (!keepAlive) this.#runs.delete(executionRunId);
+    }
+  }
+
+  /** 从 fromIndex 起逐步执行；遇作者决策步进入 awaiting-author 并返回，等作者提交后再续。 */
+  async #advancePlaybook(
+    session: TaskRuntimeSession,
+    registration: PlaybookRegistration,
+    fromIndex: number,
+  ): Promise<void> {
+    const playbook = registration.playbook;
+    for (let i = fromIndex; i < playbook.steps.length; i += 1) {
+      this.#assertNotControlled(session);
+      const step = playbook.steps[i];
+      if (step === undefined) throw new Error('playbook 步骤越界');
+      const now = new Date().toISOString();
+      const positioned = positionTaskRunAtStep(session.run, playbook, step.id, now);
+      await this.#saveTaskRun(session, positioned);
+      const handler = registration.handlers[step.id];
+      if (handler === undefined) throw new Error(`playbook「${playbook.id}」缺少步骤「${step.id}」的执行器`);
+      session.heartbeatState = { step: step.title, currentObject: playbook.title, recentAction: `进入步骤「${step.title}」` };
+      const ctx: PlaybookStepContext = {
+        run: session.run,
+        stepId: step.id,
+        inputs: session.run.inputs,
+        signal: (session.execution ?? this.#runs.get(session.ref.runId))?.controller.signal ?? new AbortController().signal,
+      };
+      if (handler.requiresAuthor === true) {
+        const prompt = await handler.prompt(ctx);
+        this.#assertNotControlled(session);
+        const awaitingAt = new Date().toISOString();
+        const awaiting = transitionTaskRun(session.run, { status: 'awaiting-author', occurredAt: awaitingAt });
+        await this.#saveTaskRun(session, awaiting);
+        await this.#publishTaskActivity(session, {
+          status: 'awaiting-author', phase: 'awaiting-author', title: step.title,
+          message: prompt.message,
+          nextAction: prompt.nextAction,
+        });
+        return; // 等待作者决策，由 submitPlaybookAuthorDecision 续跑。
+      }
+      const output = await handler.run(ctx);
+      this.#assertNotControlled(session);
+      await this.#recordStepOutput(session, registration, i, output);
+    }
+    await this.#completePlaybookRun(session, registration);
+  }
+
+  /** 记录单步产出：持久化产物、推进游标到下一步、下发 output 活动。 */
+  async #recordStepOutput(
+    session: TaskRuntimeSession,
+    registration: PlaybookRegistration,
+    index: number,
+    output: PlaybookStepOutput,
+  ): Promise<void> {
+    const playbook = registration.playbook;
+    const now = new Date().toISOString();
+    const newArtifacts: TaskRunArtifact[] = (output.artifacts ?? []).map((artifact) => ({
+      id: randomUUID(),
+      outputKey: artifact.outputKey,
+      value: artifact.value,
+      createdAt: now,
+    }));
+    const artifactRefs = (output.artifacts ?? []).map((artifact) => artifact.ref);
+    const nextStep = playbook.steps[index + 1];
+    const advanced: TaskRun = {
+      ...session.run,
+      artifacts: [...session.run.artifacts, ...newArtifacts],
+      currentStepId: nextStep === undefined ? null : nextStep.id,
+      currentStepIndex: nextStep === undefined ? null : index + 1,
+      timestamps: { ...session.run.timestamps, updatedAt: now },
+    };
+    await this.#saveTaskRun(session, advanced);
+    await this.#publishTaskActivity(session, {
+      status: 'running', phase: 'output', title: playbook.steps[index]?.title ?? registration.title,
+      message: output.message,
+      ...(output.outputSummary === undefined ? {} : { outputSummary: output.outputSummary }),
+      ...(artifactRefs.length === 0 ? {} : { artifactRefs }),
+    });
+  }
+
+  /** 全部步骤完成：收敛 completed、清游标、发完成事件并关闭会话。 */
+  async #completePlaybookRun(session: TaskRuntimeSession, registration: PlaybookRegistration): Promise<void> {
+    const now = new Date().toISOString();
+    const completed = transitionTaskRun({
+      ...session.run,
+      currentStepId: null,
+      currentStepIndex: null,
+    }, { status: 'completed', occurredAt: now });
+    await this.#saveTaskRun(session, completed);
+    await this.#publishTaskEvent(session, {
+      ...session.ref,
+      type: 'task-run-completed', status: 'completed', title: `${registration.title}完成`,
+      summary: registration.completedSummary,
+      completedAt: now,
+    } satisfies TaskRunCompletedEvent);
+    this.#closeTaskSession(session);
+    this.#runs.delete(session.ref.runId);
+  }
+
+  /** 将失败或取消收敛为 failed/cancelled，并下发作者可读恢复信息。 */
+  async #failPlaybookRun(
+    wc: WebContents,
+    ref: TaskRunRefDto,
+    session: TaskRuntimeSession | undefined,
+    _run: TaskRun,
+    error: unknown,
+    cancelled: boolean,
+  ): Promise<void> {
+    const failedAt = new Date().toISOString();
+    const failedEvent = {
+      ...ref,
+      type: 'task-run-failed', status: cancelled ? 'cancelled' : 'failed',
+      title: cancelled ? '任务已取消' : '任务未完成',
+      error: {
+        category: cancelled ? 'aborted' as const : 'internal' as const,
+        message: cancelled ? '作者已取消当前任务' : (error instanceof Error ? error.message : String(error)),
+        recovery: cancelled ? '如需继续，可在任务中心重新发起该任务' : '检查任务输入后重新发起，正文未发生修改',
+      },
+      failedAt,
+    } satisfies TaskRunFailedEvent;
+    if (session === undefined) {
+      // 未创建持久记录（如缺必填输入）：只下发可读失败，不写 task_activities（无父行）。
+      wc.send(IPC_CHANNELS.taskActivityEvent, failedEvent);
+    } else {
+      const failedRun = transitionTaskRun(session.run, {
+        status: cancelled ? 'cancelled' : 'failed',
+        occurredAt: failedAt,
+        ...(cancelled ? {} : { failure: { code: 'playbook-task-failed', message: failedEvent.error.message } }),
+      });
+      await this.#saveTaskRun(session, failedRun);
+      await this.#publishTaskEvent(session, failedEvent);
+      this.#closeTaskSession(session);
+    }
+  }
+
+  /** 作者提交决策 command 入口：捕获异常并下发可读失败活动而不抛给 IPC。 */
+  async submitPlaybookAuthorDecision(
+    wc: WebContents,
+    taskRunId: string,
+    stepId: string,
+    decision: unknown,
+    operationId: string,
+  ): Promise<void> {
+    try {
+      await this.#submitPlaybookAuthorDecision(wc, taskRunId, stepId, decision, operationId);
+    } catch (error) {
+      const run = await this.#deps.taskRuns?.get(taskRunId);
+      if (run === null || run === undefined) return;
+      const event = {
+        ...this.#refFromRun(run),
+        type: 'task-activity' as const,
+        activityId: randomUUID(),
+        status: run.status,
+        phase: 'failed' as const,
+        title: '任务决策未完成',
+        message: error instanceof Error ? error.message : String(error),
+        feedback: '任务状态和已完成步骤已保留，没有修改正文',
+        nextAction: '刷新任务中心后重新提交决策',
+        createdAt: new Date().toISOString(),
+      } satisfies TaskActivityEvent;
+      await this.#deps.taskRuns?.appendEvent(event);
+      wc.send(IPC_CHANNELS.taskActivityEvent, event);
+    }
+  }
+
+  async #submitPlaybookAuthorDecision(
+    wc: WebContents,
+    taskRunId: string,
+    stepId: string,
+    decision: unknown,
+    operationId: string,
+  ): Promise<void> {
+    const repository = this.#deps.taskRuns;
+    if (repository === undefined) throw new Error('任务运行仓储尚未就绪');
+    const persisted = await repository.get(taskRunId);
+    if (persisted === null) throw new Error('任务运行不存在');
+    const registration = this.#playbooks.get(persisted.refs.playbookId);
+    if (registration === undefined) throw new Error('任务对应的 playbook 未注册');
+    // 幂等：已完成且该步决策已录 → 直接返回。
+    if (persisted.status === 'completed' && persisted.authorDecisions.some((d) => d.stepId === stepId)) return;
+    if (persisted.status !== 'awaiting-author') throw new Error('任务不在等待作者决策状态');
+    const playbook = registration.playbook;
+    const stepIndex = playbook.steps.findIndex((step) => step.id === stepId);
+    if (stepIndex === -1) throw new Error('决策步骤不属于该任务');
+    const handler = registration.handlers[stepId];
+    if (handler === undefined || handler.requiresAuthor !== true) throw new Error('该步骤不接受作者决策');
+    const executionRunId = persisted.refs.executionRunId as RunId;
+    const run = this.#runs.get(executionRunId) ?? this.#startUtilityRun(wc, executionRunId);
+    const ref = this.#refFromRun(persisted);
+    const session: TaskRuntimeSession = this.#taskSessions.get(taskRunId) ?? { run: persisted, ref, wc, lastActivityAt: Date.now() };
+    session.wc = wc;
+    session.ref = ref;
+    session.execution = run;
+    delete session.requestedControl;
+    this.#taskSessions.set(taskRunId, session);
+    const decidedAt = new Date().toISOString();
+    const withDecision: TaskRun = {
+      ...persisted,
+      authorDecisions: [...persisted.authorDecisions, {
+        id: randomUUID(),
+        stepId,
+        prompt: playbook.steps[stepIndex]?.title ?? stepId,
+        decision,
+        decidedAt,
+      }],
+    };
+    const resumed = transitionTaskRun(withDecision, { status: 'running', occurredAt: decidedAt });
+    const receivedEvent = {
+      ...ref,
+      type: 'task-activity' as const,
+      activityId: randomUUID(),
+      status: 'running' as const,
+      phase: 'validation' as const,
+      title: playbook.steps[stepIndex]?.title ?? '作者决策',
+      message: '已收到作者决策，正在据此产出结果',
+      createdAt: decidedAt,
+    } satisfies TaskActivityEvent;
+    const inserted = await repository.appendEventForOperation(
+      receivedEvent,
+      operationId,
+      `task-run:${taskRunId}:author-decision:${stepId}`,
+    );
+    if (!inserted) return; // 重复 operationId：已收敛。
+    await this.#saveTaskRun(session, resumed);
+    session.wc.send(IPC_CHANNELS.taskActivityEvent, receivedEvent);
+    session.lastActivityAt = Date.now();
+    this.#startTaskHeartbeat(session, registration.title, { step: playbook.steps[stepIndex]?.title ?? stepId, currentObject: playbook.title, recentAction: '已收到作者决策' });
+    let keepAlive = false;
+    try {
+      const ctx: PlaybookStepContext = { run: session.run, stepId, inputs: session.run.inputs, signal: run.controller.signal };
+      const output = await handler.apply(ctx, decision);
+      this.#assertNotControlled(session);
+      await this.#recordStepOutput(session, registration, stepIndex, output);
+      await this.#advancePlaybook(session, registration, stepIndex + 1);
+      keepAlive = session.run.status === 'awaiting-author' || session.run.status === 'paused';
+    } catch (error) {
+      const controlIntent = error instanceof TaskControlAbort ? error.intent : (session.requestedControl ?? undefined);
+      if (controlIntent === 'pause') {
+        keepAlive = await this.#pauseTaskSession(session, run);
+      } else {
+        await this.#failPlaybookRun(wc, ref, session, resumed, error, controlIntent === 'cancel');
+      }
+    } finally {
+      if (!keepAlive) this.#runs.delete(executionRunId);
+    }
+  }
+
+  /** 从 paused 恢复通用任务：复用同一 taskRunId，从 currentStepIndex 续跑。 */
+  async #resumePlaybookRun(wc: WebContents, persisted: TaskRun): Promise<void> {
+    const registration = this.#playbooks.get(persisted.refs.playbookId);
+    if (registration === undefined) throw new Error('任务对应的 playbook 未注册');
+    if (!taskRunHasRequiredInputs(registration.playbook, persisted)) throw new Error('任务输入已失效，无法恢复');
+    const executionRunId = persisted.refs.executionRunId as RunId;
+    const run = this.#runs.get(executionRunId) ?? this.#startUtilityRun(wc, executionRunId);
+    const ref = this.#refFromRun(persisted);
+    const session: TaskRuntimeSession = this.#taskSessions.get(persisted.id) ?? { run: persisted, ref, wc, lastActivityAt: Date.now() };
+    session.wc = wc;
+    session.ref = ref;
+    session.execution = run;
+    delete session.requestedControl;
+    this.#taskSessions.set(persisted.id, session);
+    const resumedAt = new Date().toISOString();
+    const resumed = transitionTaskRun(persisted, { status: 'running', occurredAt: resumedAt });
+    await this.#saveTaskRun(session, resumed);
+    this.#startTaskHeartbeat(session, registration.title, { step: registration.title, currentObject: registration.playbook.title, recentAction: '已从暂停点恢复任务' });
+    let keepAlive = false;
+    try {
+      await this.#publishTaskActivity(session, {
+        status: 'running', phase: 'validation', title: `恢复${registration.title}`,
+        message: '已从暂停点恢复，正在继续未完成的步骤',
+        nextAction: '继续执行剩余步骤',
+      });
+      await this.#advancePlaybook(session, registration, persisted.currentStepIndex ?? 0);
+      keepAlive = session.run.status === 'awaiting-author' || session.run.status === 'paused';
+    } catch (error) {
+      const controlIntent = error instanceof TaskControlAbort ? error.intent : (session.requestedControl ?? undefined);
+      if (controlIntent === 'pause') {
+        keepAlive = await this.#pauseTaskSession(session, run);
+      } else {
+        await this.#failPlaybookRun(wc, ref, session, resumed, error, controlIntent === 'cancel');
+      }
+    } finally {
+      if (!keepAlive) this.#runs.delete(executionRunId);
+    }
+  }
+
+  /** 通用心跳：>2s 无活动且仍在运行时下发 heartbeat 活动，避免让作者以为产品卡死。 */
+  #startTaskHeartbeat(
+    session: TaskRuntimeSession,
+    title: string,
+    state: { step: string; currentObject: string; recentAction: string },
+  ): void {
+    session.heartbeatState = state;
+    if (session.heartbeat !== undefined) return;
+    session.heartbeat = setInterval(() => {
+      if (session.run.status !== 'running' || Date.now() - session.lastActivityAt < 2_000) return;
+      const current = session.heartbeatState;
+      if (current === undefined) return;
+      void this.#publishTaskActivity(session, {
+        status: 'running', phase: 'heartbeat', title,
+        message: `仍在${current.step}：${current.currentObject}`,
+        feedback: `最近完成：${current.recentAction}`,
+      });
+    }, 500);
   }
 
   /**

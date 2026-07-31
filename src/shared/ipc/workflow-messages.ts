@@ -3,7 +3,7 @@ export type AuthorIntentKindDto = 'preserve' | 'extract' | 'remove';
 export interface AuthorIntentDto { kind: AuthorIntentKindDto; text: string }
 export interface WorkflowRefDto { workflowId: string; stageId: string; issueId?: string }
 export interface WorkflowRequestMeta { requestId?: string; operationId?: string; expectedVersion?: number; workflowRef?: WorkflowRefDto }
-export interface WorkflowSnapshotDto { workflowId:string; projectId:string; kind:string; templateVersion:string|number; objective:string; authorIntents:ReadonlyArray<AuthorIntentDto>; status:string; currentStageId:string|null; stages:ReadonlyArray<Record<string,unknown>>; version:number; createdAt:number; updatedAt:number }
+export interface WorkflowSnapshotDto { workflowId:string; projectId:string; kind:string; templateVersion:string|number; objective:string; authorIntents:ReadonlyArray<AuthorIntentDto>; status:string; currentStageId:string|null; selectedIssueId?:string; stages:ReadonlyArray<Record<string,unknown>>; version:number; createdAt:number; updatedAt:number }
 export interface WorkflowSnapshotResponse { snapshot: WorkflowSnapshotDto|null; failure?: WorkflowFailureEvent }
 export interface GetWorkflowSnapshotRequest extends WorkflowRequestMeta { workflowId?: string; projectId?: string }
 export interface StartWorkflowCommand extends WorkflowRequestMeta { type:'start-workflow'; requestId:string; operationId:string; projectId:string; workflowId?:string; kind?:'new-book-creation'|'legacy-book-revision'; objective:string; authorIntents?:ReadonlyArray<AuthorIntentDto> }

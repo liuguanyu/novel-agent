@@ -21,6 +21,7 @@ import { GoalDialog } from './components/GoalDialog.js';
 import { FactSheetDrawer } from './components/FactSheetDrawer.js';
 import { StatusFooter } from './components/StatusFooter.js';
 import { TaskActivityDrawer } from './components/TaskActivityDrawer.js';
+import { CurrentTaskCard } from './components/CurrentTaskCard.js';
 import { ToolboxDrawer } from './components/ToolboxDrawer.js';
 import { ReadingMode } from './components/ReadingMode.js';
 import { ConversationMode } from './components/ConversationMode.js';
@@ -40,6 +41,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { BookOpenText, BookOpen, MessagesSquare, Target } from 'lucide-react';
 import { ThemeToggle } from './components/ThemeToggle.js';
 import { buildTaskActivityFeed } from './lib/task-activity-feed.js';
+import { manuscriptEmptyCopy, assistantCopy } from './lib/task-ui-copy.js';
 import {
   DEFAULT_DIAGNOSE_AGENT,
   resolveAgentEntry,
@@ -50,6 +52,8 @@ import type { ChapterTreeNodeDto, ConsistencyIssueDto } from '../shared/ipc/inde
 import { useWorkbenchActivities } from './hooks/useWorkbenchActivities.js';
 import { useWorkflowSnapshot } from './hooks/useWorkflowSnapshot.js';
 import { useAssetReview } from './hooks/useAssetReview.js';
+import { useTaskActivityStream } from './hooks/useTaskActivityStream.js';
+import { useTaskUiEffects } from './hooks/useTaskUiEffects.js';
 
 function findChapterPath(
   nodes: ReadonlyArray<ChapterTreeNodeDto>,
@@ -86,6 +90,7 @@ export function App(): JSX.Element {
   const { findingsByRun, activeFinding, selectFinding, clearFinding } = useReviewFindings();
   const factExtraction = useFactExtraction();
   const modelTasks = useModelTaskSessions();
+  const taskStream = useTaskActivityStream(workspaceProjectId);
   const currentModelTask = modelTasks.activeAttempt?.kind === 'fact-extraction' ? modelTasks.activeAttempt : undefined;
   // 底部实时进展始终跟随最新事实任务，不受任务面板里历史 attempt 选择影响。
   const latestFactModelTask = useMemo(() => {
@@ -236,6 +241,24 @@ export function App(): JSX.Element {
   );
   const refactor = useRefactor(onRefactorApplied, workflowRef, refactorIssueId, workflowState.snapshot?.version);
 
+  const taskUiExecutors = useMemo(() => ({
+    selectChapter,
+    highlightQuote: async (chapterId: string, quote: string): Promise<void> => {
+      await selectChapter(chapterId);
+      for (let attempt = 0; attempt < 20; attempt += 1) {
+        await new Promise<void>((resolve) => window.setTimeout(resolve, 25));
+        if (manuscriptRef.current?.highlightQuote(quote) === true) return;
+      }
+      throw new Error('目标章节已打开，但诊断引文未能在当前正文中高亮');
+    },
+    showDiff: async (_nodeId: string, _diffId: string): Promise<void> => { setRefactorOpen(true); },
+    showHunkReview: async (_refactorRunId: string): Promise<void> => { setRefactorOpen(true); },
+    showCheckpoint: async (_checkpointId: string): Promise<void> => { setTaskActivityOpen(true); },
+    openFactSheet: async (): Promise<void> => { setFactSheetOpen(true); },
+    openDashboard: async (): Promise<void> => { setDashOpen(true); },
+  }), [selectChapter]);
+  useTaskUiEffects(taskStream.activities, taskUiExecutors);
+
   // 问题定位按稳定章节锚点跳转；有证据引文时，等待正文加载后再精确高亮。
   const handleLocateIssue = useCallback((issue: ConsistencyIssueDto): void => {
     const chapterAnchor = issue.anchors.find((anchor) => anchor.kind === 'chapter');
@@ -272,6 +295,19 @@ export function App(): JSX.Element {
     selectChapter(chapterAnchor.id);
     setRefactorOpen(true);
   }, [selectChapter]);
+
+  /** 4.3 定位完成后的「进入局部改写」下一步入口：用已定位的章节/原文/问题预填改写面板。 */
+  const enterRefactorFromLocatedSource = useCallback(
+    (params: { readonly chapterId: string; readonly quote: string; readonly issueId?: string }): void => {
+      if (params.quote.length === 0) return;
+      setRefactorPrefill({ nodeId: params.chapterId, original: params.quote, suggestion: '' });
+      setRefactorIssueId(params.issueId);
+      setPendingIssueLocation({ nodeId: params.chapterId, quote: params.quote });
+      selectChapter(params.chapterId);
+      setRefactorOpen(true);
+    },
+    [selectChapter],
+  );
 
   /** 工具条看板排：打开对应查阅抽屉（不产召唤命令）。 */
   const handleOpenBoard = useCallback((id: ToolboxBoardId): void => {
@@ -371,8 +407,9 @@ export function App(): JSX.Element {
         modelTaskChapterLabel,
         dashboard: dashboard.state,
         trace: workbenchTrace,
+        taskEvents: taskStream.events,
       }),
-    [dashboard.state, latestFactModelTask, modelTaskChapterLabel, workbenchTrace, workflowState.snapshot],
+    [dashboard.state, latestFactModelTask, modelTaskChapterLabel, taskStream.events, workbenchTrace, workflowState.snapshot],
   );
   const [taskActivityItems, setTaskActivityItems] = useState(liveTaskActivityItems);
   useEffect(() => {
@@ -385,6 +422,67 @@ export function App(): JSX.Element {
       return [...base, ...additions].slice(-100);
     });
   }, [liveTaskActivityItems]);
+  const footerTaskActivityItems = useMemo(() => {
+    const attention = taskActivityItems.filter((item) => item.tone === 'error' || item.tone === 'waiting');
+    const latest = taskActivityItems.slice(-3);
+    const selected = [...attention.slice(-2), ...latest];
+    const unique = selected.filter((item, index) => selected.findIndex((candidate) => candidate.id === item.id) === index);
+    return unique.slice(-3);
+  }, [taskActivityItems]);
+
+  const handleSelectFinding = useCallback((runId: string, index: number): void => {
+    selectFinding(runId, index);
+    const issueId = findingsByRun.get(runId)?.issues[index]?.issueId;
+    const snapshot = workflowState.snapshot;
+    if (issueId === undefined || snapshot === null || workflowRef === undefined) return;
+    const requestId = crypto.randomUUID();
+    void window.novelAgent.sendWorkflowCommand({
+      type: 'workflow-select-issue',
+      requestId,
+      operationId: requestId,
+      expectedVersion: snapshot.version,
+      workflowId: snapshot.workflowId,
+      stageId: workflowRef.stageId,
+      issueId,
+      workflowRef: { ...workflowRef, issueId },
+    }).then((response) => {
+      if (response.snapshot !== null) workflowState.acceptSnapshot(response.snapshot);
+    });
+  }, [findingsByRun, selectFinding, workflowRef, workflowState]);
+
+  const chooseSourceLocation = useCallback((taskRunId: string, candidateId: string): void => {
+    window.novelAgent.sendCommand({
+      type: 'choose-source-location',
+      runId: crypto.randomUUID(),
+      operationId: `choose-source-location:${taskRunId}:${candidateId}`,
+      taskRunId,
+      candidateId,
+    });
+  }, []);
+
+  const controlTask = useCallback((taskRunId: string, action: 'pause' | 'resume' | 'cancel'): void => {
+    window.novelAgent.sendCommand({
+      type: 'control-task-run',
+      runId: crypto.randomUUID(),
+      operationId: crypto.randomUUID(),
+      taskRunId,
+      action,
+    });
+  }, []);
+
+  const locateSourceIssueId = workflowState.snapshot?.selectedIssueId ?? activeIssue?.issueId;
+  const runLocateSource = useCallback((): void => {
+    if (workflowRef === undefined || locateSourceIssueId === undefined) return;
+    window.novelAgent.sendCommand({
+      type: 'locate-source',
+      runId: crypto.randomUUID(),
+      workflowRef: { ...workflowRef, issueId: locateSourceIssueId },
+    });
+  }, [locateSourceIssueId, workflowRef]);
+
+  // 任务化 UI 文案（信息架构收敛，§7.5/§7.6）：中栏空状态与右栏助手角色随当前阶段切换。
+  const manuscriptEmpty = manuscriptEmptyCopy(workflowState.snapshot);
+  const assistant = assistantCopy(workflowState.snapshot);
 
   // 对话轴单实例：工作台右栏与对话专注模式共用同一棵组件树（保留草稿/滚动状态）。
   const dialogueAxis = (
@@ -396,13 +494,15 @@ export function App(): JSX.Element {
       activeFinding={activeFinding}
       onAsk={ask}
       askTargetLabel={conversationAgentLabel}
+      assistantTitle={assistant.title}
+      assistantEmptyHint={assistant.emptyHint}
       onAbort={abort}
       onApproveConflict={approveConflict}
       onRejectConflict={rejectConflict}
       onModifyConflict={modifyConflict}
       onLocateConflict={handleLocateIssue}
       onAdoptConflict={handleAdoptIssue}
-      onSelectFinding={selectFinding}
+      onSelectFinding={handleSelectFinding}
       onAdoptFinding={handleAdoptIssue}
       onSummonExpert={() => setPaletteOpen(true)}
     />
@@ -520,6 +620,17 @@ export function App(): JSX.Element {
             dashboard.runGlobalAudit(workflowRef);
           }}
           onOpenFactSheet={() => setFactSheetOpen(true)}
+          onLocateSource={runLocateSource}
+          canLocateSource={locateSourceIssueId !== undefined}
+        />
+
+        <CurrentTaskCard
+          workflow={workflowState.snapshot}
+          events={taskStream.events}
+          onOpenTaskCenter={() => setTaskActivityOpen(true)}
+          onChooseSourceLocation={chooseSourceLocation}
+          onControlTask={controlTask}
+          onEnterRefactor={enterRefactorFromLocatedSource}
         />
 
         <ExpertWorkbench
@@ -549,7 +660,7 @@ export function App(): JSX.Element {
           </ResizablePanel>
           <ResizableHandle withHandle />
           <ResizablePanel defaultSize={56} minSize={30} className="min-h-0">
-            <ManuscriptAxis ref={manuscriptRef} content={content} loading={loadingContent} selectedNodeId={selectedNodeId} />
+            <ManuscriptAxis ref={manuscriptRef} content={content} loading={loadingContent} selectedNodeId={selectedNodeId} emptyState={manuscriptEmpty} />
           </ResizablePanel>
           <ResizableHandle withHandle />
           <ResizablePanel defaultSize={26} minSize={16} maxSize={44} className="min-h-0">
@@ -558,7 +669,7 @@ export function App(): JSX.Element {
         </ResizablePanelGroup>
 
         <StatusFooter
-          items={taskActivityItems}
+          items={footerTaskActivityItems}
           needsFactRuling={
             factExtraction.state.status === 'interrupted' || latestFactModelTask?.status === 'awaiting-author'
           }

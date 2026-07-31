@@ -17,3 +17,5 @@ export type { WorkflowRecord, WorkflowStageRecord, CreateWorkflowInput } from '.
 export { CreativeAssetRepository, WorkflowIssueRepository } from './creative-asset-repository.js';
 export type { CreativeAssetRecord, CreativeAssetCandidate, CreativeAssetDependencyInput, CreativeAssetImpactRecord, ConfirmCandidateResult, AuditIssueInput } from './creative-asset-repository.js';
 export { SqliteStageRunEvidenceRecorder, SqliteContinuationRecordService, assertWorkflowRefOwnership } from './workflow-runtime-persistence.js';
+export { TaskRunRepository } from './task-run-repository.js';
+export type { TaskAuthorCandidateRecord } from './task-run-repository.js';

@@ -1,0 +1,58 @@
+# task-centric-workbench 实施任务
+
+> 按 requirement.md 第 16 章 Phase 1-5 拆分。所有任务当前均未完成。
+
+## Phase 1：规格与产品骨架
+
+- [ ] 1.1 [Core] 定义 `TaskRuntime`、`TaskRun`、`TaskPlaybook`、任务状态、输入、产物、作者决策及统一引用 DTO，旧作与新书共用且不依赖 Electron/React。
+- [ ] 1.2 [Core/IPC] 定义 task activity、model audit、heartbeat、UI Effect 和 task-center 查询契约；保留 standalone/旧运行兼容引用。（已完成 task activity/UI Effect 基础契约与 task-center 持久查询契约，model audit 与统一 heartbeat 契约待补）
+- [x] 1.3 [Renderer] 建立产品栏、轻量流程导航、当前任务卡、三栏工作区、常驻底部消息流和按需任务中心骨架。
+- [ ] 1.4 [Renderer] 当前任务卡展示任务目标、输入、执行方式、输出、状态/进度、作者操作和下一步；Workflow Graph 默认轻量摘要。（基础任务卡与轻量流程已完成，统一 playbook、问题详情和等待/失败操作待补）
+- [x] 1.5 [Renderer] 底部默认只展示最近 2～3 条高价值活动，完整活动进入任务中心，禁止把内部 ID/技术阶段代码作为主文案。
+- [x] 1.6 [Core/Test] 为旧作定位、新书创作和临时任务建立最小 playbook fixture，验证不要求项目已有正文。（三族 fixture 结构完整且 id 唯一；新增框架无关的 `createTaskRunFromPlaybook`/`positionTaskRunAtStep`/`taskRunHasRequiredInputs` 纯工厂；smoke 覆盖新书/临时任务在 project/book/manuscript/workflow/issue 全为 null 时实例化并经作者决策或单步收敛到 completed、复用同一 run id，以及必填输入校验齐备/缺失两态）
+
+## Phase 2：真实任务活动
+
+- [x] 2.1 [Main] 新增统一 Task Runtime：创建 run、声明输入、执行 playbook、保存产物/作者决策并收敛 queued/running/awaiting-author/paused/completed/failed/cancelled。（通用 playbook 执行引擎 `runPlaybookTask`/`#advancePlaybook`/`#recordStepOutput`/`#completePlaybookRun`/`#failPlaybookRun`/`submitPlaybookAuthorDecision`/`#resumePlaybookRun` 已落地，经 `registerPlaybook` 注册接入，同时支持 legacy-book/new-book/temporary 三族，不要求 project/book/manuscript；生产不注册 model-backed 执行器，真实模型接入留待 Phase 5；smoke 注入 fake handler 覆盖单步 auto、作者决策、暂停/恢复、取消、缺必填与重复 operation 幂等）
+- [ ] 2.2 [Main/IPC] 发布真实 `task-activity-event`，覆盖开始、输入、步骤、工具、模型、输出、等待作者、完成和失败事件。（`locate-source` 与通用 playbook 引擎均发布真实输入/步骤/输出/等待/完成/失败事件；剩余仅是把各具体任务的真实 handler 迁移到通用引擎）
+- [ ] 2.3 [Renderer] 新增统一 activity store，直接消费真实 Task Runtime 事件；迁移期间兼容快照但不从快照伪造活动。（真实事件 store 已接入，支持启动/重连加载持久活动并与实时事件去重合并；旧 snapshot feed 仍处于迁移兼容期）
+- [x] 2.4 [Main] 实现超过 2 秒无新活动时的真实 heartbeat，携带步骤/处理量/当前对象/最近子步骤/外部等待中的至少一项，禁止虚假进度。（`locate-source` 已验证两秒阈值、真实步骤上下文和任务完成后停止发送）
+- [ ] 2.5 [Main/Renderer] 实现暂停、中断、失败、等待作者、恢复和取消的活动与任务中心展示。（`locate-source` 已完成失败状态、失败原因、已完成步骤、恢复建议、任务中心入口，以及运行中/等待作者态的暂停、恢复、取消：运行中在安全步骤边界收敛、恢复复用同一 taskRunId、当前任务卡提供暂停/恢复/取消操作；通用引擎已把运行中暂停、awaiting-author 取消、从 currentStepIndex 恢复、通用失败收敛推广到 new-book/temporary 任务；剩余为 Renderer 侧通用任务卡展示对接）
+- [ ] 2.6 [Test] 覆盖真实事件顺序、重连查询、heartbeat 阈值、状态收敛、失败恢复和重复 operation 幂等。（`locate-source` 已覆盖真实事件顺序、重连查询、heartbeat 阈值、等待/完成收敛、失败原因持久化、候选确认幂等，以及运行中暂停安全收敛、恢复复用同一 taskRunId、等待作者取消和重复暂停/取消 operation 幂等；通用引擎 smoke 已补 temporary 单步收敛、new-book 作者决策、暂停/恢复复用同一 taskRunId、awaiting-author 取消、缺必填失败、重复 author-decision/control operation 幂等）
+
+## Phase 3：工作区响应
+
+- [x] 3.1 [Core/IPC] 定义并校验统一 UI Effect executor 契约及 effect 执行结果事件。（稳定 effectId、成功/失败回执、IPC schema、Main 归属校验、幂等持久化与重连防重放已完成）
+- [ ] 3.2 [Renderer] 接入切章、滚动、原文高亮、诊断标记、Diff、Hunk 审核、checkpoint、事实底稿和复检报告效果。（切章等待正文读取、滚动/高亮真实命中及执行结果回执已完成；Diff、Hunk、checkpoint、事实底稿和复检报告仍待逐项真实验收）
+- [ ] 3.3 [Renderer] 实现任务驱动的中栏状态/空状态，左栏支持章节、问题、人物、故事线和任务产物上下文切换。（中栏任务化空状态已由 4.5C 完成；左栏多上下文（问题/人物/故事线/产物）切换待补。）
+- [ ] 3.4 [Renderer] 右栏切换为当前任务助手，作者补充约束成为任务新输入并进入活动流。（右栏助手角色标题/空状态已由 4.5D 完成；「作者补充约束成为任务新输入」属后端联动，待补。）
+- [ ] 3.5 [Main/Renderer] 将模型交互改为可审计摘要、引用、结构化结果和采用/拒绝/待确认结果；MUST NOT 下发 hidden CoT。
+- [ ] 3.6 [Test] 验证所有正文/产物操作都有 UI Effect，消息流反馈与工作区实际变化一致，Renderer 不访问 DB/LLM/fs。
+
+## Phase 4：旧作重建闭环
+
+- [x] 4.1 [Main] 接入 `locate-source` playbook：诊断问题、证据、章节锤点、正文和事实底稿输入，记录真实步骤与产物。（诊断/证据/章节/正文及定位产物已接入；事实底稿输入已补：`#collectSourceFactBacking` 在定位前从事实库最新版本按证据引文/问题描述子串召回被提及的已知实体（上限 5），作为「相关人物或事实底稿」写入任务输入并呈现为 input 活动的 `inputSummary` + kind='fact' 的 evidenceRefs；纯读取投影不改事实库，无事实库/无命中时降级为不召回且不报错；底稿引用只带实体 id 与名，绝不泄露整章正文。`smokeLocateSourceFactBacking` 覆盖召回入底稿、不泄露正文、无库降级三态。）
+- [x] 4.2 [Main] 实现精确匹配、近似匹配、上下文验证、多候选等待作者及章节/正文读取失败恢复语义。（精确匹配失败时按 §15.3 步骤5回退近似匹配：纯函数 `source-locator` 以 Sørensen–Dice 双字组相似度（阈值 0.6、上限 5）等长滑窗打分，命中片段一律以 `matchMethod:'approximate'` 进入 `ambiguous`，绝不自动落定；runtime `#matchAndResolveSource` 对近似分支先发忠实 §15.4 的「近似匹配」retrieval 活动，再按近似/精确给 awaiting-author 差异化文案；既有 not-found（正文过短无同长滑窗）与上下文消歧行为不回归。纯函数层两条断言（相近改写回退多候选、无关正文不误命中）+ runtime 层覆盖。）
+- [x] 4.3 [Renderer] 实现 `locate-source` 的切章、滚动、高亮、候选选择和下一步局部改写入口。（切章/滚动/高亮、持久候选选择与 UI Effect 执行结果回执已完成；下一步局部改写入口已补：`CurrentTaskCard` 在 generate-rewrite 阶段从最近完成的 locate-source run 取章节/问题与已验证引文（引文取自同一 run 的 highlight-quote UI Effect，不从 completed 产物外泄整章正文），渲染「进入局部改写」按钮，复用 App 现有 refactor 面板通路（`enterRefactorFromLocatedSource` 等同 handleAdoptIssue 的预填+切章+开面板）；Renderer 不访问 DB/LLM/fs，仅调用既有回调。）
+- [x] 4.4 [Integration Test] 验收“选择问题 → 创建任务 → 展示输入 → 读取证据 → 查找/匹配正文 → 真实活动 → UI Effect → 作者确认 → 进入局部改写”。（`smokeLocateSourceEndToEnd` 单 issue 有序端到端：选择问题持久化 → 创建任务展示作者可读输入 → 读证据真实 retrieval 活动 → 多候选 awaiting-author（候选来自真实持久化）→ 作者确认经 validation → 切章/滚动/高亮 UI Effect 与 source-location 产物 → 收敛 completed 并进入 generate-rewrite；红线守卫不泄露整章正文/隐藏思维链，任务事件不混入对话流/模型任务通道。附带修复：`listEvents`/`listEventsForRuns` 兜底排序键由随机 `activity_id` 改为插入序 `rowid`，消除同毫秒活动流乱序，保证消息流顺序稳定。）
+- [x] 4.5 [Main] 按顺序接入局部改写、Diff/Hunk 审核、checkpoint、针对性复检、问题关闭和最终全书复检，并保留完整审计链。（完整链路均已落地：`computeRefactorDiff` 产 Diff/Hunk（基线 hash 防漂移）→ `applyHunkDecisions` 纯函数拼回仅接受区间写盘（绝不整章覆盖）、提交可回滚 checkpoint、`linkCheckpointAndMarkVerifying` 把问题置 verifying→ `runTargetedVerification` 复检并 `recordVerificationAndTransition`（通过→resolved；失败→generate-rewrite 回环）→ close-issue system/automatic 推进→ `runGlobalAudit` 最终全书复检（新问题→issue-triage 回环，无问题→工作流完成）。审计链齐全：stage-run evidence、issue 转换/核验历史、checkpointId、verification run 均持久化；`blocking issue` 未清时阻断 final-audit 确认。由 `smokeWorkflowReviewerIssuePersistence`（复检通过推进 close-issue、final-audit 无问题完成/有问题回环）+ `smokeRefactorLoopBoundaries`（逐 hunk 写盘、基线变动拒写、checkpoint 可回滚、IO 失败恢复）覆盖。）
+- [x] 4.6 [Integration Test] 覆盖引用变化、无锚点、候选过多、复检失败回环、正文写入必须逐 hunk 和失败恢复。（`smokeRefactorLoopBoundaries` 以真实 manuscript I/O + 真实 SqliteCheckpointer 驱动 computeRefactorDiff→applyHunkDecisions，覆盖越界/无锚点校验失败且正文不动、预览后引用变化导致 apply 因基线变动失败且无 refactor-applied、逐 hunk 仅接受区间写回（章节其余原样、产出可回滚 checkpoint、仅记录接受项）、写回 IO 失败下发 io 类失败且正文不动、IO 恢复后同 run 重试成功写回；`smokeLocateCandidateOverflow` 驱动真实 locateSource 验证四候选无上下文可消歧时收敛 awaiting-author、全部候选持久化、不自动猜测/不推进阶段/不完成，并复核纯定位器不设候选上限；复检失败回环已由 `smokeWorkflowReviewerIssuePersistence` 覆盖（targeted-verification 失败→generate-rewrite；final-audit 新问题→issue-triage）。）
+
+## Phase 4.5：信息架构收敛（治理 UI 展开后迷失）
+
+> 插入批次：截图显示工作台 UI 全展开后满屏内部术语、无主次、易迷失。本批为纯 Renderer 信息架构治理，不改 Main/Runtime 能力（那是 Phase 5）。严格遵循 requirement.md §7 页面区域需求与 §17 强制需求。
+
+- [x] 4.5A [Renderer] 术语人话化（§7.2 红线 / §17）：清除 ExpertWorkbench/WorkbenchGraph 中泄漏的内部词——工作流 kind 显示中文（老书重建/新书创作）、下一步用模板阶段 label 而非阶段 ID、影响：none 不展示、等待 LangGraph 节点事件改任务语言，禁止把内部 ID/技术阶段代码作为主文案。（ExpertWorkbench 新增 workflowKindLabel/impactStatusLabel：标题与摘要显示中文 kind、stage chip 只在非 none 时显示中文影响态、阶段「下一步」由 transitions[0].to 阶段 ID 解析为模板 label；WorkbenchGraph 空态改「等待专家开始执行」。grep 确认 renderer TSX 无 LangGraph/阶段 ID 泄漏。typecheck+eslint 均绿。）
+- [x] 4.5B [Renderer] 流程导航主次收敛（§7.2）：确认 ExpertWorkbench 默认折叠（useState(false)）、展开态阶段 chip 可读且以「当前阶段」卡片为主；WorkflowGraph 顶部条已实现「已完成 n/总数 · 当前 · 下一步」轻量摘要，本次未改动，无回归。真问题已由 4.5A 术语人话化解决。）
+- [x] 4.5C [Renderer] 中栏任务化空状态（= 3.3 中栏部分）：ManuscriptAxis 未选章节时用当前任务的任务语言空状态（§7.5 示例：正在定位原文 / 请选择左侧诊断问题…），不再只显示「未选择章节」。（新增 src/renderer/lib/task-ui-copy.ts：templateStageId→空状态文案纯映射；ManuscriptAxis 新增 emptyState prop 且未选章节时渲染标题+引导；App 按当前阶段派发。typecheck+eslint+smoke 均绿。）
+- [x] 4.5D [Renderer] 右栏任务助手（= 3.4 标题部分）：右栏 DialogueAxis 标题与空状态随当前阶段切换助手角色（§7.6 映射：事实整理助手/故事诊断助手/原文定位助手/改写助手/修订审核助手/故事策划助手等）。（task-ui-copy.ts 新增 assistantCopy；DialogueAxis 新增 assistantTitle/assistantEmptyHint prop；App 按阶段派发。typecheck+eslint+smoke 均绿。）
+
+> 关联：4.5C 覆盖既有 3.3 的中栏空状态子项、4.5D 覆盖既有 3.4 的右栏助手标题子项；3.3 的左栏多上下文切换与 3.4 的「作者补充约束成为任务新输入」属后端联动，仍留在 Phase 3 未勾。
+
+## Phase 5：新书创作能力
+
+- [x] 5.1 [Core/Main] 建立新书目标模板，支持人物、世界观、故事线、卷章规划和场景设计任务。（新增框架无关的 `src/core/task-runtime/new-book-playbooks.ts`：立意/世界观/人物设计/全书大纲/章节规划/分场大纲六份 new-book 族 TaskPlaybook，与 NEW_BOOK_CREATION_TEMPLATE 的规划 stage id 一一对齐；提供 NEW_BOOK_STAGE_PLAYBOOKS 映射与 NEW_BOOK_PLANNING_PLAYBOOKS 列表供 5.2 Main 注册执行器/5.3 Renderer 复用；每份含必填输入与作者决策点、阶段间产物依赖（如世界观依赖 concept、大纲依赖 characterProfiles）；不依赖项目已有正文。新增 smokeNewBookPlanningPlaybooks 校验 id 唯一、stage 全部映射且存在于模板、结构完整含作者决策点、无正文即可实例化经作者决策收敛到 completed、缺必填 concept 时校验失败。typecheck+eslint+orchestration 冲烟全绿。）
+- [ ] 5.2 [Main] 接入章节初稿生成、作者修订、连贯性检查和事实底稿更新 playbook；产物、引用与作者决策可追踪。
+- [ ] 5.3 [Renderer] 复用当前任务卡、活动流、任务中心、模型审计和 UI Effect，不复制旧作工作台。
+- [ ] 5.4 [Integration Test] 验收无旧正文的新书主路径，以及新书/旧作切换仍共用 Task Runtime 和 IPC 契约。
+- [ ] 5.5 [Regression] 验证新增任务通过 playbook 扩展，旧 standalone 召唤与已有运行路径不回归。

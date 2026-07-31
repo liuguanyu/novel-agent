@@ -34,6 +34,8 @@ interface WorkflowGraphProps {
   readonly onRunGlobalAudit?: () => void;
   /** 打开事实底稿面板（事实相关阶段的查看入口，task 10.5）。 */
   readonly onOpenFactSheet?: () => void;
+  readonly onLocateSource?: () => void;
+  readonly canLocateSource?: boolean;
   readonly taskBusy: boolean;
 }
 
@@ -115,6 +117,8 @@ export function WorkflowGraph({
   onBackfillFacts,
   onRunGlobalAudit,
   onOpenFactSheet,
+  onLocateSource,
+  canLocateSource = false,
   taskBusy,
 }: WorkflowGraphProps): JSX.Element {
   const hasExistingChapters = (tree?.roots.length ?? 0) > 0;
@@ -123,6 +127,7 @@ export function WorkflowGraph({
   const initializedForProject = useRef(false);
   const [busy, setBusy] = useState(false);
   const [commandFailure, setCommandFailure] = useState<string>();
+  const [expanded, setExpanded] = useState(false);
   const rawStages = useMemo(() => workflow?.stages.map(stageSnapshot) ?? [], [workflow]);
   const template = workflow === null
     ? undefined
@@ -238,9 +243,11 @@ export function WorkflowGraph({
   }
 
   const actionBusy = busy || taskBusy;
-  const currentGoal = current === undefined
-    ? '整理已完成'
-    : WORKFLOW_TASK_GOAL[current.templateStageId] ?? definition?.label ?? '完成当前任务';
+  const completedCount = stages.filter((stage) => stage.status === 'completed' || stage.status === 'skipped').length;
+  const currentLabel = current === undefined ? '整理完成' : definition?.label ?? WORKFLOW_TASK_GOAL[current.templateStageId] ?? '当前任务';
+  const currentIndex = current === undefined ? -1 : stages.findIndex((stage) => stage.stageId === current.stageId);
+  const nextStage = currentIndex < 0 ? undefined : stages[currentIndex + 1];
+  const nextLabel = nextStage === undefined ? undefined : template?.stages.find((stage) => stage.id === nextStage.templateStageId)?.label;
   const statusLabel = workflow.status === 'active' ? undefined
     : workflow.status === 'paused' ? '已暂停'
     : workflow.status === 'completed' ? '已完成'
@@ -250,12 +257,16 @@ export function WorkflowGraph({
 
   return (
     <section className="border-b border-border bg-card/60 px-4 py-2" aria-label="书目整理进度">
-      {/* 业务步骤按模板顺序换行展示，避免横向裁切导致后续步骤不可见。 */}
-      <div className="mb-1 flex items-center justify-between gap-3 text-[10px] text-muted-foreground">
-        <span>整理路径 · 共 {stages.length} 步</span>
-        <span>绿色=已完成 · 高亮=当前 · 灰色=后续</span>
-      </div>
-      <div className="grid grid-cols-2 gap-1.5 sm:grid-cols-3 lg:grid-cols-5 xl:grid-cols-6" role="list" aria-label="整理阶段">
+      <button
+        type="button"
+        onClick={() => setExpanded((value) => !value)}
+        className="flex w-full items-center justify-between gap-3 rounded px-1 py-1 text-left text-xs transition-colors hover:bg-accent/50"
+        aria-expanded={expanded}
+      >
+        <span className="font-medium text-foreground">已完成 {completedCount}/{stages.length} · 当前：{currentLabel}{nextLabel === undefined ? '' : ` · 下一步：${nextLabel}`}</span>
+        <span className="text-muted-foreground">{expanded ? '收起完整流程' : '展开完整流程'}</span>
+      </button>
+      {expanded && <div className="mt-2 grid grid-cols-2 gap-1.5 sm:grid-cols-3 lg:grid-cols-5 xl:grid-cols-6" role="list" aria-label="整理阶段">
         {stages.map((stage, index) => {
           const isCurrent = stage.stageId === workflow.currentStageId;
           const label = template?.stages.find((item) => item.id === stage.templateStageId)?.label ?? stage.templateStageId;
@@ -283,20 +294,20 @@ export function WorkflowGraph({
             </button>
           );
         })}
-      </div>
+      </div>}
 
-      {/* 当前任务一句话 + 动作按钮。 */}
       <div className="mt-1 flex flex-wrap items-center justify-between gap-2">
-        <div className="flex min-w-0 items-center gap-2 text-sm">
-          <span className="truncate font-medium">当前任务：{currentGoal}</span>
-          {statusLabel !== undefined && (
-            <span className={workflow.status === 'completed' ? 'text-xs text-emerald-600' : 'text-xs text-amber-600'}>
-              {statusLabel}
-            </span>
-          )}
+        <div className="text-xs text-muted-foreground">
+          {statusLabel ?? (current?.status === 'running' ? '任务进行中' : current?.status === 'awaiting-confirmation' ? '等待作者确认' : '准备继续')}
         </div>
         <div className="flex shrink-0 flex-wrap items-center justify-end gap-1">
-          {workflow.status === 'active' && current?.status === 'ready' && current.templateStageId !== 'fact-backfill' &&
+          {workflow.status === 'active' && current?.templateStageId === 'locate-source' && current.status === 'ready' && onLocateSource !== undefined && (
+              <Button size="sm" disabled={actionBusy || !canLocateSource} onClick={onLocateSource} title={canLocateSource ? '读取诊断证据并定位正文' : '请先在诊断结果中选择一个问题'}>
+                <Play className="size-3.5" />
+                {canLocateSource ? '定位原文' : '请先选择诊断问题'}
+              </Button>
+            )}
+          {workflow.status === 'active' && current?.status === 'ready' && current.templateStageId !== 'fact-backfill' && current.templateStageId !== 'locate-source' &&
             !['initial-audit', 'final-audit', 'whole-book-audit'].includes(current.templateStageId) && (
               <Button size="sm" disabled={actionBusy} onClick={() => action('start-stage')}>
                 <Play className="size-3.5" />

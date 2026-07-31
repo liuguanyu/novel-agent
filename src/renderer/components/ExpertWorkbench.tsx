@@ -38,6 +38,29 @@ function nodeLabel(id: string): string {
   return WORKBENCH_GRAPH.nodes.find((node) => node.id === id)?.label ?? id;
 }
 
+// 工作流 kind 人话化：绝不把内部标识符当主文案（§7.2 红线 / §17）。
+function workflowKindLabel(kind: string): string {
+  switch (kind) {
+    case 'legacy-book-revision': return '老书重建';
+    case 'new-book-creation': return '新书创作';
+    default: return '创作任务';
+  }
+}
+
+// 资产影响状态人话化：none 不展示（避免「影响：none」这类术语）。
+function impactStatusLabel(status: string | undefined): string | undefined {
+  switch (status) {
+    case undefined:
+    case '':
+    case 'none': return undefined;
+    case 'pending': return '待评估';
+    case 'needs-review': return '需复核';
+    case 'conflicting': return '版本冲突';
+    case 'resolved': return '已处理';
+    default: return status;
+  }
+}
+
 function stageStatusLabel(status: string | undefined): string {
   switch (status) {
     case 'ready': return '待开始';
@@ -100,13 +123,17 @@ export function ExpertWorkbench({
   const stages = workflow?.stages.map((rawStage) => {
     const stage = workflowStageView(rawStage);
     const definition = template?.stages.find((item) => item.id === rawStage['templateStageId']);
-    return definition === undefined ? stage : { ...stage, name: definition.label, nextStep: definition.transitions[0]?.to };
+    if (definition === undefined) return stage;
+    // 下一步显示目标阶段的中文 label，而非阶段 ID。
+    const nextId = definition.transitions[0]?.to;
+    const nextStep = nextId === undefined ? undefined : (template?.stages.find((item) => item.id === nextId)?.label ?? nextId);
+    return { ...stage, name: definition.label, nextStep };
   }) ?? [];
   const current = stages.find((stage) => stage.id === workflow?.currentStageId);
   const completedStages = stages.filter((stage) => stage.status === 'completed' || stage.status === 'skipped').length;
   const workflowSummary = workflow === null || workflow === undefined
     ? undefined
-    : `${workflow.kind} · ${current?.name ?? '等待阶段'} · ${current?.blocking !== undefined ? `阻塞：${current.blocking}` : `下一步：${current?.nextStep ?? '等待推进'}`}${assetCandidates.length + assetImpacts.length > 0 ? ` · 待审 ${assetCandidates.length + assetImpacts.length}` : ''}`;
+    : `${workflowKindLabel(workflow.kind)} · ${current?.name ?? '等待阶段'} · ${current?.blocking !== undefined ? `阻塞：${current.blocking}` : `下一步：${current?.nextStep ?? '等待推进'}`}${assetCandidates.length + assetImpacts.length > 0 ? ` · 待审 ${assetCandidates.length + assetImpacts.length}` : ''}`;
   return (
     <section className="border-t border-border bg-card/45 px-3 py-2" aria-label="专家工作台">
       <button
@@ -118,7 +145,7 @@ export function ExpertWorkbench({
         <span className="flex items-center gap-1.5 font-semibold text-foreground">
           {expanded ? <ChevronUp className="size-3.5" aria-hidden /> : <ChevronDown className="size-3.5" aria-hidden />}
           <Workflow className="size-3.5 text-primary" aria-hidden />
-          专家工作台{workflow !== null && workflow !== undefined && ` · ${workflow.kind}`}
+          专家工作台{workflow !== null && workflow !== undefined && ` · ${workflowKindLabel(workflow.kind)}`}
         </span>
         <span className="flex items-center gap-1.5 text-muted-foreground">
           {summary !== undefined && <CircleDot className="size-3 animate-pulse text-primary" aria-hidden />}
@@ -132,7 +159,7 @@ export function ExpertWorkbench({
         <div className="space-y-2 text-xs">
           <div><span className="font-medium">目标：</span>{workflow.objective}</div>
           <div className="flex items-center gap-2 text-muted-foreground"><span>阶段进度：{completedStages}/{stages.length}</span><span className="h-1.5 flex-1 overflow-hidden rounded-full bg-muted"><span className="block h-full rounded-full bg-primary transition-all" style={{ width: `${stages.length === 0 ? 0 : Math.round((completedStages / stages.length) * 100)}%` }} /></span></div>
-          <div className="flex flex-wrap gap-1">{stages.map((stage) => <span key={stage.id} title={`${stage.name} · ${stageStatusLabel(stage.status)}`} className={`rounded border px-1.5 py-0.5 ${stage.id === workflow.currentStageId ? 'border-primary bg-primary/10 text-primary' : stage.status === 'completed' ? 'border-emerald-500/30 text-emerald-600' : 'border-border text-muted-foreground'}`}>{stage.name} · {actorLabel(stage.actor)} · {stageStatusLabel(stage.status)}{stage.impactStatus ? ` · 影响：${stage.impactStatus}` : ''}</span>)}</div>
+          <div className="flex flex-wrap gap-1">{stages.map((stage) => <span key={stage.id} title={`${stage.name} · ${stageStatusLabel(stage.status)}`} className={`rounded border px-1.5 py-0.5 ${stage.id === workflow.currentStageId ? 'border-primary bg-primary/10 text-primary' : stage.status === 'completed' ? 'border-emerald-500/30 text-emerald-600' : 'border-border text-muted-foreground'}`}>{stage.name} · {actorLabel(stage.actor)} · {stageStatusLabel(stage.status)}{impactStatusLabel(stage.impactStatus) !== undefined ? ` · 影响：${impactStatusLabel(stage.impactStatus)}` : ''}</span>)}</div>
           {current !== undefined && <div className="rounded border border-border bg-muted/20 p-2 text-muted-foreground"><div><span className="font-medium text-foreground">当前阶段：</span>{current.name} · {stageStatusLabel(current.status)}</div><div className="mt-1"><span className="font-medium text-foreground">下一步：</span>{current.nextStep ?? '等待阶段推进'}</div>{current.blocking && <div className="mt-1 text-destructive"><span className="font-medium">阻塞原因：</span>{current.blocking}</div>}{current.allowedActions.length > 0 && <div className="mt-1"><span className="font-medium text-foreground">允许操作：</span>{current.allowedActions.join('、')}</div>}</div>}
           {assetError !== undefined && <div className="rounded border border-destructive/40 bg-destructive/5 p-2 text-destructive">资产操作失败：{assetError}</div>}
           {assetCandidates.map((candidate) => (

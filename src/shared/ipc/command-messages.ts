@@ -10,6 +10,7 @@
 import type { RunId } from './stream-messages.js';
 import type { WorkflowRefDto } from './workflow-messages.js';
 import type { ModelTaskSupplementDto } from './model-task-messages.js';
+import type { TaskUiEffectResultDto } from './task-activity-messages.js';
 
 /** 发起一次运行（具体动作载荷由 agent-orchestration 定义，这里仅占位判别字段） */
 export interface StartRunCommand {
@@ -166,6 +167,39 @@ export interface RunTargetedVerificationCommand {
   workflowRef: WorkflowRefDto & { issueId: string };
 }
 
+/** 根据持久化诊断问题和当前正文确定性定位可修订原文。 */
+export interface LocateSourceCommand {
+  type: 'locate-source';
+  runId: RunId;
+  workflowRef: WorkflowRefDto & { issueId: string };
+}
+
+/** 作者从 Main 持久化的原文候选中明确选择一个位置。 */
+export interface ChooseSourceLocationCommand {
+  type: 'choose-source-location';
+  runId: RunId;
+  operationId: string;
+  taskRunId: string;
+  candidateId: string;
+}
+
+/** 作者控制持久化任务运行；Main 校验当前状态并在安全步骤边界收敛。 */
+export interface ControlTaskRunCommand {
+  type: 'control-task-run';
+  runId: RunId;
+  operationId: string;
+  taskRunId: string;
+  action: 'pause' | 'resume' | 'cancel';
+}
+
+/** Renderer 执行 Main 发布的 UI Effect 后回传可校验、可幂等的结果。 */
+export interface ReportTaskUiEffectResultCommand {
+  type: 'report-task-ui-effect-result';
+  runId: RunId;
+  operationId: string;
+  result: TaskUiEffectResultDto;
+}
+
 /** Story Bible 事实定位器：Renderer 只能提交受限目标，Main 侧验证后写库。 */
 export type StoryBibleFactLocatorDto =
   | { kind: 'entity'; entityId: string }
@@ -294,6 +328,10 @@ export type FrontendCommandMessage =
   | BackfillFactsCommand
   | RunGlobalAuditCommand
   | RunTargetedVerificationCommand
+  | LocateSourceCommand
+  | ChooseSourceLocationCommand
+  | ControlTaskRunCommand
+  | ReportTaskUiEffectResultCommand
   | ConfirmStoryBibleFactCommand
   | EditStoryBibleFactCommand
   | DeleteStoryBibleFactCommand

@@ -22,10 +22,11 @@ import {
   SqliteCheckpointer,
   SqliteFactStore,
   SqliteStageRunEvidenceRecorder,
+  TaskRunRepository,
   WorkflowIssueRepository,
   WorkflowRepository,
 } from './db/index.js';
-import { OrchestrationRuntime, targetedVerificationAgentFor, type BackfillFactsParams, type SummonParams } from './orchestration/runtime.js';
+import { OrchestrationRuntime, targetedVerificationAgentFor, type BackfillFactsParams, type PlaybookRegistration, type SummonParams } from './orchestration/runtime.js';
 import { WorkflowApplicationService } from './workflow-application-service.js';
 import { readManifestChapterIds } from './novel-reader.js';
 import { InlineAuditRunner, type AuditRunner } from './audit/audit-runner.js';
@@ -61,6 +62,7 @@ import type {
   BackendControlEvent,
   BackendModelTaskEvent,
   BackendStreamMessage,
+  BackendTaskActivityEvent,
   ConsistencyIssueDto,
   GraphNodeActivatedEvent,
   RunId,
@@ -70,6 +72,25 @@ import type { CapabilityTier, ModelAdapter, ModelCallInput } from '../core/model
 import { asEntityId, asCheckpointId, asFactVersionId, type ConsistencyIssue, type Entity, type Provenance } from '../core/story-bible/index.js';
 import { asNodeId } from '../core/manuscript/index.js';
 import type { NovelState } from '../core/orchestration/index.js';
+import { locateSourceEvidence } from '../core/workflow/index.js';
+import { NEW_BOOK_CREATION_TEMPLATE } from '../core/workflow/templates.js';
+import {
+  NEW_BOOK_PLANNING_PLAYBOOKS,
+  NEW_BOOK_STAGE_PLAYBOOKS,
+  type NewBookPlanningStageId,
+} from '../core/task-runtime/new-book-playbooks.js';
+import {
+  LEGACY_LOCATE_SOURCE_PLAYBOOK,
+  NEW_BOOK_CHARACTER_DESIGN_PLAYBOOK,
+  TEMPORARY_EDITORIAL_PLAYBOOK,
+  TASK_PLAYBOOK_FIXTURES,
+  createTaskRunFromPlaybook,
+  positionTaskRunAtStep,
+  taskRunHasRequiredInputs,
+  transitionTaskRun,
+  type TaskPlaybook,
+  type TaskRun,
+} from '../core/task-runtime/index.js';
 
 let failures = 0;
 
@@ -123,6 +144,7 @@ class FakeWebContents {
   readonly stream: BackendStreamMessage[] = [];
   readonly control: BackendControlEvent[] = [];
   readonly modelTask: BackendModelTaskEvent[] = [];
+  readonly taskActivity: BackendTaskActivityEvent[] = [];
   send(channel: string, message: unknown): void {
     if (channel === IPC_CHANNELS.dialogueStream) {
       this.stream.push(message as BackendStreamMessage);
@@ -130,6 +152,8 @@ class FakeWebContents {
       this.control.push(message as BackendControlEvent);
     } else if (channel === IPC_CHANNELS.modelTaskEvent) {
       this.modelTask.push(message as BackendModelTaskEvent);
+    } else if (channel === IPC_CHANNELS.taskActivityEvent) {
+      this.taskActivity.push(message as BackendTaskActivityEvent);
     }
   }
   // 类型断言：运行时只用 send，不调用其它 Electron WebContents 方法。
@@ -1805,16 +1829,1272 @@ async function smokeModelTaskSession(): Promise<void> {
   await rm(dir, { recursive: true, force: true });
 }
 
+/**
+ * 1.6：为旧作定位、新书创作和临时任务建立最小 playbook fixture，
+ * 验证底层任务模型不要求项目已有正文。纯函数级别，不触碰 Electron/DB。
+ */
+function smokeTaskPlaybookFixtures(): void {
+  // 三份 fixture 覆盖三种任务族，且 id 唯一。
+  const kinds = new Set(TASK_PLAYBOOK_FIXTURES.map((playbook) => playbook.kind));
+  check(
+    'fixtures 覆盖 legacy-book/new-book/temporary 三族',
+    kinds.has('legacy-book') && kinds.has('new-book') && kinds.has('temporary') && kinds.size === 3,
+    [...kinds].join(','),
+  );
+  const ids = new Set(TASK_PLAYBOOK_FIXTURES.map((playbook) => playbook.id));
+  check('fixtures id 唯一', ids.size === TASK_PLAYBOOK_FIXTURES.length);
+
+  // 每份 fixture 结构完整：至少一个输入、一个步骤、一个产物；步骤 id 唯一。
+  for (const playbook of TASK_PLAYBOOK_FIXTURES) {
+    const stepIds = new Set(playbook.steps.map((step) => step.id));
+    const structural =
+      playbook.inputs.length > 0 &&
+      playbook.steps.length > 0 &&
+      playbook.outputs.length > 0 &&
+      stepIds.size === playbook.steps.length &&
+      playbook.version >= 1;
+    check(`fixture ${playbook.id} 结构完整`, structural);
+  }
+
+  // 新书 fixture：无 project/book/manuscript 也能实例化并走完 queued→completed，含作者决策点。
+  const newBookRun = createTaskRunFromPlaybook(NEW_BOOK_CHARACTER_DESIGN_PLAYBOOK, {
+    id: 'task-new-book-1',
+    executionRunId: 'run-new-book-1',
+    inputs: { premise: '一座会呼吸的城市' },
+    now: '2026-01-01T00:00:00.000Z',
+  });
+  check(
+    '新书任务无正文即可实例化（project/book/manuscript 均为 null）',
+    newBookRun.refs.projectId === null &&
+      newBookRun.refs.bookId === null &&
+      newBookRun.refs.manuscriptId === null &&
+      newBookRun.status === 'queued' &&
+      newBookRun.kind === 'new-book',
+  );
+  check(
+    '新书 fixture 必填输入校验（premise 已提供，constraints 可选）',
+    taskRunHasRequiredInputs(NEW_BOOK_CHARACTER_DESIGN_PLAYBOOK, newBookRun),
+  );
+  const newBookCompleted = driveThroughAuthorDecision(NEW_BOOK_CHARACTER_DESIGN_PLAYBOOK, newBookRun);
+  check(
+    '新书任务经作者决策收敛到 completed 且复用同一 run id',
+    newBookCompleted.status === 'completed' &&
+      newBookCompleted.id === newBookRun.id &&
+      newBookCompleted.timestamps.awaitingAuthorAt !== null &&
+      newBookCompleted.timestamps.startedAt !== null &&
+      newBookCompleted.timestamps.endedAt !== null,
+  );
+
+  // 临时任务 fixture：无任何领域引用即可运行到 completed。
+  const temporaryRun = createTaskRunFromPlaybook(TEMPORARY_EDITORIAL_PLAYBOOK, {
+    id: 'task-temp-1',
+    executionRunId: 'run-temp-1',
+    inputs: { text: '一段独立文本', editorialBrief: '润色语气' },
+    now: '2026-01-01T00:00:00.000Z',
+  });
+  check(
+    '临时任务无 workflow/issue 引用即可运行',
+    temporaryRun.refs.workflowId === null &&
+      temporaryRun.refs.issueId === null &&
+      temporaryRun.kind === 'temporary',
+  );
+  const temporaryStarted = positionTaskRunAtStep(
+    transitionTaskRun(temporaryRun, { status: 'running', occurredAt: '2026-01-01T00:00:01.000Z' }),
+    TEMPORARY_EDITORIAL_PLAYBOOK,
+    'review-text',
+    '2026-01-01T00:00:01.000Z',
+  );
+  const temporaryCompleted = transitionTaskRun(temporaryStarted, {
+    status: 'completed',
+    occurredAt: '2026-01-01T00:00:02.000Z',
+  });
+  check(
+    '临时任务单步收敛到 completed',
+    temporaryStarted.currentStepId === 'review-text' &&
+      temporaryStarted.currentStepIndex === 0 &&
+      temporaryCompleted.status === 'completed',
+  );
+
+  // 旧作定位 fixture：仍要求章节锚点（既有正文场景），与新书/临时形成对照。
+  const legacyRun = createTaskRunFromPlaybook(LEGACY_LOCATE_SOURCE_PLAYBOOK, {
+    id: 'task-legacy-1',
+    executionRunId: 'run-legacy-1',
+    inputs: { issue: { id: 'iss-1' }, evidence: { quote: '引文' }, chapterAnchor: 'chapter-A' },
+    refs: { projectId: 'proj-1', bookId: 'book-1', issueId: 'iss-1' },
+    now: '2026-01-01T00:00:00.000Z',
+  });
+  check(
+    '旧作定位 fixture 必填输入齐备时通过校验',
+    legacyRun.kind === 'legacy-book' &&
+      taskRunHasRequiredInputs(LEGACY_LOCATE_SOURCE_PLAYBOOK, legacyRun),
+  );
+  const legacyMissing = createTaskRunFromPlaybook(LEGACY_LOCATE_SOURCE_PLAYBOOK, {
+    id: 'task-legacy-2',
+    executionRunId: 'run-legacy-2',
+    inputs: { issue: { id: 'iss-1' } },
+    now: '2026-01-01T00:00:00.000Z',
+  });
+  check(
+    '旧作定位 fixture 缺失章节锚点时校验失败',
+    !taskRunHasRequiredInputs(LEGACY_LOCATE_SOURCE_PLAYBOOK, legacyMissing),
+  );
+
+  // 未知步骤 id 不改变 run（工厂纯函数不臆造进度）。
+  const untouched = positionTaskRunAtStep(temporaryRun, TEMPORARY_EDITORIAL_PLAYBOOK, 'no-such-step', 'x');
+  check('positionTaskRunAtStep 遇未知步骤原样返回', untouched.currentStepId === null);
+}
+
+/** 驱动含作者决策点的 playbook 从 queued 经 awaiting-author 收敛到 completed。 */
+function driveThroughAuthorDecision(playbook: TaskPlaybook, run: TaskRun): TaskRun {
+  const decisionStep = playbook.steps.find((step) => step.requiresAuthorDecision);
+  let current = transitionTaskRun(run, { status: 'running', occurredAt: '2026-01-01T00:00:01.000Z' });
+  if (decisionStep !== undefined) {
+    current = positionTaskRunAtStep(current, playbook, decisionStep.id, '2026-01-01T00:00:01.000Z');
+    current = transitionTaskRun(current, {
+      status: 'awaiting-author',
+      occurredAt: '2026-01-01T00:00:02.000Z',
+    });
+    current = transitionTaskRun(current, { status: 'running', occurredAt: '2026-01-01T00:00:03.000Z' });
+  }
+  return transitionTaskRun(current, { status: 'completed', occurredAt: '2026-01-01T00:00:04.000Z' });
+}
+
+// Phase 5.1：新书规划 playbook 与新书创作模板对齐、结构完整、可无正文实例化并经作者决策收敛。
+function smokeNewBookPlanningPlaybooks(): void {
+  // 全部为 new-book 族，id 唯一。
+  const kinds = new Set(NEW_BOOK_PLANNING_PLAYBOOKS.map((playbook) => playbook.kind));
+  check(
+    '新书规划 playbook 均为 new-book 族',
+    kinds.size === 1 && kinds.has('new-book'),
+    [...kinds].join(','),
+  );
+  const ids = new Set(NEW_BOOK_PLANNING_PLAYBOOKS.map((playbook) => playbook.id));
+  check('新书规划 playbook id 唯一', ids.size === NEW_BOOK_PLANNING_PLAYBOOKS.length);
+
+  // stage→playbook 映射覆盖模板的全部规划阶段（confirm 类，非自动/自动写作后的阶段）。
+  const planningStageIds: ReadonlyArray<NewBookPlanningStageId> = [
+    'concept',
+    'worldbuilding',
+    'character-design',
+    'book-outline',
+    'chapter-plan',
+    'scene-outline',
+  ];
+  const templateStageIds = new Set(NEW_BOOK_CREATION_TEMPLATE.stages.map((stage) => stage.id));
+  const everyStageInTemplate = planningStageIds.every((id) => templateStageIds.has(id));
+  const everyStageMapped = planningStageIds.every(
+    (id) => NEW_BOOK_STAGE_PLAYBOOKS[id] !== undefined,
+  );
+  check(
+    '新书规划阶段全部存在于 NEW_BOOK_CREATION_TEMPLATE 且有对应 playbook',
+    everyStageInTemplate && everyStageMapped,
+  );
+
+  // 每个规划 playbook 结构完整，且至少含一个作者决策点（§17：作者是决策者）。
+  for (const stageId of planningStageIds) {
+    const playbook = NEW_BOOK_STAGE_PLAYBOOKS[stageId];
+    const stepIds = new Set(playbook.steps.map((step) => step.id));
+    const hasAuthorDecision = playbook.steps.some((step) => step.requiresAuthorDecision);
+    const structural =
+      playbook.inputs.length > 0 &&
+      playbook.steps.length > 0 &&
+      playbook.outputs.length > 0 &&
+      stepIds.size === playbook.steps.length &&
+      playbook.inputs.some((input) => input.required) &&
+      hasAuthorDecision &&
+      playbook.version >= 1;
+    check(`新书规划 playbook ${playbook.id} 结构完整且含作者决策点`, structural);
+  }
+
+  // 立意 playbook：无 project/book/manuscript 即可实例化并经作者决策收敛到 completed。
+  const conceptPlaybook = NEW_BOOK_STAGE_PLAYBOOKS.concept;
+  const conceptRun = createTaskRunFromPlaybook(conceptPlaybook, {
+    id: 'task-new-book-concept-1',
+    executionRunId: 'run-new-book-concept-1',
+    inputs: { premise: '一座会呼吸的城市' },
+    now: '2026-01-01T00:00:00.000Z',
+  });
+  check(
+    '新书立意任务无正文即可实例化（project/book/manuscript 均为 null）',
+    conceptRun.refs.projectId === null &&
+      conceptRun.refs.bookId === null &&
+      conceptRun.refs.manuscriptId === null &&
+      conceptRun.status === 'queued' &&
+      conceptRun.kind === 'new-book',
+  );
+  check(
+    '新书立意必填输入校验（premise 已提供，preferences 可选）',
+    taskRunHasRequiredInputs(conceptPlaybook, conceptRun),
+  );
+  const conceptCompleted = driveThroughAuthorDecision(conceptPlaybook, conceptRun);
+  check(
+    '新书立意任务经作者决策收敛到 completed 且复用同一 run id',
+    conceptCompleted.status === 'completed' &&
+      conceptCompleted.id === conceptRun.id &&
+      conceptCompleted.timestamps.awaitingAuthorAt !== null &&
+      conceptCompleted.timestamps.endedAt !== null,
+  );
+
+  // 世界观 playbook：缺失必填 concept 时校验失败（阶段间产物依赖成立）。
+  const worldbuildingPlaybook = NEW_BOOK_STAGE_PLAYBOOKS.worldbuilding;
+  const worldbuildingMissing = createTaskRunFromPlaybook(worldbuildingPlaybook, {
+    id: 'task-new-book-world-1',
+    executionRunId: 'run-new-book-world-1',
+    inputs: {},
+    now: '2026-01-01T00:00:00.000Z',
+  });
+  check(
+    '新书世界观缺失 concept 时校验失败',
+    !taskRunHasRequiredInputs(worldbuildingPlaybook, worldbuildingMissing),
+  );
+}
+
+async function smokeLocateSourceTask(): Promise<void> {
+  const quote = '他忽然丢下同伴独自离开。';
+  const exact = locateSourceEvidence(`开场。${quote}随后继续。`, { quote });
+  check('locate-source 纯函数唯一精确命中', exact.status === 'located' && exact.matchMethod === 'exact');
+  const contextual = locateSourceEvidence(
+    `${quote}${'城门已经关闭，巡逻队沿着长街反复搜查。'.repeat(8)}${quote}夜色笼罩街道。`,
+    { quote, after: '夜色笼罩街道。' },
+  );
+  check('locate-source 纯函数使用上下文消歧', contextual.status === 'located' && contextual.matchMethod === 'context');
+  const ambiguous = locateSourceEvidence(`${quote}甲。${quote}乙。`, { quote });
+  check('locate-source 纯函数多候选不猜测', ambiguous.status === 'ambiguous' && ambiguous.candidates.length === 2);
+  check('locate-source 纯函数零命中明确失败', locateSourceEvidence('正文已经变化。', { quote }).status === 'not-found');
+  // 4.2 近似匹配：精确失败时对相近改写做近似回退，结果一律 awaiting-author 不自动落定。
+  const approximate = locateSourceEvidence('开场。他忽然丢下同伴独自离去。随后继续。', { quote });
+  check('4.2 近似匹配：精确失败时回退近似并进入多候选',
+    approximate.status === 'ambiguous' && approximate.matchMethod === 'approximate' && approximate.candidates.length >= 1);
+  check('4.2 近似匹配：不误命中无关正文',
+    locateSourceEvidence('城中商贾云集，街市喧嚣不止，与此毫无关联。', { quote }).status === 'not-found');
+
+  const dir = await mkdtemp(join(tmpdir(), 'na-locate-source-'));
+  const opened = await openDatabase(join(dir, 'locate-source.db'));
+  if (!opened.ok) {
+    check('locate-source SQLite 可用', false, opened.message);
+    await rm(dir, { recursive: true, force: true });
+    return;
+  }
+  const db = opened.db;
+  try {
+    const workflows = new WorkflowRepository(db);
+    const workflowIssues = new WorkflowIssueRepository(db);
+    const service = new WorkflowApplicationService(workflows, new CreativeAssetRepository(db), workflowIssues);
+    const evidence = new SqliteStageRunEvidenceRecorder(db);
+    const taskRuns = new TaskRunRepository(db);
+    const chapterId = asNodeId('locate-chapter');
+
+    const prepare = async (workflowId: string, content: string, readDelayMs = 0) => {
+      const started = await service.command({
+        type: 'start-workflow', workflowId, projectId: `${workflowId}-project`, kind: 'legacy-book-revision',
+        objective: '定位诊断问题对应的原文', requestId: `${workflowId}-start`, operationId: `${workflowId}-start-op`,
+      });
+      if (started === null) throw new Error('locate-source workflow fixture failed');
+      const [issue] = await workflowIssues.upsertFromAudit(workflowId, `${workflowId}-audit`, [{
+        type: 'behavior-ooc', severity: 'warning', anchors: [{ id: chapterId, kind: 'chapter' }],
+        description: '主角在证据段落中的行为与既定性格不一致。', requiresHumanDecision: false,
+        evidence: { quote },
+      }]);
+      if (issue === undefined) throw new Error('locate-source issue fixture failed');
+
+      const advance = async (templateStageId: string, author: boolean): Promise<void> => {
+        const current = await workflows.get(workflowId);
+        if (current === null || current.currentStageId === null) throw new Error(`missing ${templateStageId}`);
+        const stage = current.stages.find((candidate) => candidate.stageId === current.currentStageId);
+        if (stage?.templateStageId !== templateStageId) throw new Error(`expected ${templateStageId}, got ${stage?.templateStageId}`);
+        const stageRunId = `${workflowId}:${templateStageId}` as RunId;
+        await service.command({
+          type: 'workflow-start-stage', workflowId, stageId: current.currentStageId,
+          expectedVersion: current.version, runId: stageRunId,
+          requestId: `${stageRunId}-start`, operationId: `${stageRunId}-start-op`,
+        });
+        await evidence.record({ runId: stageRunId, workflowRef: { workflowId, stageId: current.currentStageId }, status: 'started' });
+        await evidence.record({
+          runId: stageRunId, workflowRef: { workflowId, stageId: current.currentStageId }, status: 'completed',
+          ...(stage?.actor === 'quality-gate' ? { completion: { passed: true, issueIds: [] } } : {}),
+        });
+        if (!author) return;
+        const awaiting = await workflows.get(workflowId);
+        if (awaiting === null || awaiting.currentStageId === null) throw new Error(`author stage ${templateStageId} disappeared`);
+        await service.command({
+          type: 'workflow-confirm-stage', workflowId, stageId: awaiting.currentStageId,
+          expectedVersion: awaiting.version, requestId: `${stageRunId}-confirm`, operationId: `${stageRunId}-confirm-op`,
+        });
+      };
+
+      await advance('import-book', true);
+      await advance('fact-backfill', false);
+      await advance('initial-audit', false);
+      const triage = await workflows.get(workflowId);
+      if (triage === null || triage.currentStageId === null) throw new Error('issue triage missing');
+      const selection = await service.command({
+        type: 'workflow-select-issue', workflowId, stageId: triage.currentStageId, issueId: issue.issueId,
+        workflowRef: { workflowId, stageId: triage.currentStageId, issueId: issue.issueId },
+        expectedVersion: triage.version, runId: `${workflowId}:selection`,
+        requestId: `${workflowId}-select`, operationId: `${workflowId}-select-op`,
+      });
+      check(`${workflowId} 持久化当前问题`, selection?.selectedIssueId === issue.issueId);
+      await advance('issue-triage', true);
+      const locate = await workflows.get(workflowId);
+      if (locate === null || locate.currentStageId === null) throw new Error('locate-source stage missing');
+      check(`${workflowId} 阶段推进后保留当前问题`, locate.selectedIssueId === issue.issueId);
+      const runtime = new OrchestrationRuntime({
+        getModelResolver: () => undefined,
+        getCheckpointer: () => undefined,
+        getFactStore: () => undefined,
+        workflows,
+        workflowIssues,
+        stageRunEvidence: evidence,
+        taskRuns,
+        manuscript: {
+          readChapterContent: async (nodeId: string) => {
+            if (readDelayMs > 0) await new Promise<void>((resolve) => setTimeout(resolve, readDelayMs));
+            return { nodeId, content };
+          },
+          writeBackRefactoredFragment: async () => ({ ok: false, reason: 'io-error' as const }),
+        },
+      });
+      return { runtime, issueId: issue.issueId, stageId: locate.currentStageId };
+    };
+
+    const success = await prepare('locate-success', `开场。${quote}随后，他回头解释自己的决定。`);
+    const successWc = new FakeWebContents();
+    await success.runtime.locateSource(successWc.asWebContents(), randomUUID() as RunId, {
+      workflowId: 'locate-success', stageId: success.stageId, issueId: success.issueId,
+    });
+    const uiEvent = successWc.taskActivity.find((event) => event.type === 'task-activity' && event.phase === 'ui-effect');
+    const completed = successWc.taskActivity.find((event) => event.type === 'task-run-completed');
+    const successWorkflow = await workflows.get('locate-success');
+    check('locate-source 成功发布切章与高亮 UI Effect', uiEvent?.type === 'task-activity' && uiEvent.uiEffects?.some((effect) => effect.kind === 'select-chapter') === true && uiEvent.uiEffects.some((effect) => effect.kind === 'highlight-quote'));
+    check('locate-source 成功发布完成事件和定位产物', completed?.type === 'task-run-completed' && completed.artifactRefs?.some((artifact) => artifact.kind === 'source-location') === true);
+    check('locate-source 成功后推进局部改写', successWorkflow?.stages.find((stage) => stage.stageId === successWorkflow.currentStageId)?.templateStageId === 'generate-rewrite');
+    check('locate-source 任务事件不混入对话流', successWc.stream.length === 0 && successWc.modelTask.length === 0);
+    if (uiEvent?.type !== 'task-activity') throw new Error('locate-source ui effect activity missing');
+    const selectEffect = uiEvent.uiEffects?.find((effect) => effect.kind === 'select-chapter');
+    const highlightEffect = uiEvent.uiEffects?.find((effect) => effect.kind === 'highlight-quote');
+    if (selectEffect === undefined || highlightEffect === undefined) throw new Error('locate-source effect ids missing');
+    const appliedOperation = `task-ui-effect:${uiEvent.taskRunId}:${selectEffect.effectId}`;
+    await success.runtime.reportTaskUiEffectResult(successWc.asWebContents(), appliedOperation, {
+      taskRunId: uiEvent.taskRunId, activityId: uiEvent.activityId, effectId: selectEffect.effectId,
+      effectKind: selectEffect.kind, status: 'applied', message: '已切换到定位结果所在章节',
+    });
+    await success.runtime.reportTaskUiEffectResult(successWc.asWebContents(), appliedOperation, {
+      taskRunId: uiEvent.taskRunId, activityId: uiEvent.activityId, effectId: selectEffect.effectId,
+      effectKind: selectEffect.kind, status: 'applied', message: '已切换到定位结果所在章节',
+    });
+    await success.runtime.reportTaskUiEffectResult(successWc.asWebContents(), `task-ui-effect:${uiEvent.taskRunId}:${highlightEffect.effectId}`, {
+      taskRunId: uiEvent.taskRunId, activityId: uiEvent.activityId, effectId: highlightEffect.effectId,
+      effectKind: highlightEffect.kind, status: 'failed', message: '目标章节已打开，但诊断引文未能在当前正文中高亮',
+    });
+    const effectResults = await taskRuns.listEvents(uiEvent.taskRunId);
+    check('UI Effect 成功与失败结果进入持久活动', effectResults.some((event) => event.type === 'task-activity' && event.title === '工作区已更新') && effectResults.some((event) => event.type === 'task-activity' && event.title === '工作区更新未完成'));
+    check('UI Effect 重复回执幂等', effectResults.filter((event) => event.type === 'task-activity' && event.title === '工作区已更新').length === 1);
+    let forgedEffectRejected = false;
+    try {
+      await success.runtime.reportTaskUiEffectResult(successWc.asWebContents(), 'task-ui-effect:forged', {
+        taskRunId: uiEvent.taskRunId, activityId: uiEvent.activityId, effectId: 'forged-effect',
+        effectKind: 'highlight-quote', status: 'applied', message: '伪造结果',
+      });
+    } catch {
+      forgedEffectRejected = true;
+    }
+    check('UI Effect 回执拒绝伪造 effectId', forgedEffectRejected);
+
+    const heartbeatCase = await prepare('locate-heartbeat', `${quote}，随后他继续解释。`, 2_300);
+    const heartbeatWc = new FakeWebContents();
+    const heartbeatPromise = heartbeatCase.runtime.locateSource(heartbeatWc.asWebContents(), randomUUID() as RunId, {
+      workflowId: 'locate-heartbeat', stageId: heartbeatCase.stageId, issueId: heartbeatCase.issueId,
+    });
+    await new Promise<void>((resolve) => setTimeout(resolve, 100));
+    check('heartbeat 两秒阈值前不提前发送', !heartbeatWc.taskActivity.some((event) => event.type === 'task-activity' && event.phase === 'heartbeat'));
+    await new Promise<void>((resolve) => setTimeout(resolve, 2_100));
+    const heartbeatEvent = heartbeatWc.taskActivity.find((event) => event.type === 'task-activity' && event.phase === 'heartbeat');
+    check('heartbeat 超过两秒后基于真实步骤发送', heartbeatEvent?.type === 'task-activity' && heartbeatEvent.status === 'running' && heartbeatEvent.message.includes('读取目标章节并验证') && (heartbeatEvent.feedback?.includes('已声明诊断问题') ?? false));
+    await heartbeatPromise;
+    const heartbeatCountAtCompletion = heartbeatWc.taskActivity.filter((event) => event.type === 'task-activity' && event.phase === 'heartbeat').length;
+    await new Promise<void>((resolve) => setTimeout(resolve, 700));
+    check('任务完成后停止 heartbeat', heartbeatWc.taskActivity.filter((event) => event.type === 'task-activity' && event.phase === 'heartbeat').length === heartbeatCountAtCompletion);
+
+    const ambiguousCase = await prepare('locate-ambiguous', `${quote}甲。${quote}乙。`);
+    const ambiguousWc = new FakeWebContents();
+    await ambiguousCase.runtime.locateSource(ambiguousWc.asWebContents(), randomUUID() as RunId, {
+      workflowId: 'locate-ambiguous', stageId: ambiguousCase.stageId, issueId: ambiguousCase.issueId,
+    });
+    const waiting = ambiguousWc.taskActivity.find((event) => event.type === 'task-activity' && event.status === 'awaiting-author');
+    const ambiguousWorkflow = await workflows.get('locate-ambiguous');
+    check('locate-source 多候选等待作者且不完成', waiting?.type === 'task-activity' && !ambiguousWc.taskActivity.some((event) => event.type === 'task-run-completed'));
+    check('locate-source 多候选不推进阶段', ambiguousWorkflow?.currentStageId === ambiguousCase.stageId);
+    if (waiting?.type !== 'task-activity') throw new Error('awaiting author activity missing');
+    const persistedWaiting = await taskRuns.get(waiting.taskRunId);
+    const persistedCandidates = await taskRuns.listPendingCandidates(waiting.taskRunId);
+    const persistedEvents = await taskRuns.listEvents(waiting.taskRunId);
+    check('locate-source 等待态与候选持久化', persistedWaiting?.status === 'awaiting-author' && persistedCandidates.length === 2);
+    check('locate-source 完整活动可从任务仓储恢复', persistedEvents.some((event) => event.type === 'task-activity' && event.status === 'awaiting-author'));
+    const taskCenter = await ambiguousCase.runtime.getTaskCenter({ projectId: 'locate-ambiguous-project' });
+    check(
+      '任务中心重连查询恢复等待任务与作者可见候选',
+      taskCenter.runs.some((run) => run.taskRunId === waiting.taskRunId && run.status === 'awaiting-author') &&
+        taskCenter.events.some((event) => event.type === 'task-activity' && event.taskRunId === waiting.taskRunId && event.authorCandidates?.length === 2),
+    );
+    const selectedCandidate = persistedCandidates[1];
+    if (selectedCandidate === undefined) throw new Error('second source candidate missing');
+    const resumedRuntime = new OrchestrationRuntime({
+      getModelResolver: () => undefined,
+      getCheckpointer: () => undefined,
+      getFactStore: () => undefined,
+      workflows,
+      workflowIssues,
+      stageRunEvidence: evidence,
+      taskRuns,
+      manuscript: {
+        readChapterContent: async (nodeId: string) => ({ nodeId, content: `${quote}甲。${quote}乙。` }),
+        writeBackRefactoredFragment: async () => ({ ok: false, reason: 'io-error' as const }),
+      },
+    });
+    const resumedWc = new FakeWebContents();
+    const chooseOperationId = `choose-source-location:${waiting.taskRunId}:${selectedCandidate.candidateId}`;
+    await resumedRuntime.chooseSourceLocation(resumedWc.asWebContents(), waiting.taskRunId, selectedCandidate.candidateId, chooseOperationId);
+    await resumedRuntime.chooseSourceLocation(resumedWc.asWebContents(), waiting.taskRunId, selectedCandidate.candidateId, chooseOperationId);
+    const resumedTask = await taskRuns.get(waiting.taskRunId);
+    const resumedWorkflow = await workflows.get('locate-ambiguous');
+    const resumedUi = resumedWc.taskActivity.find((event) => event.type === 'task-activity' && event.phase === 'ui-effect');
+    check('locate-source 重连后作者选择完成任务', resumedTask?.status === 'completed' && resumedTask.authorDecisions.length === 1);
+    check('locate-source 重复作者操作幂等', resumedTask?.authorDecisions.length === 1 && resumedWc.taskActivity.filter((event) => event.type === 'task-run-completed').length === 1);
+    check('locate-source 作者选择发布滚动与高亮', resumedUi?.type === 'task-activity' && resumedUi.uiEffects?.some((effect) => effect.kind === 'scroll-to-evidence') === true && resumedUi.uiEffects.some((effect) => effect.kind === 'highlight-quote'));
+    check('locate-source 作者选择后推进局部改写', resumedWorkflow?.stages.find((stage) => stage.stageId === resumedWorkflow.currentStageId)?.templateStageId === 'generate-rewrite');
+
+    const missing = await prepare('locate-missing', '正文已经变化。');
+    const missingWc = new FakeWebContents();
+    await missing.runtime.locateSource(missingWc.asWebContents(), randomUUID() as RunId, {
+      workflowId: 'locate-missing', stageId: missing.stageId, issueId: missing.issueId,
+    });
+    const failed = missingWc.taskActivity.find((event) => event.type === 'task-run-failed');
+    const missingWorkflow = await workflows.get('locate-missing');
+    const failedTask = failed?.type === 'task-run-failed' ? await taskRuns.get(failed.taskRunId) : null;
+    const failedEvents = failed?.type === 'task-run-failed' ? await taskRuns.listEvents(failed.taskRunId) : [];
+    check('locate-source 零命中发布可恢复失败', failed?.type === 'task-run-failed' && failed.error.category === 'validation' && (failed.error.recovery?.length ?? 0) > 0);
+    check('locate-source 失败状态与原因持久化', failedTask?.status === 'failed' && failedTask.failure?.code === 'source-location-failed' && failedEvents.some((event) => event.type === 'task-run-failed' && event.error.recovery !== undefined));
+    check('locate-source 零命中不推进阶段', missingWorkflow?.currentStageId === missing.stageId);
+
+    // 暂停/恢复：运行中在安全边界收敛为 paused，恢复复用同一 taskRunId 完成。
+    const pauseCase = await prepare('locate-pause', `开场。${quote}随后他回头解释。`, 400);
+    const pauseWc = new FakeWebContents();
+    const pauseRunId = randomUUID() as RunId;
+    const pausePromise = pauseCase.runtime.locateSource(pauseWc.asWebContents(), pauseRunId, {
+      workflowId: 'locate-pause', stageId: pauseCase.stageId, issueId: pauseCase.issueId,
+    });
+    await new Promise<void>((resolve) => setTimeout(resolve, 100));
+    const runningInput = pauseWc.taskActivity.find((event) => event.type === 'task-activity' && event.phase === 'input');
+    if (runningInput?.type !== 'task-activity') throw new Error('locate-pause input activity missing');
+    const pauseTaskRunId = runningInput.taskRunId;
+    await pauseCase.runtime.controlTaskRun(pauseWc.asWebContents(), pauseTaskRunId, 'pause', `control:${pauseTaskRunId}:pause:1`);
+    await pausePromise;
+    const pausedTask = await taskRuns.get(pauseTaskRunId);
+    const pausedWorkflow = await workflows.get('locate-pause');
+    check('locate-source 运行中暂停在安全边界收敛为 paused', pausedTask?.status === 'paused');
+    check('locate-source 暂停不产生 UI Effect 与完成事件', !pauseWc.taskActivity.some((event) => event.type === 'task-run-completed') && !pauseWc.taskActivity.some((event) => event.type === 'task-activity' && event.phase === 'ui-effect'));
+    check('locate-source 暂停不推进阶段', pausedWorkflow?.currentStageId === pauseCase.stageId);
+    // 重复同一 pause operationId 幂等（awaiting/paused 已收敛）。
+    await pauseCase.runtime.controlTaskRun(pauseWc.asWebContents(), pauseTaskRunId, 'pause', `control:${pauseTaskRunId}:pause:1`);
+    check('locate-source 已暂停重复暂停幂等', (await taskRuns.get(pauseTaskRunId))?.status === 'paused');
+    // 恢复：复用同一 taskRunId，从持久输入重新执行至完成。
+    const resumeWc = new FakeWebContents();
+    await pauseCase.runtime.controlTaskRun(resumeWc.asWebContents(), pauseTaskRunId, 'resume', `control:${pauseTaskRunId}:resume:1`);
+    await new Promise<void>((resolve) => setTimeout(resolve, 500));
+    const resumedPauseTask = await taskRuns.get(pauseTaskRunId);
+    const resumedPauseWorkflow = await workflows.get('locate-pause');
+    const resumedTaskRunIds = new Set((await taskRuns.listRecent({ limit: 50, projectId: 'locate-pause-project' })).map((run) => run.taskRunId));
+    check('locate-source 恢复复用同一 taskRunId 完成', resumedPauseTask?.status === 'completed' && resumedPauseTask.id === pauseTaskRunId);
+    check('locate-source 恢复不新建第二条 TaskRun', resumedTaskRunIds.size === 1);
+    check('locate-source 恢复后推进局部改写', resumedPauseWorkflow?.stages.find((stage) => stage.stageId === resumedPauseWorkflow.currentStageId)?.templateStageId === 'generate-rewrite');
+    check('locate-source 恢复发布真实 UI Effect', resumeWc.taskActivity.some((event) => event.type === 'task-activity' && event.phase === 'ui-effect'));
+
+    // 取消：等待作者态下立即持久化为 cancelled。
+    const cancelCase = await prepare('locate-cancel', `${quote}甲。${quote}乙。`);
+    const cancelWc = new FakeWebContents();
+    await cancelCase.runtime.locateSource(cancelWc.asWebContents(), randomUUID() as RunId, {
+      workflowId: 'locate-cancel', stageId: cancelCase.stageId, issueId: cancelCase.issueId,
+    });
+    const cancelWaiting = cancelWc.taskActivity.find((event) => event.type === 'task-activity' && event.status === 'awaiting-author');
+    if (cancelWaiting?.type !== 'task-activity') throw new Error('locate-cancel awaiting activity missing');
+    await cancelCase.runtime.controlTaskRun(cancelWc.asWebContents(), cancelWaiting.taskRunId, 'cancel', `control:${cancelWaiting.taskRunId}:cancel:1`);
+    const cancelledTask = await taskRuns.get(cancelWaiting.taskRunId);
+    const cancelledWorkflow = await workflows.get('locate-cancel');
+    check('locate-source 等待作者态可取消', cancelledTask?.status === 'cancelled');
+    check('locate-source 取消不推进阶段且不完成', cancelledWorkflow?.currentStageId === cancelCase.stageId && !cancelWc.taskActivity.some((event) => event.type === 'task-run-completed'));
+    // 重复取消幂等（已终态）。
+    await cancelCase.runtime.controlTaskRun(cancelWc.asWebContents(), cancelWaiting.taskRunId, 'cancel', `control:${cancelWaiting.taskRunId}:cancel:2`);
+    check('locate-source 已取消重复取消幂等', (await taskRuns.get(cancelWaiting.taskRunId))?.status === 'cancelled');
+  } finally {
+    await db.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+}
+
+/**
+ * 通用 playbook 执行引擎冲烟（task 2.1）：同一 Task Runtime 驱动 temporary/new-book，
+ * 不依赖 project/book/manuscript。注入 fake handlers（与 fake ModelResolver 同构），
+ * 验证状态收敛、作者决策、暂停/恢复、取消、幂等与必填校验。
+ */
+async function smokeGenericPlaybookTask(): Promise<void> {
+  const dir = await mkdtemp(join(tmpdir(), 'na-generic-playbook-'));
+  const opened = await openDatabase(join(dir, 'generic-playbook.db'));
+  if (!opened.ok) {
+    check('generic-playbook SQLite 可用', false, opened.message);
+    await rm(dir, { recursive: true, force: true });
+    return;
+  }
+  const db = opened.db;
+  try {
+    const taskRuns = new TaskRunRepository(db);
+    const makeRuntime = (): OrchestrationRuntime => new OrchestrationRuntime({
+      getModelResolver: () => undefined,
+      getCheckpointer: () => undefined,
+      getFactStore: () => undefined,
+      taskRuns,
+    });
+
+    // fake handler：不接真实模型，只产出可审计产物与作者可读候选。
+    const temporaryRegistration: PlaybookRegistration = {
+      playbook: TEMPORARY_EDITORIAL_PLAYBOOK,
+      title: '临时编辑任务',
+      completedSummary: '已完成独立文本的编辑审阅',
+      handlers: {
+        'review-text': {
+          run: async (ctx) => ({
+            message: '已根据编辑目标审阅文本',
+            outputSummary: '产出编辑意见',
+            artifacts: [{
+              outputKey: 'editorialNotes',
+              value: { brief: ctx.inputs['editorialBrief'] },
+              ref: { kind: 'draft', label: '编辑意见', ref: `editorial:${ctx.run.id}` },
+            }],
+          }),
+        },
+      },
+    };
+
+    // temporary 单步 auto：queued→running→completed，无 workflow/issue 引用，产物持久化。
+    const tempWc = new FakeWebContents();
+    const tempRuntime = makeRuntime();
+    tempRuntime.registerPlaybook(temporaryRegistration);
+    const tempId = randomUUID();
+    await tempRuntime.runPlaybookTask(tempWc.asWebContents(), {
+      registration: temporaryRegistration,
+      taskRunId: tempId,
+      inputs: { text: '一段独立文本', editorialBrief: '润色语气' },
+    });
+    const tempRun = await taskRuns.get(tempId);
+    check('临时任务无领域引用运行到 completed',
+      tempRun?.status === 'completed' && tempRun.refs.workflowId === null && tempRun.refs.issueId === null && tempRun.refs.projectId === null);
+    check('临时任务产物持久化', tempRun?.artifacts.length === 1 && tempRun.artifacts[0]?.outputKey === 'editorialNotes');
+    check('临时任务下发完成事件', tempWc.taskActivity.some((event) => event.type === 'task-run-completed'));
+    check('临时任务 kind 为 temporary-task', tempWc.taskActivity.every((event) => event.kind === 'temporary-task'));
+
+    // 新书任务：经作者决策步骤 run→awaiting-author→submit→completed，复用同一 taskRunId。
+    const newBookRegistration: PlaybookRegistration = {
+      playbook: NEW_BOOK_CHARACTER_DESIGN_PLAYBOOK,
+      title: '新书人物设计',
+      completedSummary: '已产出经作者确认的人物档案',
+      handlers: {
+        'draft-cast': {
+          run: async () => ({
+            message: '已起草互补的人物角色',
+            artifacts: [{ outputKey: 'draftCast', value: ['protagonist', 'foil'], ref: { kind: 'draft', label: '人物草稿', ref: 'cast-draft' } }],
+          }),
+        },
+        'author-review': {
+          requiresAuthor: true,
+          prompt: async () => ({ message: '请选择并确认人物阵容', nextAction: '在任务卡提交选择' }),
+          apply: async (_ctx, decision) => ({
+            message: '已收到作者选择',
+            artifacts: [{ outputKey: 'authorChoice', value: decision, ref: { kind: 'draft', label: '作者选择', ref: 'author-choice' } }],
+          }),
+        },
+        'finalize-profiles': {
+          run: async () => ({
+            message: '已产出最终人物档案',
+            artifacts: [{ outputKey: 'characterProfiles', value: [{ name: 'A' }], ref: { kind: 'draft', label: '人物档案', ref: 'profiles' } }],
+          }),
+        },
+      },
+    };
+
+    const nbWc = new FakeWebContents();
+    const nbRuntime = makeRuntime();
+    nbRuntime.registerPlaybook(newBookRegistration);
+    const nbId = randomUUID();
+    await nbRuntime.runPlaybookTask(nbWc.asWebContents(), {
+      registration: newBookRegistration,
+      taskRunId: nbId,
+      inputs: { premise: '一个关于背叛的故事' },
+    });
+    const awaitingRun = await taskRuns.get(nbId);
+    check('新书任务在作者决策步收敛 awaiting-author',
+      awaitingRun?.status === 'awaiting-author' && awaitingRun.currentStepId === 'author-review');
+    check('新书任务首步产物持久化', awaitingRun?.artifacts.some((artifact) => artifact.outputKey === 'draftCast') === true);
+    check('新书任务下发等待作者活动', nbWc.taskActivity.some((event) => event.type === 'task-activity' && event.status === 'awaiting-author'));
+    check('新书任务 kind 为 new-book-planning', nbWc.taskActivity.every((event) => event.kind === 'new-book-planning'));
+
+    await nbRuntime.submitPlaybookAuthorDecision(nbWc.asWebContents(), nbId, 'author-review', { chosen: 'protagonist' }, `decision:${nbId}:1`);
+    const nbCompleted = await taskRuns.get(nbId);
+    check('新书任务经作者决策收敛 completed 且复用同一 taskRunId',
+      nbCompleted?.id === nbId && nbCompleted.status === 'completed');
+    check('新书任务作者决策持久化',
+      nbCompleted?.authorDecisions.length === 1 && nbCompleted.authorDecisions[0]?.stepId === 'author-review');
+    check('新书任务三步产物均持久化', nbCompleted?.artifacts.length === 3);
+    // 重复同一 author-decision operationId 幂等。
+    await nbRuntime.submitPlaybookAuthorDecision(nbWc.asWebContents(), nbId, 'author-review', { chosen: 'protagonist' }, `decision:${nbId}:1`);
+    check('新书任务重复决策 operationId 幂等',
+      (await taskRuns.get(nbId))?.authorDecisions.length === 1);
+
+    // 暂停（运行中安全边界收敛 paused）→恢复（从 currentStepIndex 续跑至 completed，复用同一 taskRunId）。
+    let releasePause: (() => void) | undefined;
+    const pauseGate = new Promise<void>((resolve) => { releasePause = resolve; });
+    const pauseRegistration: PlaybookRegistration = {
+      playbook: TEMPORARY_EDITORIAL_PLAYBOOK,
+      title: '可暂停临时任务',
+      completedSummary: '恢复后已完成',
+      handlers: {
+        'review-text': {
+          run: async () => {
+            await pauseGate; // 制造一个可中断的安全边界窗口。
+            return { message: '审阅完成', artifacts: [{ outputKey: 'editorialNotes', value: 'ok', ref: { kind: 'draft', label: '意见', ref: 'note' } }] };
+          },
+        },
+      },
+    };
+    const pauseWc = new FakeWebContents();
+    const pauseRuntime = makeRuntime();
+    pauseRuntime.registerPlaybook(pauseRegistration);
+    const pauseId = randomUUID();
+    const pausePromise = pauseRuntime.runPlaybookTask(pauseWc.asWebContents(), {
+      registration: pauseRegistration, taskRunId: pauseId, inputs: { text: 't', editorialBrief: 'b' },
+    });
+    await new Promise<void>((resolve) => setTimeout(resolve, 50));
+    await pauseRuntime.controlTaskRun(pauseWc.asWebContents(), pauseId, 'pause', `control:${pauseId}:pause:1`);
+    releasePause?.();
+    await pausePromise;
+    const pausedRun = await taskRuns.get(pauseId);
+    check('通用任务运行中暂停收敛 paused', pausedRun?.status === 'paused');
+    check('通用任务暂停不产生产物', pausedRun?.artifacts.length === 0);
+    // 恢复：复用同一 taskRunId，重新执行至 completed（handler 已不再阻塞）。
+    const resumeWc = new FakeWebContents();
+    await pauseRuntime.controlTaskRun(resumeWc.asWebContents(), pauseId, 'resume', `control:${pauseId}:resume:1`);
+    await new Promise<void>((resolve) => setTimeout(resolve, 50));
+    const resumedRun = await taskRuns.get(pauseId);
+    check('通用任务从暂停点恢复至 completed 且复用同一 taskRunId',
+      resumedRun?.id === pauseId && resumedRun.status === 'completed' && resumedRun.artifacts.length === 1);
+
+    // awaiting-author 态 cancel → cancelled。
+    const cancelWc = new FakeWebContents();
+    const cancelRuntime = makeRuntime();
+    cancelRuntime.registerPlaybook(newBookRegistration);
+    const cancelId = randomUUID();
+    await cancelRuntime.runPlaybookTask(cancelWc.asWebContents(), {
+      registration: newBookRegistration, taskRunId: cancelId, inputs: { premise: 'p' },
+    });
+    check('cancel 前任务处于 awaiting-author', (await taskRuns.get(cancelId))?.status === 'awaiting-author');
+    await cancelRuntime.controlTaskRun(cancelWc.asWebContents(), cancelId, 'cancel', `control:${cancelId}:cancel:1`);
+    check('通用任务 awaiting-author 取消收敛 cancelled', (await taskRuns.get(cancelId))?.status === 'cancelled');
+    await cancelRuntime.controlTaskRun(cancelWc.asWebContents(), cancelId, 'cancel', `control:${cancelId}:cancel:2`);
+    check('通用任务重复取消幂等', (await taskRuns.get(cancelId))?.status === 'cancelled');
+
+    // 缺必填输入 → failed。
+    const missingWc = new FakeWebContents();
+    const missingRuntime = makeRuntime();
+    missingRuntime.registerPlaybook(temporaryRegistration);
+    const missingId = randomUUID();
+    await missingRuntime.runPlaybookTask(missingWc.asWebContents(), {
+      registration: temporaryRegistration, taskRunId: missingId, inputs: { text: '只有文本缺编辑目标' },
+    });
+    check('缺必填输入下发可读失败事件',
+      missingWc.taskActivity.some((event) => event.type === 'task-run-failed' && event.error.message.includes('Editorial brief')));
+    check('缺必填输入不创建持久运行', (await taskRuns.get(missingId)) === null);
+  } finally {
+    await db.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+}
+
+/**
+ * 4.4 [Integration Test] locate-source 端到端验收：
+ * 单条 issue 贯穿「选择问题 → 创建任务 → 展示输入 → 读取证据 → 查找/匹配正文 →
+ * 真实活动 → UI Effect → 作者确认 → 进入局部改写」的有序旅程。
+ * 与既有零散断言不同，本用例在同一 workflow 实例上按序验证整条链路，并守卫
+ * 红线：活动不得泄露整章正文或隐藏思维链，活动必须来自真实 Task Runtime 持久化。
+ */
+async function smokeLocateSourceEndToEnd(): Promise<void> {
+  const quote = '他忽然丢下同伴独自离开。';
+  // 刻意构造多候选正文：迫使流程进入等待作者，验证 awaiting-author → 作者确认尾段。
+  const chapterContent = `第一幕。${quote}随后众人追问。第二幕。${quote}此后再无人提起。`;
+  const dir = await mkdtemp(join(tmpdir(), 'na-locate-e2e-'));
+  const opened = await openDatabase(join(dir, 'locate-e2e.db'));
+  if (!opened.ok) {
+    check('locate-source E2E SQLite 可用', false, opened.message);
+    await rm(dir, { recursive: true, force: true });
+    return;
+  }
+  const db = opened.db;
+  try {
+    const workflows = new WorkflowRepository(db);
+    const workflowIssues = new WorkflowIssueRepository(db);
+    const service = new WorkflowApplicationService(workflows, new CreativeAssetRepository(db), workflowIssues);
+    const evidence = new SqliteStageRunEvidenceRecorder(db);
+    const taskRuns = new TaskRunRepository(db);
+    const chapterId = asNodeId('e2e-chapter');
+    const workflowId = 'locate-e2e';
+
+    // 准备工作流并推进到 issue-triage，暴露待选问题。
+    const started = await service.command({
+      type: 'start-workflow', workflowId, projectId: `${workflowId}-project`, kind: 'legacy-book-revision',
+      objective: '定位诊断问题对应的原文', requestId: `${workflowId}-start`, operationId: `${workflowId}-start-op`,
+    });
+    if (started === null) throw new Error('E2E workflow fixture failed');
+    const [issue] = await workflowIssues.upsertFromAudit(workflowId, `${workflowId}-audit`, [{
+      type: 'behavior-ooc', severity: 'warning', anchors: [{ id: chapterId, kind: 'chapter' }],
+      description: '主角在证据段落中的行为与既定性格不一致。', requiresHumanDecision: false,
+      evidence: { quote },
+    }]);
+    if (issue === undefined) throw new Error('E2E issue fixture failed');
+
+    const advance = async (templateStageId: string, author: boolean): Promise<void> => {
+      const current = await workflows.get(workflowId);
+      if (current === null || current.currentStageId === null) throw new Error(`missing ${templateStageId}`);
+      const stage = current.stages.find((candidate) => candidate.stageId === current.currentStageId);
+      if (stage?.templateStageId !== templateStageId) throw new Error(`expected ${templateStageId}, got ${stage?.templateStageId}`);
+      const stageRunId = `${workflowId}:${templateStageId}` as RunId;
+      await service.command({
+        type: 'workflow-start-stage', workflowId, stageId: current.currentStageId,
+        expectedVersion: current.version, runId: stageRunId,
+        requestId: `${stageRunId}-start`, operationId: `${stageRunId}-start-op`,
+      });
+      await evidence.record({ runId: stageRunId, workflowRef: { workflowId, stageId: current.currentStageId }, status: 'started' });
+      await evidence.record({
+        runId: stageRunId, workflowRef: { workflowId, stageId: current.currentStageId }, status: 'completed',
+        ...(stage?.actor === 'quality-gate' ? { completion: { passed: true, issueIds: [] } } : {}),
+      });
+      if (!author) return;
+      const awaiting = await workflows.get(workflowId);
+      if (awaiting === null || awaiting.currentStageId === null) throw new Error(`author stage ${templateStageId} disappeared`);
+      await service.command({
+        type: 'workflow-confirm-stage', workflowId, stageId: awaiting.currentStageId,
+        expectedVersion: awaiting.version, requestId: `${stageRunId}-confirm`, operationId: `${stageRunId}-confirm-op`,
+      });
+    };
+
+    await advance('import-book', true);
+    await advance('fact-backfill', false);
+    await advance('initial-audit', false);
+    const triage = await workflows.get(workflowId);
+    if (triage === null || triage.currentStageId === null) throw new Error('E2E issue triage missing');
+
+    // 步骤①：选择问题 → 持久化当前问题引用。
+    const selection = await service.command({
+      type: 'workflow-select-issue', workflowId, stageId: triage.currentStageId, issueId: issue.issueId,
+      workflowRef: { workflowId, stageId: triage.currentStageId, issueId: issue.issueId },
+      expectedVersion: triage.version, runId: `${workflowId}:selection`,
+      requestId: `${workflowId}-select`, operationId: `${workflowId}-select-op`,
+    });
+    check('E2E ① 选择问题持久化当前问题', selection?.selectedIssueId === issue.issueId);
+    await advance('issue-triage', true);
+    const locate = await workflows.get(workflowId);
+    if (locate === null || locate.currentStageId === null) throw new Error('E2E locate-source stage missing');
+    check('E2E 阶段推进后保留当前问题', locate.selectedIssueId === issue.issueId);
+
+    const runtime = new OrchestrationRuntime({
+      getModelResolver: () => undefined,
+      getCheckpointer: () => undefined,
+      getFactStore: () => undefined,
+      workflows, workflowIssues, stageRunEvidence: evidence, taskRuns,
+      manuscript: {
+        readChapterContent: async (nodeId: string) => ({ nodeId, content: chapterContent }),
+        writeBackRefactoredFragment: async () => ({ ok: false, reason: 'io-error' as const }),
+      },
+    });
+
+    // 步骤②③④：创建任务 → 展示输入 → 读取证据 → 查找/匹配 → 真实活动（多候选等待作者）。
+    const wc = new FakeWebContents();
+    await runtime.locateSource(wc.asWebContents(), randomUUID() as RunId, {
+      workflowId, stageId: locate.currentStageId, issueId: issue.issueId,
+    });
+    const activities = wc.taskActivity.filter((event): event is Extract<BackendTaskActivityEvent, { type: 'task-activity' }> => event.type === 'task-activity');
+    const inputActivity = activities.find((event) => event.phase === 'input');
+    const retrievalActivity = activities.find((event) => event.phase === 'retrieval');
+    const waitingActivity = activities.find((event) => event.status === 'awaiting-author');
+    if (inputActivity === undefined || waitingActivity === undefined) throw new Error('E2E input/awaiting activity missing');
+    const taskRunId = inputActivity.taskRunId;
+
+    check('E2E ② 创建任务并展示作者可读输入',
+      inputActivity.inputSummary !== undefined && inputActivity.inputSummary.length > 0 &&
+        inputActivity.evidenceRefs?.some((ref) => ref.kind === 'issue') === true &&
+        inputActivity.evidenceRefs.some((ref) => ref.kind === 'chapter') &&
+        inputActivity.evidenceRefs.some((ref) => ref.kind === 'quote'));
+    check('E2E ③ 读取证据产生真实读取活动',
+      retrievalActivity?.phase === 'retrieval' && retrievalActivity.message.includes('匹配'));
+    // 红线：活动不得把整章正文或隐藏思维链下发到消息流。
+    const leaksProse = activities.some((event) =>
+      event.message.includes(chapterContent) ||
+      (event.inputSummary?.includes(chapterContent) ?? false) ||
+      (event.outputSummary?.includes(chapterContent) ?? false) ||
+      Object.prototype.hasOwnProperty.call(event, 'prompt') ||
+      Object.prototype.hasOwnProperty.call(event, 'reasoning'));
+    check('E2E 活动不泄露整章正文/隐藏思维链', !leaksProse);
+
+    // 断言真实持久化：等待态与候选来自 Task Runtime 仓储，而非伪造。
+    const persistedWaiting = await taskRuns.get(taskRunId);
+    const persistedCandidates = await taskRuns.listPendingCandidates(taskRunId);
+    check('E2E ④ 查找/匹配后进入等待作者（真实候选持久化）',
+      persistedWaiting?.status === 'awaiting-author' && persistedCandidates.length === 2 &&
+        waitingActivity.authorCandidates?.length === 2);
+    check('E2E 等待态未推进阶段、未完成',
+      (await workflows.get(workflowId))?.currentStageId === locate.currentStageId &&
+        !wc.taskActivity.some((event) => event.type === 'task-run-completed'));
+
+    // 步骤⑤⑥⑦：作者确认候选 → UI Effect → 完成 → 进入局部改写。
+    const chosen = persistedCandidates[0];
+    if (chosen === undefined) throw new Error('E2E candidate missing');
+    const confirmWc = new FakeWebContents();
+    await runtime.chooseSourceLocation(confirmWc.asWebContents(), taskRunId, chosen.candidateId, `choose:${taskRunId}:${chosen.candidateId}`);
+    const confirmActivities = confirmWc.taskActivity.filter((event): event is Extract<BackendTaskActivityEvent, { type: 'task-activity' }> => event.type === 'task-activity');
+    const validationActivity = confirmActivities.find((event) => event.phase === 'validation');
+    const uiEffectActivity = confirmActivities.find((event) => event.phase === 'ui-effect');
+    const completedEvent = confirmWc.taskActivity.find((event) => event.type === 'task-run-completed');
+    const finalTask = await taskRuns.get(taskRunId);
+    const finalWorkflow = await workflows.get(workflowId);
+
+    check('E2E ⑤ 作者确认后收敛 completed 且决策持久化',
+      finalTask?.status === 'completed' && finalTask.id === taskRunId && finalTask.authorDecisions.length === 1);
+    check('E2E 作者确认经过校验阶段（真实活动）', validationActivity?.phase === 'validation');
+    check('E2E ⑥ 完成发布切章/滚动/高亮 UI Effect',
+      uiEffectActivity?.uiEffects?.some((effect) => effect.kind === 'select-chapter') === true &&
+        uiEffectActivity.uiEffects.some((effect) => effect.kind === 'scroll-to-evidence') &&
+        uiEffectActivity.uiEffects.some((effect) => effect.kind === 'highlight-quote'));
+    check('E2E 完成事件携带定位产物',
+      completedEvent?.type === 'task-run-completed' && completedEvent.artifactRefs?.some((artifact) => artifact.kind === 'source-location') === true);
+    check('E2E ⑦ 作者确认后进入局部改写阶段',
+      finalWorkflow?.stages.find((stage) => stage.stageId === finalWorkflow.currentStageId)?.templateStageId === 'generate-rewrite');
+
+    // 有序旅程：input < retrieval < awaiting-author < validation < ui-effect < completed，全部来自真实持久活动。
+    const persistedEvents = await taskRuns.listEvents(taskRunId);
+    const phaseOrder = persistedEvents
+      .filter((event): event is Extract<BackendTaskActivityEvent, { type: 'task-activity' }> => event.type === 'task-activity')
+      .map((event) => event.phase);
+    const indexOf = (phase: string): number => phaseOrder.indexOf(phase as (typeof phaseOrder)[number]);
+    const orderedChain =
+      indexOf('input') >= 0 &&
+      indexOf('input') < indexOf('retrieval') &&
+      indexOf('retrieval') < indexOf('awaiting-author') &&
+      indexOf('awaiting-author') < indexOf('validation') &&
+      indexOf('validation') < indexOf('ui-effect');
+    const completedInStore = persistedEvents.some((event) => event.type === 'task-run-completed');
+    check('E2E 有序活动链路来自真实 Task Runtime 持久化',
+      orderedChain && completedInStore, phaseOrder.join('→'));
+    check('E2E 任务事件不混入专家对话流/模型任务通道',
+      wc.stream.length === 0 && wc.modelTask.length === 0 && confirmWc.stream.length === 0 && confirmWc.modelTask.length === 0);
+  } finally {
+    await db.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+}
+
+/**
+ * 4.6 [Integration Test] 局部改写循环边界：
+ * 以真实 manuscript I/O + 真实 SqliteCheckpointer 驱动 computeRefactorDiff → applyHunkDecisions，
+ * 覆盖（a）无锚点/越界锚点校验失败且正文不动、（b）预览后引用变化导致 apply 因基线变动失败、
+ * （c）正文写入必须逐 hunk（仅接受区间写回、章节其余原样、产出可回滚 checkpoint）、
+ * （d）写回 IO 失败下发可恢复失败、IO 恢复后同 run 重试成功写回。
+ * 红线：绝不整章覆盖；失败路径不改动磁盘正文、不产出 refactor-applied。
+ */
+async function smokeRefactorLoopBoundaries(): Promise<void> {
+  const dir = await mkdtemp(join(tmpdir(), 'na-refactor-loop-'));
+  const opened = await openDatabase(join(dir, 'refactor-loop.db'));
+  if (!opened.ok) {
+    check('refactor loop SQLite 可用', false, opened.message);
+    await rm(dir, { recursive: true, force: true });
+    return;
+  }
+  const db = opened.db;
+  try {
+    const nodeId = 'refactor-loop-chapter';
+    const original = '顾长风揠住茶壶，手腕一抖，碎壶不伤手。大老王看得目瞪口呆。';
+    let chapterText = original;
+    let ioFails = false;
+    const manuscript = {
+      readChapterContent: async (id: string) => ({ nodeId: id, content: chapterText }),
+      writeBackRefactoredFragment: async (anchor: FragmentAnchor, fragmentText: string) => {
+        if (ioFails) return { ok: false, reason: 'io-error' as const };
+        // 仅替换锚点区间，绝不整章覆盖。
+        chapterText = chapterText.slice(0, anchor.from) + fragmentText + chapterText.slice(anchor.to);
+        return { ok: true, newContentLength: chapterText.length };
+      },
+    };
+    const runtime = new OrchestrationRuntime({
+      getModelResolver: () => undefined,
+      getCheckpointer: () => new SqliteCheckpointer(db),
+      getFactStore: () => undefined,
+      manuscript,
+    });
+    const rewritten = '顾九揠紧铁壶，手腕一抽，碎壶不伤手';
+    const anchor: FragmentAnchor = { node: { id: asNodeId(nodeId), kind: 'chapter' }, from: 0, to: 11 };
+
+    // (a) 越界锚点：compute 与 apply 均校验失败，磁盘正文不动。
+    const oobAnchor: FragmentAnchor = { node: { id: asNodeId(nodeId), kind: 'chapter' }, from: 0, to: 9999 };
+    const oobDiffWc = new FakeWebContents();
+    await runtime.computeRefactorDiff(oobDiffWc.asWebContents(), randomUUID() as RunId, oobAnchor, rewritten);
+    const oobDiffFailed = oobDiffWc.control.find((item) => item.type === 'refactor-diff-failed');
+    check('4.6 越界锚点：computeRefactorDiff 校验失败',
+      oobDiffFailed?.type === 'refactor-diff-failed' && oobDiffFailed.error.category === 'validation');
+    const oobApplyWc = new FakeWebContents();
+    await runtime.applyHunkDecisions(oobApplyWc.asWebContents(), randomUUID() as RunId, oobAnchor, rewritten, []);
+    const oobApplyFailed = oobApplyWc.control.find((item) => item.type === 'refactor-apply-failed');
+    check('4.6 越界锚点：applyHunkDecisions 校验失败且正文不动',
+      oobApplyFailed?.type === 'refactor-apply-failed' && oobApplyFailed.error.category === 'validation' && chapterText === original);
+
+    // (b) 引用变化：预览后正文在锚点区间内被外部改动 → apply 因基线 hash 变动失败，正文不动、无 refactor-applied。
+    const refRunId = randomUUID() as RunId;
+    const refDiffWc = new FakeWebContents();
+    await runtime.computeRefactorDiff(refDiffWc.asWebContents(), refRunId, anchor, rewritten);
+    const refDiff = refDiffWc.control.find((item) => item.type === 'refactor-diff-computed');
+    check('4.6 引用变化：预览成功产出 diff',
+      refDiff?.type === 'refactor-diff-computed' && refDiff.hunks.length > 0);
+    chapterText = '顾七风揠住茶壶，手腕一抖，碎壶不伤手。大老王看得目瞪口呆。'; // 锚点区间内改动，等长
+    const refBefore = chapterText;
+    const refApplyWc = new FakeWebContents();
+    if (refDiff?.type === 'refactor-diff-computed') {
+      await runtime.applyHunkDecisions(
+        refApplyWc.asWebContents(), refRunId, anchor, rewritten,
+        refDiff.hunks.map((h) => ({ hunkId: h.id, decision: 'accept' as const })),
+      );
+    }
+    const refApplyFailed = refApplyWc.control.find((item) => item.type === 'refactor-apply-failed');
+    check('4.6 引用变化：apply 因基线变动失败，正文不动且无 refactor-applied',
+      refApplyFailed?.type === 'refactor-apply-failed' && chapterText === refBefore &&
+        !refApplyWc.control.some((item) => item.type === 'refactor-applied'));
+
+    // (c) 逐 hunk：仅接受首个 hunk → 仅接受区间写回，章节其余原样，产出可回滚 checkpoint。
+    chapterText = original;
+    const partialRunId = randomUUID() as RunId;
+    const partialDiffWc = new FakeWebContents();
+    await runtime.computeRefactorDiff(partialDiffWc.asWebContents(), partialRunId, anchor, rewritten);
+    const partialDiff = partialDiffWc.control.find((item) => item.type === 'refactor-diff-computed');
+    if (partialDiff?.type !== 'refactor-diff-computed') throw new Error('4.6 partial diff missing');
+    check('4.6 逐 hunk：diff 拆出多个可独立裁决 hunk', partialDiff.hunks.length >= 2, `hunks=${partialDiff.hunks.length}`);
+    const firstHunk = partialDiff.hunks[0];
+    if (firstHunk === undefined) throw new Error('4.6 partial first hunk missing');
+    const partialApplyWc = new FakeWebContents();
+    await runtime.applyHunkDecisions(
+      partialApplyWc.asWebContents(), partialRunId, anchor, rewritten,
+      [{ hunkId: firstHunk.id, decision: 'accept' as const }],
+    );
+    const partialApplied = partialApplyWc.control.find((item) => item.type === 'refactor-applied');
+    const frag = carveFragment(original, anchor);
+    if (frag === null) throw new Error('4.6 fragment carve failed');
+    const expectedFragment = frag.text.slice(0, firstHunk.fragmentFrom) + firstHunk.rewritten + frag.text.slice(firstHunk.fragmentTo);
+    const expectedChapter = expectedFragment + original.slice(anchor.to);
+    check('4.6 逐 hunk：仅接受区间写回，章节其余原样',
+      partialApplied?.type === 'refactor-applied' && chapterText === expectedChapter && chapterText !== (rewritten + original.slice(anchor.to)));
+    check('4.6 逐 hunk：变更落定为可回滚 checkpoint 且仅记录接受项',
+      partialApplied?.type === 'refactor-applied' && partialApplied.checkpointId !== undefined &&
+        partialApplied.acceptedHunkIds.length === 1 && partialApplied.acceptedHunkIds[0] === firstHunk.id);
+
+    // (d) 失败恢复：写回 IO 失败 → 可恢复失败、正文不动；IO 恢复后同 run 重试成功写回。
+    chapterText = original;
+    const recoverRunId = randomUUID() as RunId;
+    const recoverDiffWc = new FakeWebContents();
+    await runtime.computeRefactorDiff(recoverDiffWc.asWebContents(), recoverRunId, anchor, rewritten);
+    const recoverDiff = recoverDiffWc.control.find((item) => item.type === 'refactor-diff-computed');
+    if (recoverDiff?.type !== 'refactor-diff-computed') throw new Error('4.6 recover diff missing');
+    const allDecisions = recoverDiff.hunks.map((h) => ({ hunkId: h.id, decision: 'accept' as const }));
+    ioFails = true;
+    const ioFailWc = new FakeWebContents();
+    await runtime.applyHunkDecisions(ioFailWc.asWebContents(), recoverRunId, anchor, rewritten, allDecisions);
+    const ioFailed = ioFailWc.control.find((item) => item.type === 'refactor-apply-failed');
+    check('4.6 失败恢复：写回 IO 失败下发 io 类失败且正文不动',
+      ioFailed?.type === 'refactor-apply-failed' && ioFailed.error.category === 'io' && chapterText === original);
+    ioFails = false;
+    const retryWc = new FakeWebContents();
+    await runtime.applyHunkDecisions(retryWc.asWebContents(), recoverRunId, anchor, rewritten, allDecisions);
+    const retryApplied = retryWc.control.find((item) => item.type === 'refactor-applied');
+    check('4.6 失败恢复：IO 恢复后同 run 重试成功写回',
+      retryApplied?.type === 'refactor-applied' && chapterText === (rewritten + original.slice(anchor.to)));
+  } finally {
+    await db.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+}
+
+/**
+ * 4.6 [Integration Test] 候选过多边界：
+ * 诊断引文在正文中出现 N（=4）处且无上下文可消歧时，真实 Task Runtime locateSource
+ * 必须收敛 awaiting-author 并把全部 N 个候选持久化，绝不自动猜测选择、不推进阶段、不完成。
+ * 纯函数 locateSourceEvidence 亦复核“候选数不设默认上限、逐一保留”。
+ */
+async function smokeLocateCandidateOverflow(): Promise<void> {
+  const quote = '他忽然丢下同伴独自离开。';
+  // 四处相同引文、彼此上下文相似 → 无法消歧 → 全部成为候选。
+  const chapterContent = `一幕。${quote}追问。二幕。${quote}沉默。三幕。${quote}离场。四幕。${quote}散去。`;
+  // 纯函数层复核：不设默认上限，四处全部保留。
+  const pure = locateSourceEvidence(chapterContent, { quote });
+  check('4.6 候选过多：纯定位器保留全部候选不猜测',
+    pure.status === 'ambiguous' && pure.candidates.length === 4);
+
+  const dir = await mkdtemp(join(tmpdir(), 'na-locate-overflow-'));
+  const opened = await openDatabase(join(dir, 'locate-overflow.db'));
+  if (!opened.ok) {
+    check('locate overflow SQLite 可用', false, opened.message);
+    await rm(dir, { recursive: true, force: true });
+    return;
+  }
+  const db = opened.db;
+  try {
+    const workflows = new WorkflowRepository(db);
+    const workflowIssues = new WorkflowIssueRepository(db);
+    const service = new WorkflowApplicationService(workflows, new CreativeAssetRepository(db), workflowIssues);
+    const evidence = new SqliteStageRunEvidenceRecorder(db);
+    const taskRuns = new TaskRunRepository(db);
+    const chapterId = asNodeId('overflow-chapter');
+    const workflowId = 'locate-overflow';
+
+    const started = await service.command({
+      type: 'start-workflow', workflowId, projectId: `${workflowId}-project`, kind: 'legacy-book-revision',
+      objective: '候选过多边界', requestId: `${workflowId}-start`, operationId: `${workflowId}-start-op`,
+    });
+    if (started === null) throw new Error('overflow workflow fixture failed');
+    const [issue] = await workflowIssues.upsertFromAudit(workflowId, `${workflowId}-audit`, [{
+      type: 'behavior-ooc', severity: 'warning', anchors: [{ id: chapterId, kind: 'chapter' }],
+      description: '主角行为与既定性格不一致。', requiresHumanDecision: false, evidence: { quote },
+    }]);
+    if (issue === undefined) throw new Error('overflow issue fixture failed');
+
+    const advance = async (templateStageId: string, author: boolean): Promise<void> => {
+      const current = await workflows.get(workflowId);
+      if (current === null || current.currentStageId === null) throw new Error(`missing ${templateStageId}`);
+      const stage = current.stages.find((candidate) => candidate.stageId === current.currentStageId);
+      if (stage?.templateStageId !== templateStageId) throw new Error(`expected ${templateStageId}, got ${stage?.templateStageId}`);
+      const stageRunId = `${workflowId}:${templateStageId}` as RunId;
+      await service.command({
+        type: 'workflow-start-stage', workflowId, stageId: current.currentStageId,
+        expectedVersion: current.version, runId: stageRunId,
+        requestId: `${stageRunId}-start`, operationId: `${stageRunId}-start-op`,
+      });
+      await evidence.record({ runId: stageRunId, workflowRef: { workflowId, stageId: current.currentStageId }, status: 'started' });
+      await evidence.record({
+        runId: stageRunId, workflowRef: { workflowId, stageId: current.currentStageId }, status: 'completed',
+        ...(stage?.actor === 'quality-gate' ? { completion: { passed: true, issueIds: [] } } : {}),
+      });
+      if (!author) return;
+      const awaiting = await workflows.get(workflowId);
+      if (awaiting === null || awaiting.currentStageId === null) throw new Error(`author stage ${templateStageId} disappeared`);
+      await service.command({
+        type: 'workflow-confirm-stage', workflowId, stageId: awaiting.currentStageId,
+        expectedVersion: awaiting.version, requestId: `${stageRunId}-confirm`, operationId: `${stageRunId}-confirm-op`,
+      });
+    };
+    await advance('import-book', true);
+    await advance('fact-backfill', false);
+    await advance('initial-audit', false);
+    const triage = await workflows.get(workflowId);
+    if (triage === null || triage.currentStageId === null) throw new Error('overflow issue triage missing');
+    await service.command({
+      type: 'workflow-select-issue', workflowId, stageId: triage.currentStageId, issueId: issue.issueId,
+      workflowRef: { workflowId, stageId: triage.currentStageId, issueId: issue.issueId },
+      expectedVersion: triage.version, runId: `${workflowId}:selection`,
+      requestId: `${workflowId}-select`, operationId: `${workflowId}-select-op`,
+    });
+    await advance('issue-triage', true);
+    const locate = await workflows.get(workflowId);
+    if (locate === null || locate.currentStageId === null) throw new Error('overflow locate-source stage missing');
+
+    const runtime = new OrchestrationRuntime({
+      getModelResolver: () => undefined,
+      getCheckpointer: () => undefined,
+      getFactStore: () => undefined,
+      workflows, workflowIssues, stageRunEvidence: evidence, taskRuns,
+      manuscript: {
+        readChapterContent: async (id: string) => ({ nodeId: id, content: chapterContent }),
+        writeBackRefactoredFragment: async () => ({ ok: false, reason: 'io-error' as const }),
+      },
+    });
+    const wc = new FakeWebContents();
+    await runtime.locateSource(wc.asWebContents(), randomUUID() as RunId, {
+      workflowId, stageId: locate.currentStageId, issueId: issue.issueId,
+    });
+    const waitingActivity = wc.taskActivity.find(
+      (event): event is Extract<BackendTaskActivityEvent, { type: 'task-activity' }> =>
+        event.type === 'task-activity' && event.status === 'awaiting-author',
+    );
+    if (waitingActivity === undefined) throw new Error('overflow awaiting activity missing');
+    const persistedRun = await taskRuns.get(waitingActivity.taskRunId);
+    const persistedCandidates = await taskRuns.listPendingCandidates(waitingActivity.taskRunId);
+    check('4.6 候选过多：真实 runtime 收敛 awaiting-author 且四候选全部持久化',
+      persistedRun?.status === 'awaiting-author' && persistedCandidates.length === 4 &&
+        waitingActivity.authorCandidates?.length === 4);
+    check('4.6 候选过多：不自动选择、不推进阶段、不完成',
+      (await workflows.get(workflowId))?.currentStageId === locate.currentStageId &&
+        !wc.taskActivity.some((event) => event.type === 'task-run-completed'));
+  } finally {
+    await db.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+}
+
+/**
+ * 4.1 相关人物或事实底稿：locate-source 输入活动须从事实库召回证据/描述中提及的已知实体，
+ * 作为「相关人物或事实底稿」输入（evidenceRefs kind='fact'），且底稿引用不泄露整章正文。
+ */
+async function smokeLocateSourceFactBacking(): Promise<void> {
+  const quote = '他忽然丢下同伴独自离开。';
+  // 多候选正文：两次 run 均停在 awaiting-author、不推进阶段，便于复用同一 locate-source 阶段。
+  const chapterContent = `第一幕。${quote}随后众人追问。第二幕。${quote}此后再无人提起。`;
+  const dir = await mkdtemp(join(tmpdir(), 'na-locate-backing-'));
+  const opened = await openDatabase(join(dir, 'locate-backing.db'));
+  if (!opened.ok) {
+    check('locate backing SQLite 可用', false, opened.message);
+    await rm(dir, { recursive: true, force: true });
+    return;
+  }
+  const db = opened.db;
+  try {
+    const workflows = new WorkflowRepository(db);
+    const workflowIssues = new WorkflowIssueRepository(db);
+    const service = new WorkflowApplicationService(workflows, new CreativeAssetRepository(db), workflowIssues);
+    const evidence = new SqliteStageRunEvidenceRecorder(db);
+    const taskRuns = new TaskRunRepository(db);
+    const factStore = new SqliteFactStore(db);
+    const chapterId = asNodeId('backing-chapter');
+    const workflowId = 'locate-backing';
+
+    // 播种事实：顾长风为已知人物；诊断描述提及其名，应被召回为底稿。
+    const version = await factStore.appendVersion();
+    await factStore.putEntity(version, sampleEntity(), null);
+
+    const started = await service.command({
+      type: 'start-workflow', workflowId, projectId: `${workflowId}-project`, kind: 'legacy-book-revision',
+      objective: '相关人物底稿', requestId: `${workflowId}-start`, operationId: `${workflowId}-start-op`,
+    });
+    if (started === null) throw new Error('backing workflow fixture failed');
+    const [issue] = await workflowIssues.upsertFromAudit(workflowId, `${workflowId}-audit`, [{
+      type: 'behavior-ooc', severity: 'warning', anchors: [{ id: chapterId, kind: 'chapter' }],
+      description: '顾长风在此处的行为与既定性格不一致。', requiresHumanDecision: false, evidence: { quote },
+    }]);
+    if (issue === undefined) throw new Error('backing issue fixture failed');
+
+    const advance = async (templateStageId: string, author: boolean): Promise<void> => {
+      const current = await workflows.get(workflowId);
+      if (current === null || current.currentStageId === null) throw new Error(`missing ${templateStageId}`);
+      const stage = current.stages.find((candidate) => candidate.stageId === current.currentStageId);
+      if (stage?.templateStageId !== templateStageId) throw new Error(`expected ${templateStageId}, got ${stage?.templateStageId}`);
+      const stageRunId = `${workflowId}:${templateStageId}` as RunId;
+      await service.command({
+        type: 'workflow-start-stage', workflowId, stageId: current.currentStageId,
+        expectedVersion: current.version, runId: stageRunId,
+        requestId: `${stageRunId}-start`, operationId: `${stageRunId}-start-op`,
+      });
+      await evidence.record({ runId: stageRunId, workflowRef: { workflowId, stageId: current.currentStageId }, status: 'started' });
+      await evidence.record({
+        runId: stageRunId, workflowRef: { workflowId, stageId: current.currentStageId }, status: 'completed',
+        ...(stage?.actor === 'quality-gate' ? { completion: { passed: true, issueIds: [] } } : {}),
+      });
+      if (!author) return;
+      const awaiting = await workflows.get(workflowId);
+      if (awaiting === null || awaiting.currentStageId === null) throw new Error(`author stage ${templateStageId} disappeared`);
+      await service.command({
+        type: 'workflow-confirm-stage', workflowId, stageId: awaiting.currentStageId,
+        expectedVersion: awaiting.version, requestId: `${stageRunId}-confirm`, operationId: `${stageRunId}-confirm-op`,
+      });
+    };
+    await advance('import-book', true);
+    await advance('fact-backfill', false);
+    await advance('initial-audit', false);
+    const triage = await workflows.get(workflowId);
+    if (triage === null || triage.currentStageId === null) throw new Error('backing issue triage missing');
+    await service.command({
+      type: 'workflow-select-issue', workflowId, stageId: triage.currentStageId, issueId: issue.issueId,
+      workflowRef: { workflowId, stageId: triage.currentStageId, issueId: issue.issueId },
+      expectedVersion: triage.version, runId: `${workflowId}:selection`,
+      requestId: `${workflowId}-select`, operationId: `${workflowId}-select-op`,
+    });
+    await advance('issue-triage', true);
+    const locate = await workflows.get(workflowId);
+    if (locate === null || locate.currentStageId === null) throw new Error('backing locate-source stage missing');
+
+    const runtime = new OrchestrationRuntime({
+      getModelResolver: () => undefined,
+      getCheckpointer: () => undefined,
+      getFactStore: () => factStore,
+      workflows, workflowIssues, stageRunEvidence: evidence, taskRuns,
+      manuscript: {
+        readChapterContent: async (id: string) => ({ nodeId: id, content: chapterContent }),
+        writeBackRefactoredFragment: async () => ({ ok: false, reason: 'io-error' as const }),
+      },
+    });
+    const wc = new FakeWebContents();
+    await runtime.locateSource(wc.asWebContents(), randomUUID() as RunId, {
+      workflowId, stageId: locate.currentStageId, issueId: issue.issueId,
+    });
+    const inputActivity = wc.taskActivity.find(
+      (event): event is Extract<BackendTaskActivityEvent, { type: 'task-activity' }> =>
+        event.type === 'task-activity' && event.phase === 'input',
+    );
+    if (inputActivity === undefined) throw new Error('backing input activity missing');
+    const factRefs = inputActivity.evidenceRefs?.filter((ref) => ref.kind === 'fact') ?? [];
+    check('4.1 相关人物或事实底稿：召回证据/描述中提及的已知实体作为底稿输入',
+      factRefs.length === 1 && factRefs[0]?.ref === 'ent-gu-changfeng' &&
+        factRefs[0]?.label.includes('顾长风') &&
+        (inputActivity.inputSummary?.includes('相关人物或事实底稿') ?? false));
+    // 红线：底稿引用只带实体 id 与名，绝不把整章正文塞进消息流。
+    check('4.1 底稿引用不泄露整章正文',
+      !(inputActivity.inputSummary?.includes(chapterContent) ?? false) &&
+        !factRefs.some((ref) => ref.ref.includes(chapterContent) || ref.label.includes(chapterContent)));
+
+    // 无事实库时降级为不召回，仍照常展示基础输入（不因缺库报错）。
+    const noStoreRuntime = new OrchestrationRuntime({
+      getModelResolver: () => undefined,
+      getCheckpointer: () => undefined,
+      getFactStore: () => undefined,
+      workflows, workflowIssues, stageRunEvidence: evidence, taskRuns,
+      manuscript: {
+        readChapterContent: async (id: string) => ({ nodeId: id, content: chapterContent }),
+        writeBackRefactoredFragment: async () => ({ ok: false, reason: 'io-error' as const }),
+      },
+    });
+    const wc2 = new FakeWebContents();
+    await noStoreRuntime.locateSource(wc2.asWebContents(), randomUUID() as RunId, {
+      workflowId, stageId: locate.currentStageId, issueId: issue.issueId,
+    });
+    const inputActivity2 = wc2.taskActivity.find(
+      (event): event is Extract<BackendTaskActivityEvent, { type: 'task-activity' }> =>
+        event.type === 'task-activity' && event.phase === 'input',
+    );
+    check('4.1 无事实库时降级不召回且不报错',
+      inputActivity2 !== undefined &&
+        (inputActivity2.evidenceRefs?.filter((ref) => ref.kind === 'fact').length ?? 0) === 0 &&
+        inputActivity2.evidenceRefs?.some((ref) => ref.kind === 'issue') === true);
+  } finally {
+    await db.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+}
+
 async function main(): Promise<void> {
   console.log('=== orchestration-runtime 冲烟 ===');
   smokeReviewerJsonDefence();
   smokeTargetedVerificationRouting();
   smokeVisualDesignContracts();
   smokeToolboxCatalogContracts();
+  smokeTaskPlaybookFixtures();
+  smokeNewBookPlanningPlaybooks();
   await smokeSummonResumeTimeTravel();
   await smokeInstructionConflictOverride();
   await smokeNoFactStoreHappyPath();
   await smokeWorkflowReviewerIssuePersistence();
+  await smokeLocateSourceTask();
+  await smokeLocateSourceEndToEnd();
+  await smokeLocateSourceFactBacking();
+  await smokeRefactorLoopBoundaries();
+  await smokeLocateCandidateOverflow();
+  await smokeGenericPlaybookTask();
   await smokeExplicitFactExtraction();
   await smokeAutoExtractAfterWriter();
   await smokeBackfillFacts();

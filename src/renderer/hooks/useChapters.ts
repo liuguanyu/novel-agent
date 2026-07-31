@@ -16,7 +16,7 @@ export interface UseChaptersResult {
   content: string;
   loadingContent: boolean;
   error: string | undefined;
-  selectChapter(nodeId: string): void;
+  selectChapter(nodeId: string): Promise<void>;
 }
 
 export function useChapters(): UseChaptersResult {
@@ -26,6 +26,7 @@ export function useChapters(): UseChaptersResult {
   const [contentNodeId, setContentNodeId] = useState<string | undefined>(undefined);
   const [content, setContent] = useState<string>('');
   const contentRequestId = useRef(0);
+  const loadedNodeId = useRef<string | undefined>(undefined);
   const [loadingContent, setLoadingContent] = useState<boolean>(false);
   const [error, setError] = useState<string | undefined>(undefined);
 
@@ -49,27 +50,33 @@ export function useChapters(): UseChaptersResult {
     };
   }, []);
 
-  const selectChapter = useCallback((nodeId: string): void => {
+  const selectChapter = useCallback(async (nodeId: string): Promise<void> => {
+    if (loadedNodeId.current === nodeId) {
+      setSelectedNodeId(nodeId);
+      return;
+    }
     const requestId = contentRequestId.current + 1;
     contentRequestId.current = requestId;
     setSelectedNodeId(nodeId);
+    loadedNodeId.current = undefined;
     setContentNodeId(undefined);
     setContent('');
     setLoadingContent(true);
     setError(undefined);
-    window.novelAgent
-      .getChapterContent({ nodeId })
-      .then((dto) => {
-        if (contentRequestId.current !== requestId) return;
-        setContent(dto.content);
-        setContentNodeId(nodeId);
-        setLoadingContent(false);
-      })
-      .catch((err: unknown) => {
-        if (contentRequestId.current !== requestId) return;
+    try {
+      const dto = await window.novelAgent.getChapterContent({ nodeId });
+      if (contentRequestId.current !== requestId) throw new Error('章节切换已被新的操作替代');
+      loadedNodeId.current = nodeId;
+      setContent(dto.content);
+      setContentNodeId(nodeId);
+      setLoadingContent(false);
+    } catch (err: unknown) {
+      if (contentRequestId.current === requestId) {
         setError(err instanceof Error ? err.message : String(err));
         setLoadingContent(false);
-      });
+      }
+      throw err;
+    }
   }, []);
 
   return { projectId, tree, selectedNodeId, contentNodeId, content, loadingContent, error, selectChapter };

@@ -121,7 +121,7 @@ export function WorkbenchGraph({
         {trace.length === 0 ? (
           <div className="flex h-24 items-center justify-center gap-2 rounded-md border border-dashed border-border text-xs text-muted-foreground">
             <Circle className="size-3" aria-hidden />
-            等待 LangGraph 节点事件
+            等待专家开始执行
           </div>
         ) : (
           <div className="flex min-h-24 items-center overflow-x-auto pb-2">

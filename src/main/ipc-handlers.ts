@@ -25,6 +25,8 @@ import {
   type CheckpointHistoryDto,
   type StoryBibleDto,
   type ArchitectBoardDto,
+  type GetTaskCenterRequest,
+  type TaskCenterSnapshotDto,
   WORKFLOW_QUERY_CHANNELS, WORKFLOW_COMMAND_CHANNEL, type WorkflowCommand,
 } from '../shared/ipc/index.js';
 import { readChapterTree, readChapterContent, readManifestChapterIds, readWorkspaceProjectContext } from './novel-reader.js';
@@ -52,6 +54,34 @@ const workflowRefSchema = z.object({ workflowId: idSchema, stageId: idSchema, is
 const metaShape = { requestId: idSchema.optional(), operationId: idSchema.optional(), expectedVersion: z.number().int().nonnegative().optional(), workflowRef: workflowRefSchema.optional() };
 const workflowSnapshotQuerySchema = z.object({ ...metaShape, workflowId: idSchema.optional(), projectId: idSchema }).strict();
 const assetQuerySchema = z.object({ assetId: idSchema, projectId: idSchema }).strict();
+const taskCenterQuerySchema = z.object({
+  projectId: idSchema.optional(),
+  workflowId: idSchema.optional(),
+  limit: z.number().int().min(1).max(100).optional(),
+}).strict();
+const taskUiEffectResultCommandSchema = z.object({
+  type: z.literal('report-task-ui-effect-result'),
+  runId: idSchema,
+  operationId: idSchema,
+  result: z.object({
+    taskRunId: idSchema,
+    activityId: idSchema,
+    effectId: idSchema,
+    effectKind: z.enum([
+      'select-chapter', 'highlight-quote', 'scroll-to-evidence', 'show-diff',
+      'show-hunk-review', 'show-checkpoint', 'open-fact-sheet', 'open-dashboard',
+    ]),
+    status: z.enum(['applied', 'failed']),
+    message: z.string().trim().min(1).max(1_000),
+  }).strict(),
+}).strict();
+const controlTaskRunCommandSchema = z.object({
+  type: z.literal('control-task-run'),
+  runId: idSchema,
+  operationId: idSchema,
+  taskRunId: idSchema,
+  action: z.enum(['pause', 'resume', 'cancel']),
+}).strict();
 const authorIntentSchema = z.object({ kind: z.enum(['preserve', 'extract', 'remove']), text: z.string().trim().min(1).max(2_000) }).strict();
 const startWorkflowSchema = z.object({ ...metaShape, requestId: idSchema, operationId: idSchema, type: z.literal('start-workflow'), projectId: idSchema, workflowId: idSchema.optional(), kind: z.enum(['new-book-creation', 'legacy-book-revision']).optional(), objective: z.string().trim().min(1).max(10_000), authorIntents: z.array(authorIntentSchema).max(100).optional() }).strict();
 const workflowActionSchema = z.object({
@@ -140,6 +170,14 @@ export function registerIpcHandlers(runtime: OrchestrationRuntime, workflowServi
     if (version === null) return emptyArchitectBoardDto();
     return projectArchitectBoard(await factStore.getView(version));
   });
+
+  ipcMain.handle(
+    QUERY_CHANNELS.getTaskCenter,
+    async (_event: IpcMainInvokeEvent, raw: unknown): Promise<TaskCenterSnapshotDto> => {
+      const request = taskCenterQuerySchema.parse(raw) as GetTaskCenterRequest;
+      return runtime.getTaskCenter(request);
+    },
+  );
 
   ipcMain.on(IPC_CHANNELS.controlEvent, async (event, raw: unknown) => {
     const message = raw as FrontendCommandMessage;
@@ -238,6 +276,30 @@ export function registerIpcHandlers(runtime: OrchestrationRuntime, workflowServi
       }
       case 'run-targeted-verification': {
         void runtime.runTargetedVerification(wc, message.runId, message.workflowRef);
+        return;
+      }
+      case 'locate-source': {
+        void runtime.locateSource(wc, message.runId, message.workflowRef);
+        return;
+      }
+      case 'choose-source-location': {
+        void runtime.chooseSourceLocationCommand(wc, message.taskRunId, message.candidateId, message.operationId);
+        return;
+      }
+      case 'control-task-run': {
+        const parsed = controlTaskRunCommandSchema.safeParse(raw);
+        if (!parsed.success) return;
+        void runtime.controlTaskRun(wc, parsed.data.taskRunId, parsed.data.action, parsed.data.operationId).catch(() => {
+          // Invalid or stale control requests are rejected without creating an unhandled rejection.
+        });
+        return;
+      }
+      case 'report-task-ui-effect-result': {
+        const parsed = taskUiEffectResultCommandSchema.safeParse(raw);
+        if (!parsed.success) return;
+        void runtime.reportTaskUiEffectResult(wc, parsed.data.operationId, parsed.data.result).catch(() => {
+          // Invalid or stale effect receipts are rejected without creating an unhandled rejection.
+        });
         return;
       }
       case 'retrieve-corpus': {

@@ -12,6 +12,7 @@ import {
   QUERY_CHANNELS,
   type BackendControlEvent,
   type BackendModelTaskEvent,
+  type BackendTaskActivityEvent,
   type BackendStreamMessage,
   type FrontendCommandMessage,
   type ChapterTreeDto,
@@ -22,6 +23,8 @@ import {
   type StoryBibleDto,
   type ArchitectBoardDto,
   type WorkspaceProjectContextDto,
+  type GetTaskCenterRequest,
+  type TaskCenterSnapshotDto,
   type NovelAgentBridge,
   type Unsubscribe,
   WORKFLOW_QUERY_CHANNELS,
@@ -53,6 +56,9 @@ const api: NovelAgentBridge = {
   /** 取 architect 架构看板视图（只读投影 DTO）。 */
   getArchitectBoard(): Promise<ArchitectBoardDto> {
     return ipcRenderer.invoke(QUERY_CHANNELS.getArchitectBoard) as Promise<ArchitectBoardDto>;
+  },
+  getTaskCenter(request?: GetTaskCenterRequest): Promise<TaskCenterSnapshotDto> {
+    return ipcRenderer.invoke(QUERY_CHANNELS.getTaskCenter, request ?? {}) as Promise<TaskCenterSnapshotDto>;
   },
   getWorkflowSnapshot(request: GetWorkflowSnapshotRequest): Promise<WorkflowSnapshotResponse> { return ipcRenderer.invoke(WORKFLOW_QUERY_CHANNELS.snapshot, request) as Promise<WorkflowSnapshotResponse>; },
   getActiveWorkflow(projectId: string): Promise<WorkflowSnapshotResponse> { return ipcRenderer.invoke(WORKFLOW_QUERY_CHANNELS.active, projectId) as Promise<WorkflowSnapshotResponse>; },
@@ -93,6 +99,13 @@ const api: NovelAgentBridge = {
     };
     ipcRenderer.on(IPC_CHANNELS.modelTaskEvent, handler);
     return () => ipcRenderer.removeListener(IPC_CHANNELS.modelTaskEvent, handler);
+  },
+  onTaskActivityEvent(listener: (event: BackendTaskActivityEvent) => void): Unsubscribe {
+    const handler = (_event: IpcRendererEvent, message: unknown): void => {
+      listener(message as BackendTaskActivityEvent);
+    };
+    ipcRenderer.on(IPC_CHANNELS.taskActivityEvent, handler);
+    return () => ipcRenderer.removeListener(IPC_CHANNELS.taskActivityEvent, handler);
   },
 };
 

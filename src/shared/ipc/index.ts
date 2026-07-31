@@ -10,6 +10,7 @@ export * from './stream-messages.js';
 export * from './command-messages.js';
 export * from './control-messages.js';
 export * from './model-task-messages.js';
+export * from './task-activity-messages.js';
 export * from './query-messages.js';
 export * from './bridge.js';
 export * from './workflow-messages.js';
@@ -18,10 +19,11 @@ import type { BackendStreamMessage } from './stream-messages.js';
 import type { FrontendCommandMessage } from './command-messages.js';
 import type { BackendControlEvent } from './control-messages.js';
 import type { BackendModelTaskEvent } from './model-task-messages.js';
+import type { BackendTaskActivityEvent } from './task-activity-messages.js';
 
 /**
  * 任意方向的 IPC 消息（供网关/路由层做穷尽收窄）。
  * 后端→前端为 BackendStreamMessage（内容流）与 BackendControlEvent（控制事件）；
  * 前端→后端为 FrontendCommandMessage。
  */
-export type IpcMessage = BackendStreamMessage | BackendControlEvent | BackendModelTaskEvent | FrontendCommandMessage;
+export type IpcMessage = BackendStreamMessage | BackendControlEvent | BackendModelTaskEvent | BackendTaskActivityEvent | FrontendCommandMessage;

@@ -31,6 +31,8 @@ interface ManuscriptAxisProps {
   content: string;
   loading: boolean;
   selectedNodeId: string | undefined;
+  /** 未选章节时的任务语言空状态（§7.5）：随当前任务切换。 */
+  emptyState?: { readonly title: string; readonly hint: string };
 }
 
 const reviewHighlightKey = new PluginKey<DecorationSet>('review-highlight');
@@ -133,7 +135,7 @@ function escapeHtml(text: string): string {
 }
 
 export const ManuscriptAxis = forwardRef<ManuscriptAxisHandle, ManuscriptAxisProps>(
-  function ManuscriptAxis({ content, loading, selectedNodeId }, ref): JSX.Element {
+  function ManuscriptAxis({ content, loading, selectedNodeId, emptyState }, ref): JSX.Element {
     const editor = useEditor({
       extensions: [StarterKit],
       editable: false,
@@ -184,14 +186,23 @@ export const ManuscriptAxis = forwardRef<ManuscriptAxisHandle, ManuscriptAxisPro
     return (
       <main className="flex h-full flex-col overflow-hidden bg-background">
         <div className="border-b border-border px-4 py-2 text-sm text-muted-foreground">
-          {selectedNodeId === undefined ? '未选择章节' : loading ? '加载正文中…' : '正文'}
+          {selectedNodeId === undefined ? (emptyState?.title ?? '未选择章节') : loading ? '加载正文中…' : '正文'}
         </div>
-        <div className="flex-1 overflow-y-auto px-8 py-6">
-          <EditorContent
-            editor={editor}
-            className="reading-prose mx-auto max-w-[42rem] text-foreground"
-          />
-        </div>
+        {selectedNodeId === undefined ? (
+          <div className="flex flex-1 items-center justify-center px-8 py-6">
+            <div className="max-w-[28rem] text-center">
+              <p className="text-sm font-medium text-foreground">{emptyState?.title ?? '未选择章节'}</p>
+              <p className="mt-2 whitespace-pre-line text-sm text-muted-foreground">{emptyState?.hint ?? '在左侧选择章节以查看正文。'}</p>
+            </div>
+          </div>
+        ) : (
+          <div className="flex-1 overflow-y-auto px-8 py-6">
+            <EditorContent
+              editor={editor}
+              className="reading-prose mx-auto max-w-[42rem] text-foreground"
+            />
+          </div>
+        )}
       </main>
     );
   },

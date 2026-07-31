@@ -1,11 +1,11 @@
 import { WORKBENCH_GRAPH } from '../../core/shell/workbench-graph.js';
-import type { WorkflowSnapshotDto } from '../../shared/ipc/index.js';
+import type { BackendTaskActivityEvent, WorkflowSnapshotDto } from '../../shared/ipc/index.js';
 import type { DashboardState } from '../hooks/useDashboard.js';
 import type { ModelTaskAttemptView } from '../hooks/useModelTaskSessions.js';
 import type { WorkbenchTraceStep } from '../hooks/useWorkbenchActivities.js';
 import { WORKFLOW_TASK_GOAL } from '../components/WorkflowGraph.js';
 
-export type TaskActivitySource = 'workflow' | 'fact' | 'audit' | 'expert';
+export type TaskActivitySource = 'task' | 'workflow' | 'fact' | 'audit' | 'expert';
 
 export interface TaskActivityFeedItem {
   readonly id: string;
@@ -125,6 +125,36 @@ function workflowItem(workflow: WorkflowSnapshotDto | null): TaskActivityFeedIte
   };
 }
 
+function runtimeItems(events: ReadonlyArray<BackendTaskActivityEvent>): ReadonlyArray<TaskActivityFeedItem> {
+  return events.map((event) => {
+    if (event.type === 'task-run-completed') {
+      return {
+        id: `task:${event.taskRunId}:completed`, source: 'task' as const, label: event.title,
+        message: event.summary, tone: 'done' as const, output: event.summary,
+        feedback: '任务结果已保存，可继续下一步',
+      };
+    }
+    if (event.type === 'task-run-failed') {
+      return {
+        id: `task:${event.taskRunId}:failed:${event.failedAt}`, source: 'task' as const, label: event.title,
+        message: event.error.message, tone: 'error' as const,
+        ...(event.error.recovery === undefined ? {} : { feedback: event.error.recovery }),
+      };
+    }
+    return {
+      id: `task:${event.taskRunId}:${event.activityId}`, source: 'task' as const, label: event.title,
+      message: event.message,
+      tone: event.status === 'awaiting-author' ? 'waiting' as const : event.status === 'paused' ? 'waiting' as const : event.phase === 'failed' || event.status === 'failed' ? 'error' as const : event.status === 'cancelled' ? 'idle' as const : event.phase === 'completed' ? 'done' as const : 'running' as const,
+      ...(event.inputSummary === undefined ? {} : { input: event.inputSummary }),
+      ...(event.outputSummary === undefined ? {} : { output: event.outputSummary }),
+      ...(event.feedback === undefined && event.nextAction === undefined
+        ? {}
+        : { feedback: [event.feedback, event.nextAction].filter((item): item is string => item !== undefined).join('；') }),
+      ...(event.evidenceRefs === undefined ? {} : { details: event.evidenceRefs.map((item) => `${item.label}：${item.ref}`) }),
+    };
+  });
+}
+
 function factItems(attempt: ModelTaskAttemptView | undefined, chapterLabel: string | undefined): ReadonlyArray<TaskActivityFeedItem> {
   if (attempt === undefined) return [];
   const where = chapterLabel === undefined ? '' : `「${chapterLabel}」 · `;
@@ -180,9 +210,11 @@ export function buildTaskActivityFeed(input: {
   readonly modelTaskChapterLabel: string | undefined;
   readonly dashboard: DashboardState;
   readonly trace: ReadonlyArray<WorkbenchTraceStep>;
+  readonly taskEvents: ReadonlyArray<BackendTaskActivityEvent>;
 }): ReadonlyArray<TaskActivityFeedItem> {
-  const items: TaskActivityFeedItem[] = [];
-  const workflow = workflowItem(input.workflow);
+  const items: TaskActivityFeedItem[] = [...runtimeItems(input.taskEvents)];
+  const hasCurrentRuntimeTask = input.taskEvents.some((event) => event.status === 'running' || event.status === 'awaiting-author' || event.status === 'paused');
+  const workflow = hasCurrentRuntimeTask ? undefined : workflowItem(input.workflow);
   if (workflow !== undefined) items.push(workflow);
   items.push(...expertItems(input.trace));
   const audit = auditItem(input.dashboard);
