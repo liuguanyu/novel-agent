@@ -10,6 +10,7 @@ import {
   WorkflowRepository,
 } from './db/index.js';
 import { WorkflowApplicationService } from './workflow-application-service.js';
+import { resolveContinuation, type ContinuationScope, type InterruptContinuationRecord } from '../core/workflow/continuation.js';
 
 const directory = await mkdtemp(join(tmpdir(), 'novel-agent-workflow-'));
 const opened = await openDatabase(join(directory, 'integration.sqlite'));
@@ -277,6 +278,85 @@ try {
   await assets.rejectCandidate(rejected.candidateId, 'reject-outline');
   assert.equal((await assets.getCandidate(rejected.candidateId))?.status, 'rejected');
   assert.deepEqual((await assets.get('outline'))?.content, { title: 'new' });
+
+  // task 4.6：Main 边界校验——伪造归属、过期版本与不允许动作经 application service 命令入口拒绝。
+  // 使用仍 active 的 new-book-next-chapter（当前处于 chapter-plan）。
+  const boundary = await workflows.get('new-book-next-chapter');
+  assert.ok(boundary !== null && boundary.currentStageId !== null);
+  // 伪造 workflowRef.stageId（不属于该 workflow 任何阶段）。
+  await assert.rejects(service.command({
+    type: 'workflow-skip-stage', workflowId: 'new-book-next-chapter', expectedVersion: boundary.version,
+    workflowRef: { workflowId: 'new-book-next-chapter', stageId: 'forged-stage' },
+    requestId: 'req-forged-ref', operationId: 'op-forged-ref',
+  }), /workflowRef does not belong/);
+  // workflowRef.stageId 存在但非当前阶段（借用另一阶段的稳定 id）。
+  const nonCurrentStage = boundary.stages.find((stage) => stage.stageId !== boundary.currentStageId);
+  assert.ok(nonCurrentStage !== undefined);
+  await assert.rejects(service.command({
+    type: 'workflow-skip-stage', workflowId: 'new-book-next-chapter', expectedVersion: boundary.version,
+    workflowRef: { workflowId: 'new-book-next-chapter', stageId: nonCurrentStage.stageId },
+    requestId: 'req-noncurrent-ref', operationId: 'op-noncurrent-ref',
+  }), /must equal current stage/);
+  // 过期版本：expectedVersion 落后于实例真实 version。
+  await assert.rejects(service.command({
+    type: 'workflow-skip-stage', workflowId: 'new-book-next-chapter', expectedVersion: boundary.version - 1,
+    requestId: 'req-stale-version', operationId: 'op-stale-version',
+  }), /version conflict/);
+  // command.stageId 与当前阶段不一致同样被拒。
+  await assert.rejects(service.command({
+    type: 'workflow-skip-stage', workflowId: 'new-book-next-chapter', expectedVersion: boundary.version,
+    stageId: nonCurrentStage.stageId, requestId: 'req-stage-mismatch', operationId: 'op-stage-mismatch',
+  }), /command.stageId must equal current stage/);
+  // 归属不存在的 workflow。
+  await assert.rejects(service.command({
+    type: 'workflow-skip-stage', workflowId: 'no-such-workflow', expectedVersion: 1,
+    requestId: 'req-missing-workflow', operationId: 'op-missing-workflow',
+  }), /workflow not found/);
+  // 跨项目伪造 asset 归属：outline 属 project-new，不属于 legacy 工作流项目。
+  await assert.rejects(service.command({
+    type: 'workflow-change-asset', workflowId: 'legacy', assetId: 'outline', content: { title: 'x' },
+    expectedVersion: (await workflows.get('legacy'))?.version ?? 0,
+    requestId: 'req-cross-project-asset', operationId: 'op-cross-project-asset',
+  }), /asset does not belong to workflow project/);
+
+  // task 4.6：continuation 判别联合——resolveContinuation 校验 decision 与精确归属（standalone/workflow/issue/asset）。
+  const workflowRecord: InterruptContinuationRecord = {
+    interruptId: 'int-1', scope: { kind: 'workflow', workflowRef: { workflowId: 'w', stageId: 's' }, runId: 'r' },
+    sourceNode: 'writer', continuation: { kind: 'resume-source-node', sourceNode: 'writer' },
+    allowedDecisionKinds: ['correct', 'modify'], createdAt: new Date().toISOString(),
+  };
+  // 不允许的 decision → decision-not-allowed。
+  assert.deepEqual(resolveContinuation(workflowRecord, 'delete', workflowRecord.scope), { ok: false, reason: 'decision-not-allowed' });
+  // scope 精确匹配 → ok，返回持久化的 continuation。
+  assert.deepEqual(resolveContinuation(workflowRecord, 'modify', workflowRecord.scope), { ok: true, continuation: workflowRecord.continuation });
+  // 同 kind 但 stageId 不同 → scope-mismatch。
+  const wrongStage: ContinuationScope = { kind: 'workflow', workflowRef: { workflowId: 'w', stageId: 'other' }, runId: 'r' };
+  assert.deepEqual(resolveContinuation(workflowRecord, 'modify', wrongStage), { ok: false, reason: 'scope-mismatch' });
+  // kind 不同（standalone vs workflow）→ scope-mismatch。
+  const standaloneScope: ContinuationScope = { kind: 'standalone', runId: 'r' };
+  assert.deepEqual(resolveContinuation(workflowRecord, 'modify', standaloneScope), { ok: false, reason: 'scope-mismatch' });
+  // standalone 记录与相同 standalone scope 匹配 → ok（standalone resume 兼容）。
+  const standaloneRecord: InterruptContinuationRecord = {
+    interruptId: 'int-2', scope: standaloneScope, sourceNode: 'writer',
+    continuation: { kind: 'resume-source-node', sourceNode: 'writer' }, allowedDecisionKinds: ['correct'], createdAt: new Date().toISOString(),
+  };
+  assert.deepEqual(resolveContinuation(standaloneRecord, 'correct', standaloneScope), { ok: true, continuation: standaloneRecord.continuation });
+  // issue scope 携带 issueId，issueId 不同 → scope-mismatch。
+  const issueRecord: InterruptContinuationRecord = {
+    interruptId: 'int-3', scope: { kind: 'issue', workflowRef: { workflowId: 'w', stageId: 's', issueId: 'i1' }, issueId: 'i1', runId: 'r' },
+    sourceNode: 'reviewer', continuation: { kind: 'resume-issue-fix', issueId: 'i1' }, allowedDecisionKinds: ['modify'], createdAt: new Date().toISOString(),
+  };
+  const otherIssueScope: ContinuationScope = { kind: 'issue', workflowRef: { workflowId: 'w', stageId: 's', issueId: 'i2' }, issueId: 'i2', runId: 'r' };
+  assert.deepEqual(resolveContinuation(issueRecord, 'modify', otherIssueScope), { ok: false, reason: 'scope-mismatch' });
+  assert.deepEqual(resolveContinuation(issueRecord, 'modify', issueRecord.scope), { ok: true, continuation: issueRecord.continuation });
+  // asset scope 按 assetId/changeSetId 匹配。
+  const assetScope: ContinuationScope = { kind: 'asset', assetId: 'a1', changeSetId: 'cs1', runId: 'r' };
+  const assetRecord: InterruptContinuationRecord = {
+    interruptId: 'int-4', scope: assetScope, sourceNode: 'writer',
+    continuation: { kind: 'resume-asset-maintenance', assetId: 'a1' }, allowedDecisionKinds: ['modify'], createdAt: new Date().toISOString(),
+  };
+  assert.deepEqual(resolveContinuation(assetRecord, 'modify', { kind: 'asset', assetId: 'a1', changeSetId: 'cs-other', runId: 'r' }), { ok: false, reason: 'scope-mismatch' });
+  assert.deepEqual(resolveContinuation(assetRecord, 'modify', assetScope), { ok: true, continuation: assetRecord.continuation });
 
   // task 3.7：单项目 active 唯一约束——同一 project 已有 active workflow 时再插入 active 实例
   // 触发 idx_workflow_active_project 部分唯一索引冲突。用独立 project 自建首个 active 实例后重复插入。
