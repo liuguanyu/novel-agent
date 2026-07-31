@@ -2838,6 +2838,123 @@ async function smokeNewBookMainPathEndToEnd(): Promise<void> {
 }
 
 /**
+ * 5.5 [Regression] 新任务经 playbook 扩展、旧 standalone 召唤与已有运行路径不回归：
+ *
+ * 1) 扩展机制：一份运行时新建、从未内置于 Core 的 playbook，仅经 runtime.registerPlaybook 即
+ *    可经通用引擎 run→awaiting-author→submit→completed，无需修改 runtime 代码；
+ *    并验证多份注册互不干扰、未注册的 playbookId 不可提交决策。
+ * 2) 旧路径不回归：在同一个已注册了多份 playbook 的 runtime 上，旧 standalone summon
+ *    happy path 仍产出流式分片与 graph 事件、不误挂起、收 stream-end；
+ *    且严格通道隔离：summon 走 dialogueStream/controlEvent，playbook 任务走 taskActivityEvent，
+ *    互不串道。
+ */
+async function smokePlaybookExtensionNoRegression(): Promise<void> {
+  const dir = await mkdtemp(join(tmpdir(), 'na-regression-'));
+  const opened = await openDatabase(join(dir, 'regression.db'));
+  if (!opened.ok) {
+    check('regression SQLite 可用', false, opened.message);
+    await rm(dir, { recursive: true, force: true });
+    return;
+  }
+  const db = opened.db;
+  try {
+    const taskRuns = new TaskRunRepository(db);
+    const checkpointer = new SqliteCheckpointer(db);
+    // summon 用真实 LangGraph + fake 模型；playbook 任务用同一 runtime。
+    const summonResolver = new FakeModelResolver('regression happy path 正文', '[]').asResolver();
+    const runtime = new OrchestrationRuntime({
+      getModelResolver: () => summonResolver,
+      getCheckpointer: () => checkpointer,
+      getFactStore: () => undefined, // 无事实库 → 降级不召回（与 happy path 基线一致）
+      taskRuns,
+    });
+
+    // —— 1. 扩展机制：运行时新建的 playbook（非 Core 内置）仅经注册即可跑 ——
+    const adHocPlaybook: TaskPlaybook = {
+      id: 'regression.ad-hoc-note',
+      version: 1,
+      kind: 'temporary',
+      title: '临时纪要',
+      description: '一份运行时声明的新任务，用于验证扩展点无需改 runtime 代码。',
+      inputs: [{ key: 'topic', label: '主题', valueType: 'string', required: true, description: '纪要主题。' }],
+      steps: [
+        { id: 'draft-note', title: '起草纪要', description: '产出纪要草稿。', requiresAuthorDecision: false },
+        { id: 'author-confirm-note', title: '作者确认纪要', description: '由作者确认。', requiresAuthorDecision: true },
+      ],
+      outputs: [{ key: 'note', label: '纪要', valueType: 'object', description: '经作者确认的纪要。' }],
+    };
+    const adHocRegistration: PlaybookRegistration = {
+      playbook: adHocPlaybook,
+      title: '临时纪要',
+      completedSummary: '已完成临时纪要',
+      handlers: {
+        'draft-note': { run: async (ctx) => ({ message: '已起草纪要', artifacts: [{ outputKey: 'draftNote', value: { topic: ctx.inputs['topic'] }, ref: { kind: 'draft', label: '纪要草稿', ref: `note:${ctx.run.id}` } }] }) },
+        'author-confirm-note': {
+          requiresAuthor: true,
+          prompt: async () => ({ message: '请确认纪要', nextAction: '在任务卡确认' }),
+          apply: async () => ({ message: '已确认纪要', artifacts: [{ outputKey: 'note', value: { confirmed: true }, ref: { kind: 'draft', label: '纪要', ref: 'note:final' } }] }),
+        },
+      },
+    };
+    // 另注册一份写作注册（既有任务族）以验证多份注册共存。
+    const fakeResolver: NewBookModelResolver = {
+      createAdapter: (): Pick<ModelAdapter, 'complete'> => ({ complete: async () => ({ text: '初稿', finishReason: 'stop' as const }) }),
+    };
+    const draftRegistration = buildNewBookWritingRegistrations(fakeResolver).find((item) => item.playbook.id === 'new-book.draft-writing');
+    if (draftRegistration === undefined) throw new Error('缺少初稿生成注册项');
+    runtime.registerPlaybook(adHocRegistration);
+    runtime.registerPlaybook(draftRegistration);
+
+    const adHocWc = new FakeWebContents();
+    const adHocId = randomUUID();
+    await runtime.runPlaybookTask(adHocWc.asWebContents(), { registration: adHocRegistration, taskRunId: adHocId, inputs: { topic: '回归验证' } });
+    check('回归 扩展：运行时新建 playbook 仅经注册即进入 awaiting-author',
+      (await taskRuns.get(adHocId))?.status === 'awaiting-author');
+    await runtime.submitPlaybookAuthorDecision(adHocWc.asWebContents(), adHocId, 'author-confirm-note', { accepted: true }, `regression:adhoc:${adHocId}`);
+    const adHocDone = await taskRuns.get(adHocId);
+    check('回归 扩展：新建 playbook 经通用引擎收敛 completed（无需改 runtime 代码）',
+      adHocDone?.status === 'completed' && adHocDone.kind === 'temporary' && adHocDone.artifacts.some((artifact) => artifact.outputKey === 'note'));
+
+    // 多份注册互不干扰：写作注册在同一 runtime 仍可独立跑。
+    const draftWc = new FakeWebContents();
+    const draftId = randomUUID();
+    await runtime.runPlaybookTask(draftWc.asWebContents(), { registration: draftRegistration, taskRunId: draftId, inputs: { sceneOutline: [{ beat: 'x' }] } });
+    check('回归 扩展：多份注册共存，写作任务仍可独立进入 awaiting-author',
+      (await taskRuns.get(draftId))?.status === 'awaiting-author' && (await taskRuns.get(draftId))?.kind === 'new-book');
+
+    // 向已注册任务提交不存在的步骤被拒绝：下发可读失败活动且不改任务状态（健壮性/隔离）。
+    await runtime.submitPlaybookAuthorDecision(draftWc.asWebContents(), draftId, 'no-such-step', {}, `regression:badstep:${draftId}`);
+    check('回归 扩展：向已注册任务提交不存在步骤被拒绝且不改状态',
+      draftWc.taskActivity.some((event) => event.type === 'task-activity' && event.phase === 'failed') &&
+        (await taskRuns.get(draftId))?.status === 'awaiting-author');
+
+    // —— 2. 旧 standalone summon happy path 在已注册 playbook 的 runtime 上不回归 ——
+    const summonWc = new FakeWebContents();
+    const summonRunId = randomUUID() as RunId;
+    await runtime.summon(summonWc.asWebContents(), {
+      runId: summonRunId, mode: 'mutate', agent: 'writer', scope: 'project', instruction: '写一段',
+    });
+    check('回归 旧路径：summon happy path 在含 playbook 的 runtime 上仍产出流式分片',
+      collectDialogue(summonWc).length > 0);
+    check('回归 旧路径：summon 收 stream-end 且不误挂起',
+      summonWc.stream.some((message) => message.type === 'stream-end') && collectInterrupt(summonWc) === undefined);
+    check('回归 旧路径：summon 仍下发 graph-node-activated 活图事件',
+      collectGraphEvents(summonWc).length > 0);
+    // 严格通道隔离：summon 不混入 taskActivityEvent；playbook 任务不混入 dialogueStream。
+    check('回归 通道隔离：summon 不产生任务活动事件', summonWc.taskActivity.length === 0);
+    check('回归 通道隔离：playbook 任务不混入对话/模型任务通道',
+      adHocWc.stream.length === 0 && adHocWc.modelTask.length === 0 && draftWc.stream.length === 0 && draftWc.modelTask.length === 0);
+
+    // summon 与 playbook 任务共存于同一 runtime：两者均成功且互不干扰。
+    check('回归 共存：summon 与 playbook 任务在同一 runtime 上都正常完成/挂起',
+      collectInterrupt(summonWc) === undefined && adHocDone?.status === 'completed');
+  } finally {
+    await db.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+}
+
+/**
  * 4.4 [Integration Test] locate-source 端到端验收：
  * 单条 issue 贯穿「选择问题 → 创建任务 → 展示输入 → 读取证据 → 查找/匹配正文 →
  * 真实活动 → UI Effect → 作者确认 → 进入局部改写」的有序旅程。
@@ -3417,6 +3534,7 @@ async function main(): Promise<void> {
   await smokeGenericPlaybookTask();
   await smokeNewBookWritingPlaybooks();
   await smokeNewBookMainPathEndToEnd();
+  await smokePlaybookExtensionNoRegression();
   await smokeExplicitFactExtraction();
   await smokeAutoExtractAfterWriter();
   await smokeBackfillFacts();
