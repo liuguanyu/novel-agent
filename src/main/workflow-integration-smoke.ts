@@ -278,6 +278,64 @@ try {
   assert.equal((await assets.getCandidate(rejected.candidateId))?.status, 'rejected');
   assert.deepEqual((await assets.get('outline'))?.content, { title: 'new' });
 
+  // task 3.7：单项目 active 唯一约束——同一 project 已有 active workflow 时再插入 active 实例
+  // 触发 idx_workflow_active_project 部分唯一索引冲突。用独立 project 自建首个 active 实例后重复插入。
+  const uniqueProject = 'project-active-unique';
+  const firstActive = await workflows.create({
+    workflowId: 'active-first', projectId: uniqueProject, kind: 'new-book-creation',
+    templateVersion: '1', objective: 'first active', status: 'active', currentStageId: null, stages: [],
+  });
+  assert.equal(firstActive.status, 'active');
+  await assert.rejects(workflows.create({
+    workflowId: 'active-second', projectId: uniqueProject, kind: 'new-book-creation',
+    templateVersion: '1', objective: 'second active', status: 'active', currentStageId: null, stages: [],
+  }), /UNIQUE|constraint/i);
+  // 同 project 的非 active（completed）实例不受唯一约束限制，可正常创建。
+  const completedSibling = await workflows.create({
+    workflowId: 'active-completed-sibling', projectId: uniqueProject, kind: 'new-book-creation',
+    templateVersion: '1', objective: 'completed sibling', status: 'completed', currentStageId: null, stages: [],
+  });
+  assert.equal(completedSibling.status, 'completed');
+
+  // task 3.7：base version 冲突——两个 candidate 基于同一 baseVersion，先确认其一抬高资产版本，
+  // 再确认另一个陈旧 candidate 时 baseVersion 已不等于 current，confirmCandidate 抛版本冲突。
+  const outlineNow = await assets.get('outline');
+  assert.ok(outlineNow !== null);
+  const staleCandidate = await assets.createCandidate('outline', { title: 'stale-base' }, { runId: 'stale-base' });
+  const freshCandidate = await assets.createCandidate('outline', { title: 'fresh-base' }, { runId: 'fresh-base' });
+  assert.equal(staleCandidate.baseVersion, outlineNow.version);
+  assert.equal(freshCandidate.baseVersion, outlineNow.version);
+  await assets.confirmCandidate(freshCandidate.candidateId, 'confirm-fresh-base');
+  await assert.rejects(
+    assets.confirmCandidate(staleCandidate.candidateId, 'confirm-stale-base'),
+    /version conflict/,
+  );
+  assert.equal((await assets.getCandidate(staleCandidate.candidateId))?.status, 'pending');
+  assert.deepEqual((await assets.get('outline'))?.content, { title: 'fresh-base' });
+
+  // task 3.7：应用重启恢复——用第二个连接重开同一数据库文件，仿真进程重启后从持久化重建实例，
+  // 断言 stage 快照、currentStageId、version 与关闭前完全一致（不依赖内存态）。
+  const beforeRestart = await workflows.get('new-book');
+  assert.ok(beforeRestart !== null);
+  const reopened = await openDatabase(join(directory, 'integration.sqlite'));
+  if (!reopened.ok) throw new Error(reopened.message);
+  try {
+    const restarted = new WorkflowRepository(reopened.db);
+    const recovered = await restarted.get('new-book');
+    assert.ok(recovered !== null);
+    assert.equal(recovered.version, beforeRestart.version);
+    assert.equal(recovered.currentStageId, beforeRestart.currentStageId);
+    assert.equal(recovered.status, beforeRestart.status);
+    assert.deepEqual(
+      recovered.stages.map((stage) => [stage.stageId, stage.templateStageId, stage.status, stage.impactStatus ?? null]),
+      beforeRestart.stages.map((stage) => [stage.stageId, stage.templateStageId, stage.status, stage.impactStatus ?? null]),
+    );
+    // 重启后单项目 active 唯一约束仍生效（uniqueProject 仅 active-first 为 active）。
+    assert.equal((await restarted.getActive(uniqueProject))?.workflowId, 'active-first');
+  } finally {
+    await reopened.db.close();
+  }
+
   console.log('workflow integration smoke: ok');
 } finally {
   await db.close();

@@ -17,13 +17,13 @@
 
 ## 3. SQLite 持久化与应用服务
 
-- [ ] 3.1 [Main/SQLite] 新增可回滚迁移，创建 workflow instance、stage snapshot、stage-run link、artifact ref、creative asset/version/dependency/change-set/impact、workflow issue、issue-checkpoint/verification link 表及必要索引
-- [ ] 3.2 [Main] 实现 workflow repository 的创建、查询、乐观版本更新、项目 active workflow 唯一约束和事务化保存
-- [ ] 3.3 [Main] 实现 workflow application service，作为阶段状态、run 关联和问题生命周期的唯一写入口
-- [ ] 3.4 [Main] 实现模板版本固定与实例阶段快照恢复，确保升级后既有实例不被静默改道
-- [ ] 3.5 [Main] 实现 creative asset repository 与应用服务，版本化提交 change set，并将 confirmed 人物/世界观约束映射到 Story Bible 来源联合
-- [ ] 3.6 [Main] 实现基于显式 asset refs、Story Bible 关系和稳定 scope 的影响分析，持久化独立 StageImpactStatus（stale/needs-review/conflicting）与作者处理决定
-- [ ] 3.7 [Main/Test] 覆盖应用重启恢复、单项目 active 唯一约束、资产/Story Bible 原子提交回滚、base version 冲突、旧版本命令冲突和重复 operation 幂等测试
+- [x] 3.1 [Main/SQLite] 新增可回滚迁移，创建 workflow instance、stage snapshot、stage-run link、artifact ref、creative asset/version/dependency/change-set/impact、workflow issue、issue-checkpoint/verification link 表及必要索引（`src/main/db/migrations.ts` 建 `workflow_instances`（含 `CREATE UNIQUE INDEX idx_workflow_active_project ON workflow_instances(project_id) WHERE status='active'` 单项目 active 唯一）、`workflow_stages`、`workflow_stage_runs`、`workflow_artifacts`、`creative_assets`+`_versions`/`_dependencies`/`_change_sets`/`_impacts`/`_candidates`/`_impact_analyses`、`workflow_issues`+`_history`/`_checkpoints`/`_verifications`、`continuations`、`operation_ids` 及全部索引；每条 migration 经 `sqlite-database.ts` `applyMigrations` 的 `db.transaction` 原子 apply-or-ROLLBACK + `schema_migrations` 版本追踪，符合本项目前向迁移约定。）
+- [x] 3.2 [Main] 实现 workflow repository 的创建、查询、乐观版本更新、项目 active workflow 唯一约束和事务化保存（`src/main/db/workflow-repository.ts`：`create`/`get`/`getActive`（active 唯一读）/`update` 与 `transition` 均 `db.transaction` 事务化；乐观并发经 `version===expectedVersion` 校验，冲突抛 `OptimisticVersionConflictError`（消息 `version conflict`）；active 唯一由 3.1 部分唯一索引在 `create` 时强制。）
+- [x] 3.3 [Main] 实现 workflow application service，作为阶段状态、run 关联和问题生命周期的唯一写入口（`src/main/workflow-application-service.ts` 的 `command()` 为唯一写入口，覆盖 `start-workflow`/`workflow-start-stage`/`workflow-confirm-stage`/`workflow-select-issue`/`workflow-update-goal`/`change-asset` 等，内部委派 repository 事务并复用 operationId 幂等。）
+- [x] 3.4 [Main] 实现模板版本固定与实例阶段快照恢复，确保升级后既有实例不被静默改道（`workflow_instances.template_version` 列固定实例创建时的模板版本，`toCore`/`get` 从 `workflow_stages` 快照恢复各阶段 status/impactStatus/runIds，升级模板不改既有实例阶段。）
+- [x] 3.5 [Main] 实现 creative asset repository 与应用服务，版本化提交 change set，并将 confirmed 人物/世界观约束映射到 Story Bible 来源联合（`src/main/db/creative-asset-repository.ts`：`createCandidate`→`confirmCandidate` 版本化提交 change set（version=baseVersion+1），仅将 confirmed `character` 资产映射 Story Bible `entities`（`asset:character:*`），`book-outline` 等不入；集成 smoke L262-265 断言人物入 entities、outline 不入。）
+- [x] 3.6 [Main] 实现基于显式 asset refs、Story Bible 关系和稳定 scope 的影响分析，持久化独立 StageImpactStatus（stale/needs-review/conflicting）与作者处理决定（`confirmCandidate` 据 `creative_asset_dependencies` 生成 `creative_asset_impacts` 并按 `maxImpact` 更新 `workflow_stages.impact_status`（独立于 StageStatus），`resolveImpact` 记录作者 decision 并回收 impactStatus；集成 smoke L241-247 断言 impactStatus 变 needs-review 而 status 不变、resolve 后回 none。）
+- [x] 3.7 [Main/Test] 覆盖应用重启恢复、单项目 active 唯一约束、资产/Story Bible 原子提交回滚、base version 冲突、旧版本命令冲突和重复 operation 幂等测试（`src/main/workflow-integration-smoke.ts`（`npm run smoke:workflow` 全绿）：旧版本命令冲突 L208-211（`/version conflict/`）、重复 operation 幂等 L239-240、资产原子回滚 L267-273（触发器强制失败→版本不变/candidate 仍 pending）、Story Bible 原子映射 L262-265；本次新增三点显式断言——①单项目 active 唯一：独立 project 建首个 active 后再 `create` active 实例 `assert.rejects(/UNIQUE|constraint/)`，且 completed 兄弟实例不受限；②base version 冲突：同 baseVersion 两 candidate，先 confirm 抬版本，再 confirm 陈旧 candidate `assert.rejects(/version conflict/)` 且其仍 pending、资产内容为先确认者；③应用重启恢复：第二连接重开同库文件 `new WorkflowRepository` `get('new-book')` 断言 version/currentStageId/status/stages 快照一致，且重启后 active 唯一读仍生效。）
 
 ## 4. IPC 契约与 Main 边界验证
 
