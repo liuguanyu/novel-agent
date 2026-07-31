@@ -4,7 +4,7 @@
 
 ## Phase 1：规格与产品骨架
 
-- [ ] 1.1 [Core] 定义 `TaskRuntime`、`TaskRun`、`TaskPlaybook`、任务状态、输入、产物、作者决策及统一引用 DTO，旧作与新书共用且不依赖 Electron/React。
+- [x] 1.1 [Core] 定义 `TaskRuntime`、`TaskRun`、`TaskPlaybook`、任务状态、输入、产物、作者决策及统一引用 DTO，旧作与新书共用且不依赖 Electron/React。（`src/core/task-runtime/task-model.ts` 已定义全部框架无关契约：`TaskKind`(legacy-book/new-book/temporary)、`TaskRunStatus`(queued/running/awaiting-author/paused/completed/failed/cancelled 七态)、`TaskValueType`、`TaskInputDefinition`、`TaskStepDefinition`(含 requiresAuthorDecision 作者决策点)、`TaskOutputDefinition`、泛型 `TaskPlaybook`、`TaskRunRefs`(project/book/manuscript/workflow/workflowStage/issue 均可空，旧作与新书共用)、`TaskRunArtifact`、`TaskAuthorDecision`、`TaskRunTimestamps`、`TaskRunFailure`、`TaskRun`；输入契约明确「可审计、作者可见，绝不存隐藏 prompt/思维链」。`TaskRuntime` 落为声明式 `TaskPlaybook` 契约 + Core 纯函数（`task-transition.ts` 的 `transitionTaskRun`、`task-run-factory.ts` 的 `createTaskRunFromPlaybook`/`positionTaskRunAtStep`/`taskRunHasRequiredInputs`），通用执行引擎在 Main 的 `OrchestrationRuntime`。全部不依赖 Electron/React。)
 - [ ] 1.2 [Core/IPC] 定义 task activity、model audit、heartbeat、UI Effect 和 task-center 查询契约；保留 standalone/旧运行兼容引用。（已完成 task activity/UI Effect 基础契约与 task-center 持久查询契约；model audit 契约已随 3.5 补齐：`TaskModelAuditDto`（白名单字段 goal/agent/tier/inputSummary/contextRefs/constraints/outputSummary/structuredResult/toolResults/validation/adoption）已入 `task-activity-messages.ts` 并作为 `TaskActivityEvent.modelAudit` 可选字段；统一 heartbeat 契约仍待补）
 - [x] 1.3 [Renderer] 建立产品栏、轻量流程导航、当前任务卡、三栏工作区、常驻底部消息流和按需任务中心骨架。
 - [ ] 1.4 [Renderer] 当前任务卡展示任务目标、输入、执行方式、输出、状态/进度、作者操作和下一步；Workflow Graph 默认轻量摘要。（基础任务卡与轻量流程已完成，统一 playbook、问题详情和等待/失败操作待补）
