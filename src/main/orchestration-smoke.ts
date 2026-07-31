@@ -20,6 +20,7 @@ import {
   CreativeAssetRepository,
   openDatabase,
   SqliteCheckpointer,
+  SqliteContinuationRecordService,
   SqliteFactStore,
   SqliteStageRunEvidenceRecorder,
   TaskRunRepository,
@@ -396,6 +397,113 @@ async function smokeSummonResumeTimeTravel(): Promise<void> {
 
   await db.close();
   await rm(dir, { recursive: true, force: true });
+}
+
+/*
+ * task 5.4/5.6：interrupt continuation record 的真实持久化与 resume 路由行为（Main 级）。
+ * 复刻纠偏中断（writer 在 draft-writing 阶段，softChapterNodeId 故意说错章号），但接线
+ * workflows + SqliteContinuationRecordService，使中断时真实落库 continuation record。断言：
+ *  - 5.4：中断写入 continuation record（scope=workflow、continuation=resume-source-node、allowedDecisionKinds 含 correct）；
+ *  - 5.6：correct resume 经 continuation resolver 路由回 sourceNode（非固定 writer 假设）、干净完成并消费 record；
+ *    重复 resume 因 record 已消费且运行已回收 → continuation not found（幂等）；伪造 workflowRef ownership → 拒绝。
+ */
+async function smokeWorkflowContinuationResume(): Promise<void> {
+  const dir = await mkdtemp(join(tmpdir(), 'na-continuation-'));
+  const opened = await openDatabase(join(dir, 'continuation.db'));
+  if (!opened.ok) {
+    check('continuation SQLite 可用', false, opened.message);
+    await rm(dir, { recursive: true, force: true });
+    return;
+  }
+  const db = opened.db;
+  try {
+    const workflows = new WorkflowRepository(db);
+    const service = new WorkflowApplicationService(workflows, new CreativeAssetRepository(db), new WorkflowIssueRepository(db));
+    const started = await service.command({
+      type: 'start-workflow', workflowId: 'cont-workflow', projectId: 'cont-project',
+      kind: 'new-book-creation', objective: 'continuation resume', requestId: 'cont-start', operationId: 'cont-start-op',
+    });
+    if (started === null) throw new Error('continuation workflow fixture failed');
+    // 逐阶段推进到 draft-writing（writer 合法阶段）。
+    const evidence = new SqliteStageRunEvidenceRecorder(db);
+    for (const [index, templateStageId] of ['concept', 'worldbuilding', 'character-design', 'book-outline', 'chapter-plan', 'scene-outline'].entries()) {
+      const current = await workflows.get('cont-workflow');
+      if (current === null || current.currentStageId === null) throw new Error(`continuation fixture missing ${templateStageId}`);
+      const stageId = current.currentStageId;
+      const stepRunId = `cont:${templateStageId}:${index}`;
+      await service.command({ type: 'workflow-start-stage', workflowId: 'cont-workflow', stageId, expectedVersion: current.version, runId: stepRunId, requestId: `${stepRunId}:s`, operationId: `${stepRunId}:s-op` });
+      await evidence.record({ runId: stepRunId, workflowRef: { workflowId: 'cont-workflow', stageId }, status: 'started' });
+      await evidence.record({ runId: stepRunId, workflowRef: { workflowId: 'cont-workflow', stageId }, status: 'completed' });
+      const awaiting = await workflows.get('cont-workflow');
+      if (awaiting === null || awaiting.currentStageId === null) throw new Error('continuation fixture stalled');
+      await service.command({ type: 'workflow-confirm-stage', workflowId: 'cont-workflow', stageId: awaiting.currentStageId, expectedVersion: awaiting.version, requestId: `${stepRunId}:c`, operationId: `${stepRunId}:c-op` });
+    }
+    const draft = await workflows.get('cont-workflow');
+    if (draft === null || draft.currentStageId === null) throw new Error('continuation fixture not at draft-writing');
+    const draftStage = draft.stages.find((s) => s.stageId === draft.currentStageId);
+    check('task 5.4：夹具推进到 draft-writing', draftStage?.templateStageId === 'draft-writing');
+    const workflowRef = { workflowId: 'cont-workflow', stageId: draft.currentStageId };
+
+    const factStore = new SqliteFactStore(db);
+    const version = await factStore.appendVersion();
+    await factStore.putEntity(version, sampleEntity(), null);
+    const continuationRecords = new SqliteContinuationRecordService(db);
+    const runtime = new OrchestrationRuntime({
+      getModelResolver: () => new FakeModelResolver('顾长风缓步走入津门夜色。', '[]').asResolver(),
+      getCheckpointer: () => new SqliteCheckpointer(db),
+      getFactStore: () => factStore,
+      workflows,
+      stageRunEvidence: evidence,
+      continuationRecords,
+    });
+
+    // 召唤 writer（draft-writing 内 in-stage）+ 错章号 → 触发纠偏中断 → 写入 continuation record。
+    const runId = randomUUID() as RunId;
+    const wc = new FakeWebContents();
+    await runtime.summon(wc.asWebContents(), {
+      runId, mode: 'mutate', agent: 'writer', scope: 'project',
+      softChapterNodeId: 'chapter-B', keywords: ['顾长风'], instruction: '写一段顾长风登场', workflowRef,
+    });
+    check('task 5.4：纠偏挂起 interrupt-raised', collectInterrupt(wc) !== undefined);
+    const saved = await continuationRecords.getByRunId(runId);
+    check('task 5.4：中断写入 continuation record（scope=workflow）',
+      saved !== null && saved.scope.kind === 'workflow' && saved.continuation.kind === 'resume-source-node'
+      && saved.allowedDecisionKinds.includes('correct'));
+
+    // 伪造 ownership：传入与运行 owned ref 不同的 workflowRef → Main 侧拒绝（不消费 record）。
+    const forgedWc = new FakeWebContents();
+    await runtime.resume(forgedWc.asWebContents(), runId, { kind: 'correct', optionId: 'keep-stated' }, { workflowId: 'cont-workflow', stageId: 'not-current' });
+    check('task 5.6：伪造 workflowRef ownership 的 resume 被拒',
+      forgedWc.stream.some((m) => m.type === 'stream-error' && m.error.category === 'validation'));
+    check('task 5.6：被拒 resume 不消费 continuation record', (await continuationRecords.getByRunId(runId)) !== null);
+
+    // 正向 correct resume → 经 resolver 路由回 sourceNode、干净完成、消费 record。
+    // 正向 correct resume → 经 resolver 路由回 sourceNode、干净完成、消费 record。
+    // 注：resume 复用现存 run 账本（保 thread/parent 游标连续），故 #drive 仍将下行事件发回首次 summon 的 wc、
+    // 非本次 resume 传入的 resumeWc（既有行为）。因此断言基于“record 已消费 + 不再挂起 + 原 wc 第二段 stream-end”。
+    const streamEndsBefore = wc.stream.filter((m) => m.type === 'stream-end').length;
+    const interruptsBefore = wc.control.filter((m) => m.type === 'interrupt-raised').length;
+    const resumeWc = new FakeWebContents();
+    await runtime.resume(resumeWc.asWebContents(), runId, { kind: 'correct', optionId: 'keep-stated' });
+    check('task 5.6：correct resume 干净完成（原 wc 新增 stream-end、无 stream-error）',
+      wc.stream.every((m) => m.type !== 'stream-error')
+      && wc.stream.filter((m) => m.type === 'stream-end').length > streamEndsBefore
+      && resumeWc.stream.every((m) => m.type !== 'stream-error'),
+      `endsBefore=${streamEndsBefore} endsAfter=${wc.stream.filter((m) => m.type === 'stream-end').length}`);
+    check('task 5.6：correct resume 不再重复挂起（factsChecked 防死循环）',
+      wc.control.filter((m) => m.type === 'interrupt-raised').length === interruptsBefore
+      && collectInterrupt(resumeWc) === undefined);
+    check('task 5.6：resume 后 continuation record 已消费', (await continuationRecords.getByRunId(runId)) === null);
+
+    // 重复 resume：record 已消费且运行已回收 → continuation not found（幂等）。
+    const dupWc = new FakeWebContents();
+    await runtime.resume(dupWc.asWebContents(), runId, { kind: 'correct', optionId: 'keep-stated' });
+    check('task 5.6：重复 resume 幂等拒绝（continuation not found）',
+      dupWc.stream.some((m) => m.type === 'stream-error' && /continuation not found/.test(m.error.message)));
+  } finally {
+    await db.close();
+    await rm(dir, { recursive: true, force: true });
+  }
 }
 
 /**
@@ -3845,6 +3953,7 @@ async function main(): Promise<void> {
   await smokeInstructionConflictOverride();
   await smokeNoFactStoreHappyPath();
   await smokeWorkflowReviewerIssuePersistence();
+  await smokeWorkflowContinuationResume();
   await smokeLocateSourceTask();
   await smokeLocateSourceEndToEnd();
   await smokeLocateSourceFactBacking();
