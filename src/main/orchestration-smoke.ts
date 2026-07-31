@@ -3608,6 +3608,88 @@ async function smokeSupplementTaskInput(): Promise<void> {
   }
 }
 
+/**
+ * 3.5 冲烟：模型交互可审计且不泄露 hidden CoT。
+ * 驱动新书连贯性检查 playbook（一个纯模型步），断言：① output 活动携带 modelAudit 白名单字段（目标/
+ * 输入/上下文/约束/输出/采用状态）；② 采用状态为 pending；③ modelAudit 不含任何思维链/内部 prompt/原始回复字段；
+ * ④ 从任务仓储恢复的持久化活动仍含 modelAudit。
+ */
+async function smokeModelAuditNoCoT(): Promise<void> {
+  const dir = await mkdtemp(join(tmpdir(), 'na-model-audit-'));
+  const opened = await openDatabase(join(dir, 'model-audit.db'));
+  if (!opened.ok) {
+    check('model-audit SQLite 可用', false, opened.message);
+    await rm(dir, { recursive: true, force: true });
+    return;
+  }
+  const db = opened.db;
+  try {
+    const taskRuns = new TaskRunRepository(db);
+    // fake 模型：故意回一段包含“思考过程”字样的文本，验证系统不会把原始回复/思维链写进审计。
+    const fakeResolver: NewBookModelResolver = {
+      createAdapter: (): Pick<ModelAdapter, 'complete'> => ({
+        complete: async () => ({ text: '【思考过程：先比对设定…】候选问题：主角年龄前后不一致', finishReason: 'stop' as const }),
+      }),
+    };
+    const coherence = buildNewBookWritingRegistrations(fakeResolver).find((item) => item.playbook.id === 'new-book.coherence-check');
+    if (coherence === undefined) throw new Error('缺少连贯性检查注册项');
+
+    const runtime = new OrchestrationRuntime({
+      getModelResolver: () => undefined,
+      getCheckpointer: () => undefined,
+      getFactStore: () => undefined,
+      taskRuns,
+    });
+    runtime.registerPlaybook(coherence);
+
+    const wc = new FakeWebContents();
+    const runId = randomUUID();
+    await runtime.runPlaybookTask(wc.asWebContents(), {
+      registration: coherence,
+      taskRunId: runId,
+      inputs: { revisedDraft: { text: '一段已修订章节' }, factView: { entities: [] } },
+    });
+
+    const outputEvent = wc.taskActivity.find(
+      (event): event is Extract<BackendTaskActivityEvent, { type: 'task-activity' }> =>
+        event.type === 'task-activity' && event.phase === 'output' && event.modelAudit !== undefined,
+    );
+    const audit = outputEvent?.modelAudit;
+    check('3.5 模型步 output 活动携带 modelAudit 白名单字段',
+      audit !== undefined &&
+        audit.goal.length > 0 &&
+        audit.agent === 'fact-checker' &&
+        audit.tier === 'reasoning' &&
+        audit.inputSummary.length > 0 &&
+        (audit.contextRefs?.length ?? 0) > 0 &&
+        (audit.constraints?.length ?? 0) > 0 &&
+        audit.outputSummary.length > 0);
+    check('3.5 模型审计采用状态为 pending（待作者确认）', audit?.adoption === 'pending');
+    // 白名单防泄露：modelAudit 不得含模型原始回复正文（含“【思考过程…】”的模型输出），
+    // 也不得携带 rawResponse/systemPrompt/chainOfThought/reasoning 等非白名单 key。
+    // （constraints 中作为业务约束提及“不得含思考过程”属作者可读约束，非泄露，不纳入检查。）
+    const auditKeys = Object.keys(audit ?? {});
+    const allowedKeys = new Set(['goal', 'agent', 'tier', 'inputSummary', 'contextRefs', 'constraints', 'outputSummary', 'structuredResult', 'toolResults', 'validation', 'adoption']);
+    check('3.5 modelAudit 不泄露 hidden CoT / 内部 prompt / 原始回复',
+      audit !== undefined &&
+        auditKeys.every((key) => allowedKeys.has(key)) &&
+        !audit.outputSummary.includes('【思考过程') &&
+        !audit.inputSummary.includes('【思考过程') &&
+        !audit.goal.includes('【思考过程'));
+
+    // 从任务仓储恢复的持久化活动仍应含 modelAudit。
+    const persistedEvents = await taskRuns.listEvents(runId);
+    const persistedOutput = persistedEvents.find(
+      (event): event is Extract<BackendTaskActivityEvent, { type: 'task-activity' }> =>
+        event.type === 'task-activity' && event.phase === 'output' && event.modelAudit !== undefined,
+    );
+    check('3.5 modelAudit 随活动持久化可从任务仓储恢复', persistedOutput?.modelAudit?.agent === 'fact-checker');
+  } finally {
+    await db.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+}
+
 async function main(): Promise<void> {
   console.log('=== orchestration-runtime 冲烟 ===');
   smokeReviewerJsonDefence();
@@ -3627,6 +3709,7 @@ async function main(): Promise<void> {
   await smokeLocateCandidateOverflow();
   await smokeGenericPlaybookTask();
   await smokeSupplementTaskInput();
+  await smokeModelAuditNoCoT();
   await smokeNewBookWritingPlaybooks();
   await smokeNewBookMainPathEndToEnd();
   await smokePlaybookExtensionNoRegression();

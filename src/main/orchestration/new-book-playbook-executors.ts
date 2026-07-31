@@ -86,6 +86,17 @@ function buildDraftWritingRegistration(resolver: NewBookModelResolver): Playbook
           return {
             message: '已按分场大纲写出章节初稿',
             outputSummary: `初稿约 ${draft.length.toLocaleString()} 字`,
+            modelAudit: {
+              goal: '根据分场大纲写出章节初稿正文',
+              agent: 'writer',
+              tier: 'prose',
+              inputSummary: '分场大纲、人物档案、世界观设定',
+              contextRefs: ['分场大纲', '人物档案', '世界观设定'],
+              constraints: ['保持人物与世界观一致', '只输出成文，不得含思考过程'],
+              outputSummary: `产出章节初稿，约 ${draft.length.toLocaleString()} 字`,
+              structuredResult: { chars: draft.length },
+              adoption: 'pending',
+            },
             artifacts: [
               {
                 outputKey: 'chapterDraft',
@@ -136,6 +147,16 @@ function buildAuthorRevisionRegistration(resolver: NewBookModelResolver): Playbo
           return {
             message: '已整理可执行的修订方案',
             outputSummary: '产出逐条修订建议',
+            modelAudit: {
+              goal: '基于作者修订意见整理可执行的逐条修订方案',
+              agent: 'editor',
+              tier: 'reasoning',
+              inputSummary: '章节初稿、作者修订意见',
+              contextRefs: ['章节初稿', '作者修订意见'],
+              constraints: ['逐条列出，不改写全文', '只输出结论，不得含思考过程'],
+              outputSummary: '产出逐条可取舍的修订建议',
+              adoption: 'pending',
+            },
             artifacts: [
               {
                 outputKey: 'revisionProposal',
@@ -174,6 +195,17 @@ function buildAuthorRevisionRegistration(resolver: NewBookModelResolver): Playbo
           return {
             message: '已按作者取舍产出修订稿',
             outputSummary: `修订稿约 ${revised.length.toLocaleString()} 字`,
+            modelAudit: {
+              goal: '仅将作者已接受的修订项应用到初稿，产出修订稿正文',
+              agent: 'editor',
+              tier: 'prose',
+              inputSummary: '章节初稿、作者已确认的修订取舍',
+              contextRefs: ['章节初稿', '作者修订取舍'],
+              constraints: ['只应用作者已接受的修订项', '只输出成文，不得含思考过程'],
+              outputSummary: `产出修订稿，约 ${revised.length.toLocaleString()} 字`,
+              structuredResult: { chars: revised.length },
+              adoption: 'adopted',
+            },
             artifacts: [
               {
                 outputKey: 'revisedDraft',
@@ -207,6 +239,16 @@ function buildCoherenceCheckRegistration(resolver: NewBookModelResolver): Playbo
           return {
             message: '已完成连贯性扫描',
             outputSummary: '产出候选一致性问题',
+            modelAudit: {
+              goal: '对章节稿做上下文与设定一致性检查，逐条列出候选问题',
+              agent: 'fact-checker',
+              tier: 'reasoning',
+              inputSummary: '章节稿、事实底稿',
+              contextRefs: ['章节稿', '事实底稿'],
+              constraints: ['只列出候选问题，不改写正文', '含定位与依据', '不得含思考过程'],
+              outputSummary: '产出候选一致性问题，等待作者裁决',
+              adoption: 'pending',
+            },
             artifacts: [
               {
                 outputKey: 'coherenceScan',
@@ -257,6 +299,16 @@ function buildFactUpdateRegistration(resolver: NewBookModelResolver): PlaybookRe
           return {
             message: '已抽取章节新事实候选',
             outputSummary: '产出待合并事实候选',
+            modelAudit: {
+              goal: '从定稿章节抽取人物/设定/情节等新事实候选',
+              agent: 'fact-extractor',
+              tier: 'cheap-fast',
+              inputSummary: '定稿章节、既有事实底稿',
+              contextRefs: ['定稿章节', '既有事实底稿'],
+              constraints: ['结构化列出，不复述整章正文', '不得含思考过程'],
+              outputSummary: '产出待合并的事实候选，待作者裁决冲突',
+              adoption: 'pending',
+            },
             artifacts: [
               {
                 outputKey: 'factCandidates',

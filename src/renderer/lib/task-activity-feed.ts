@@ -17,6 +17,20 @@ export interface TaskActivityFeedItem {
   readonly output?: string;
   readonly feedback?: string;
   readonly details?: ReadonlyArray<string>;
+  /** 模型交互可审计记录（仅白名单字段，不含 hidden CoT）。 */
+  readonly modelAudit?: {
+    readonly goal: string;
+    readonly agent: string;
+    readonly tier: string;
+    readonly inputSummary: string;
+    readonly outputSummary: string;
+    readonly adoption: 'adopted' | 'rejected' | 'pending';
+    readonly contextRefs?: ReadonlyArray<string>;
+    readonly constraints?: ReadonlyArray<string>;
+    readonly toolResults?: ReadonlyArray<string>;
+    readonly validation?: string;
+    readonly structuredResult?: ReadonlyArray<string>;
+  };
 }
 
 const STAGE_PLAYBOOK: Readonly<Record<string, {
@@ -153,6 +167,23 @@ function runtimeItems(events: ReadonlyArray<BackendTaskActivityEvent>): Readonly
         ? {}
         : { feedback: [event.feedback, event.nextAction].filter((item): item is string => item !== undefined).join('；') }),
       ...(event.evidenceRefs === undefined ? {} : { details: event.evidenceRefs.map((item) => `${item.label}：${item.ref}`) }),
+      ...(event.modelAudit === undefined ? {} : {
+        modelAudit: {
+          goal: event.modelAudit.goal,
+          agent: event.modelAudit.agent,
+          tier: event.modelAudit.tier,
+          inputSummary: event.modelAudit.inputSummary,
+          outputSummary: event.modelAudit.outputSummary,
+          adoption: event.modelAudit.adoption,
+          ...(event.modelAudit.contextRefs === undefined ? {} : { contextRefs: event.modelAudit.contextRefs }),
+          ...(event.modelAudit.constraints === undefined ? {} : { constraints: event.modelAudit.constraints }),
+          ...(event.modelAudit.toolResults === undefined ? {} : { toolResults: event.modelAudit.toolResults }),
+          ...(event.modelAudit.validation === undefined ? {} : { validation: event.modelAudit.validation }),
+          ...(event.modelAudit.structuredResult === undefined ? {} : {
+            structuredResult: Object.entries(event.modelAudit.structuredResult).map(([key, value]) => `${key}: ${String(value)}`),
+          }),
+        },
+      }),
     };
   });
 }

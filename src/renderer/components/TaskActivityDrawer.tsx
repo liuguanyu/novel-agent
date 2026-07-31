@@ -39,6 +39,34 @@ function DetailRow({ label, value }: { readonly label: string; readonly value: s
   );
 }
 
+const ADOPTION_LABEL: Readonly<Record<'adopted' | 'rejected' | 'pending', { readonly text: string; readonly cls: string }>> = {
+  adopted: { text: '已采用', cls: 'bg-emerald-500/10 text-emerald-600' },
+  rejected: { text: '已拒绝', cls: 'bg-destructive/10 text-destructive' },
+  pending: { text: '待作者确认', cls: 'bg-amber-500/10 text-amber-600' },
+};
+
+/** 模型交互可审计块（3.5）：展示目标/输入/上下文/约束/输出/结构化结果/验证与采用状态，不展示隐藏推理。 */
+function ModelAuditBlock({ audit }: { readonly audit: NonNullable<TaskActivityFeedItem['modelAudit']> }): JSX.Element {
+  const adoption = ADOPTION_LABEL[audit.adoption];
+  return (
+    <div className="mt-1 space-y-1 rounded border border-primary/20 bg-primary/5 p-2">
+      <div className="flex items-center gap-2">
+        <span className="text-[10px] font-medium text-primary">模型交互（可审计）</span>
+        <span className="rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">{audit.agent} · {audit.tier}</span>
+        <span className={`rounded px-1.5 py-0.5 text-[10px] ${adoption.cls}`}>{adoption.text}</span>
+      </div>
+      <DetailRow label="目标" value={audit.goal} />
+      <DetailRow label="输入" value={audit.inputSummary} />
+      <DetailRow label="上下文" value={audit.contextRefs?.join('、')} />
+      <DetailRow label="约束" value={audit.constraints?.join('；')} />
+      <DetailRow label="输出" value={audit.outputSummary} />
+      <DetailRow label="结果" value={audit.structuredResult?.join('；')} />
+      <DetailRow label="工具" value={audit.toolResults?.join('；')} />
+      <DetailRow label="验证" value={audit.validation} />
+    </div>
+  );
+}
+
 export function TaskActivityDrawer({
   open,
   onOpenChange,
@@ -82,6 +110,7 @@ export function TaskActivityDrawer({
                       </ul>
                     </div>
                   )}
+                  {item.modelAudit !== undefined && <ModelAuditBlock audit={item.modelAudit} />}
                 </div>
               </div>
               {item.source !== 'workflow' && item.source !== 'task' && (

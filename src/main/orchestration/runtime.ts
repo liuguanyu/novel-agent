@@ -36,6 +36,7 @@ import {
   type BackendTaskActivityEvent,
   type TaskActivityEvent,
   type TaskArtifactRefDto,
+  type TaskModelAuditDto,
   type TaskRunCompletedEvent,
   type TaskRunFailedEvent,
   type TaskRunRefDto,
@@ -374,6 +375,28 @@ export interface PlaybookStepOutput {
   readonly message: string;
   readonly outputSummary?: string;
   readonly artifacts?: ReadonlyArray<{ readonly outputKey: string; readonly value: unknown; readonly ref: TaskArtifactRefDto }>;
+  /** 可选：本步模型交互的可审计记录（仅白名单字段，Main 会再次白名单消毒后才下发）。 */
+  readonly modelAudit?: TaskModelAuditDto;
+}
+
+/**
+ * 模型审计白名单消毒（design 决策 5）：仅从已知字段重建 DTO，
+ * 确保任何意外携带的 hidden CoT / 内部 prompt / 不可追溯解释字段都不会进入持久化活动或 Renderer。
+ */
+function sanitizeModelAudit(audit: TaskModelAuditDto): TaskModelAuditDto {
+  return {
+    goal: audit.goal,
+    agent: audit.agent,
+    tier: audit.tier,
+    inputSummary: audit.inputSummary,
+    outputSummary: audit.outputSummary,
+    adoption: audit.adoption,
+    ...(audit.contextRefs === undefined ? {} : { contextRefs: [...audit.contextRefs] }),
+    ...(audit.constraints === undefined ? {} : { constraints: [...audit.constraints] }),
+    ...(audit.structuredResult === undefined ? {} : { structuredResult: { ...audit.structuredResult } }),
+    ...(audit.toolResults === undefined ? {} : { toolResults: [...audit.toolResults] }),
+    ...(audit.validation === undefined ? {} : { validation: audit.validation }),
+  };
 }
 
 /** 需要作者决策的步骤：先产出等待作者的提示，作者提交后再产出结果。 */
@@ -2450,6 +2473,7 @@ export class OrchestrationRuntime {
       message: output.message,
       ...(output.outputSummary === undefined ? {} : { outputSummary: output.outputSummary }),
       ...(artifactRefs.length === 0 ? {} : { artifactRefs }),
+      ...(output.modelAudit === undefined ? {} : { modelAudit: sanitizeModelAudit(output.modelAudit) }),
     });
   }
 
