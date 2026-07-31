@@ -1398,6 +1398,25 @@ async function smokeWorkflowReviewerIssuePersistence(): Promise<void> {
     const disallowedStageRun = await db.get('SELECT 1 FROM workflow_stage_runs WHERE run_id=?', disallowedRunId);
     check('task 5.2：被拒的 disallowed expert 不写 stage-run', disallowedStageRun === null);
 
+    // task 5.3：跨阶段资产类专家（character-generator）在非其阶段（此处 concept 阶段）被 mutate 召唤，
+    // 应解读为对目标资产的澄清（asset-clarification）——不因“不在当前阶段 allowedExperts”被拒绝，
+    // 且保持主阶段不变、不写当前阶段 stage-run。
+    const clarifyWc = new FakeWebContents();
+    const clarifyRunId = randomUUID() as RunId;
+    await runtime(new FakeModelResolver('人物澄清答复', '[]').asResolver()).summon(clarifyWc.asWebContents(), {
+      runId: clarifyRunId, mode: 'mutate', agent: 'character-generator',
+      instruction: '澄清主角的核心动机', workflowRef,
+    });
+    const clarifyRejected = clarifyWc.stream.find(
+      (item) => item.type === 'stream-error' && item.error.category === 'validation',
+    );
+    check('task 5.3：跨阶段资产澄清不被 validation 拒绝', clarifyRejected === undefined);
+    const clarifyStageRun = await db.get('SELECT 1 FROM workflow_stage_runs WHERE run_id=?', clarifyRunId);
+    check('task 5.3：asset-clarification 不写当前阶段 stage-run（主阶段保持）', clarifyStageRun === null);
+    const afterClarify = await workflows.get(workflow.workflowId);
+    check('task 5.3：asset-clarification 后主 currentStageId 不变',
+      afterClarify?.currentStageId === workflow.currentStageId);
+
     if (dto?.issueId === undefined) throw new Error('reviewer did not persist issue');
     await workflowIssues.select(dto.issueId, 'author', 'targeted-fix-pass');
     await workflowIssues.linkCheckpointAndMarkVerifying(dto.issueId, 'checkpoint-targeted-pass');

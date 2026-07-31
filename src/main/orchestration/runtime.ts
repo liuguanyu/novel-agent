@@ -58,6 +58,8 @@ import {
   type WorkflowRef,
   getBuiltinWorkflowTemplate,
   type WorkflowKind,
+  classifySummonRoute,
+  type SummonRoute,
 } from '../../core/workflow/index.js';
 import type { CandidateFact, ConsistencyIssue, ExtractionInput, FactView } from '../../core/story-bible/index.js';
 import {
@@ -293,6 +295,11 @@ interface ActiveRun {
   /** 本次召唤的组装基座（供 assembleContext/checkFacts 闭包读）。 */
   readonly assembly: RunAssemblyBase;
   readonly workflowRef?: WorkflowRef;
+  /*
+   * task 5.3：本次运行是否为「跨阶段资产澄清」（asset-clarification）。为真时，该运行保持主阶段不变，
+   * 不作为当前阶段的承担运行——因此不写 stage-run、也不驱动阶段状态机 attach-run，避免污染主阶段进度。
+   */
+  readonly assetClarification?: boolean;
   continuationTarget?: string;
   /** dialogue 分片序号（前端按序拼接）。 */
   seq: number;
@@ -693,6 +700,22 @@ export class OrchestrationRuntime {
     }
   }
 
+  /*
+   * task 5.3：在当前工作流阶段上将召唤分类为 in-stage / asset-clarification / standalone。
+   * 仅依据被召唤 agent 与当前阶段模板 allowedExperts 判定（分类规则由 core classifySummonRoute 纯函数提供）。
+   * 无 workflowRef 时本就是 standalone；拿不到模板/阶段时保守回退 standalone。
+   */
+  async #resolveSummonRoute(ref: WorkflowRef | undefined, agent: string | undefined): Promise<SummonRoute> {
+    if (ref === undefined) return { route: 'standalone' };
+    const workflow = await this.#deps.workflows?.get(ref.workflowId);
+    const stage = workflow?.stages.find((item) => item.stageId === ref.stageId);
+    if (workflow === null || workflow === undefined || stage === undefined) return { route: 'standalone' };
+    const template = getBuiltinWorkflowTemplate(workflow.kind as WorkflowKind, Number(workflow.templateVersion));
+    const definition = template?.stages.find((item) => item.id === stage.templateStageId);
+    if (definition === undefined) return { route: 'standalone' };
+    return classifySummonRoute({ agent, currentStageAllowedExperts: definition.allowedExperts });
+  }
+
   async #recordStageRun(
     run: ActiveRun,
     status: 'started' | 'resumed' | 'completed' | 'failed' | 'interrupted',
@@ -703,7 +726,7 @@ export class OrchestrationRuntime {
       readonly transition?: 'quality-failed' | 'issues-found';
     },
   ): Promise<void> {
-    if (run.workflowRef === undefined || this.#deps.stageRunEvidence === undefined) return;
+    if (run.workflowRef === undefined || run.assetClarification === true || this.#deps.stageRunEvidence === undefined) return;
     await this.#deps.stageRunEvidence.record({
       runId: run.threadId,
       workflowRef: run.workflowRef,
@@ -1036,10 +1059,17 @@ export class OrchestrationRuntime {
    */
   async summon(wc: WebContents, params: SummonParams): Promise<void> {
     const { runId } = params;
+    // task 5.3：先将本次召唤在工作流上下文中分类（in-stage / asset-clarification / standalone），再决定校验与记录策略。
+    let route: SummonRoute = { route: 'standalone' };
     if (params.workflowRef !== undefined) {
       try {
         await this.#assertWorkflowRef(params.workflowRef, undefined, true);
-        await this.#assertStageActorAllowed(params.workflowRef, params.mode, params.agent);
+        route = await this.#resolveSummonRoute(params.workflowRef, params.agent);
+        // asset-clarification 不是当前阶段的承担运行（跨阶段对目标资产的澄清），不适用阶段写入专家约束；
+        // in-stage / standalone 仍需 5.2 校验——mutate 专家必须在当前阶段 allowedExperts 内（否则以 validation 拒绝）。
+        if (route.route !== 'asset-clarification') {
+          await this.#assertStageActorAllowed(params.workflowRef, params.mode, params.agent);
+        }
       }
       catch (err) {
         this.#send(wc, { type: 'stream-error', runId, kind: 'dialogue', error: { category: 'validation', message: err instanceof Error ? err.message : String(err) } });
@@ -1065,6 +1095,8 @@ export class OrchestrationRuntime {
       seq: 0,
       parent: null,
       ...(params.workflowRef !== undefined ? { workflowRef: params.workflowRef } : {}),
+      // 跨阶段资产澄清：保持主阶段不变，不写 stage-run / 不驱阶段状态机（见 ActiveRun.assetClarification）。
+      ...(route.route === 'asset-clarification' ? { assetClarification: true } : {}),
     };
     this.#runs.set(runId, run);
     await this.#recordStageRun(run, 'started');

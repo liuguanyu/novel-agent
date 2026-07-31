@@ -3,6 +3,7 @@ import {
   LEGACY_BOOK_REVISION_TEMPLATE,
   NEW_BOOK_CREATION_TEMPLATE,
   buildLegacyRevisionDiagnosis,
+  classifySummonRoute,
   createWorkflowInstance,
   transitionWorkflow,
   transitionWorkflowIssue,
@@ -126,5 +127,46 @@ const legacyPath = LEGACY_BOOK_REVISION_TEMPLATE.stages.map((item) => item.id);
 assert.ok(legacyPath.indexOf('hunk-review') < legacyPath.indexOf('apply-checkpoint'));
 assert.ok(legacyPath.indexOf('apply-checkpoint') < legacyPath.indexOf('targeted-verification'));
 assert.equal(LEGACY_BOOK_REVISION_TEMPLATE.stages.find((item) => item.id === 'hunk-review')?.completionGate.kind, 'author-confirmation');
+
+// task 5.3：后续意见/@专家召唤在工作流上下文中的三分类（纯函数）。
+{
+  const conceptAllowed = NEW_BOOK_CREATION_TEMPLATE.stages.find((s) => s.id === 'concept')?.allowedExperts ?? [];
+  const draftAllowed = NEW_BOOK_CREATION_TEMPLATE.stages.find((s) => s.id === 'draft-writing')?.allowedExperts ?? [];
+  // 当前阶段承担者 → in-stage（在阶段内运行）。
+  assert.deepEqual(
+    classifySummonRoute({ agent: 'concept-generator', currentStageAllowedExperts: conceptAllowed }),
+    { route: 'in-stage' },
+  );
+  assert.deepEqual(
+    classifySummonRoute({ agent: 'writer', currentStageAllowedExperts: draftAllowed }),
+    { route: 'in-stage' },
+  );
+  // 跨阶段资产类专家（在非其阶段）→ asset-clarification，消歧出目标资产 kind，主阶段不变。
+  assert.deepEqual(
+    classifySummonRoute({ agent: 'character-generator', currentStageAllowedExperts: draftAllowed }),
+    { route: 'asset-clarification', targetAssetKind: 'character' },
+  );
+  assert.deepEqual(
+    classifySummonRoute({ agent: 'worldbuilding', currentStageAllowedExperts: conceptAllowed }),
+    { route: 'asset-clarification', targetAssetKind: 'worldbuilding' },
+  );
+  assert.deepEqual(
+    classifySummonRoute({ agent: 'architect', currentStageAllowedExperts: conceptAllowed }),
+    { route: 'asset-clarification', targetAssetKind: 'book-outline' },
+  );
+  // 非资产类且非当前阶段承担者（writer / 审校诊断类 / 未指定）→ standalone（暂停或切换选择）。
+  assert.deepEqual(
+    classifySummonRoute({ agent: 'writer', currentStageAllowedExperts: conceptAllowed }),
+    { route: 'standalone' },
+  );
+  assert.deepEqual(
+    classifySummonRoute({ agent: 'reviewer', currentStageAllowedExperts: draftAllowed }),
+    { route: 'standalone' },
+  );
+  assert.deepEqual(
+    classifySummonRoute({ agent: undefined, currentStageAllowedExperts: conceptAllowed }),
+    { route: 'standalone' },
+  );
+}
 
 console.log('workflow smoke: ok');
