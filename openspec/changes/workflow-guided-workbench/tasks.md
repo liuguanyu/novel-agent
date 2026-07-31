@@ -9,11 +9,11 @@
 
 ## 2. 内置业务模板
 
-- [ ] 2.1 [Core] 建立 `new-book-creation` v1 模板，覆盖策划阶段、按章节创作循环、事实抽取/审校门、章节定稿与最终全书总检
-- [ ] 2.2 [Core] 建立 `legacy-book-revision` v1 模板，覆盖导入、事实回填、全书总检、按 issue 修订循环与最终全书复检
-- [ ] 2.3 [Core] 为两套模板声明 author/expert/system/quality-gate actor、允许专家、自动推进边界、阻塞条件和可跳过阶段
-- [ ] 2.4 [Core/Test] 用表驱动测试验证两套模板的正常路径、章节循环、问题复检失败回环、最终复检发现新问题回环及人工门不自动推进
-- [ ] 2.5 [Core/Test] 验证任意阶段的 asset-maintenance activity 不改变主 `currentStageId`，仅通过独立 `impactStatus` 标记相关阶段 stale/needs-review/conflicting，禁止将其当作 StageStatus
+- [x] 2.1 [Core] 建立 `new-book-creation` v1 模板，覆盖策划阶段、按章节创作循环、事实抽取/审校门、章节定稿与最终全书总检（`src/core/workflow/templates.ts` 的 `NEW_BOOK_CREATION_TEMPLATE`(version:1)：concept→worldbuilding→character-design→book-outline 策划阶段→chapter-plan→scene-outline→draft-writing→fact-extraction(system/automatic)→automatic-review(quality-gate)→author-review(author/confirm)→chapter-finalization(author，带 continue-loop→chapter-plan 章节循环)→whole-book-audit(quality-gate 最终总检，无后继 transition)。）
+- [x] 2.2 [Core] 建立 `legacy-book-revision` v1 模板，覆盖导入、事实回填、全书总检、按 issue 修订循环与最终全书复检（`LEGACY_BOOK_REVISION_TEMPLATE`(version:1)：import-book→fact-backfill(system)→initial-audit(quality-gate，issues-found→issue-triage)→issue-triage(author)→locate-source(system/issue)→generate-rewrite(expert/issue)→hunk-review(author/issue)→apply-checkpoint(author/issue)→targeted-verification(quality-gate，quality-failed→generate-rewrite 回环)→close-issue(system，continue-loop→issue-triage 按 issue 循环)→final-audit(quality-gate，issues-found→issue-triage)。）
+- [x] 2.3 [Core] 为两套模板声明 author/expert/system/quality-gate actor、允许专家、自动推进边界、阻塞条件和可跳过阶段（每个 `WorkflowTemplateStage` 均声明 actor(策划/写作为 expert、事实抽取/定位/关问题为 system、审校/总检/复检为 quality-gate、导入/人工审校/hunk/定稿为 author)、allowedExperts(concept-generator/worldbuilding/character-generator/architect/scene-outliner/writer；editor/style-editor)、completionGate(automatic 自动推进边界、author-confirmation 人工门不自推、quality 带 blockingOnFailure:true 阻塞)、retryable=actor!=='author'、skippable 逐阶段声明。）
+- [x] 2.4 [Core/Test] 用表驱动测试验证两套模板的正常路径、章节循环、问题复检失败回环、最终复检发现新问题回环及人工门不自动推进（`src/main/workflow-integration-smoke.ts`（`npm run smoke:workflow` 全绿）以 `chapterPath` 表驱动逐阶段推进新书主路径到 chapter-finalization/whole-book-audit；chapter-finalization confirm result:'continue-loop' 断言回到 chapter-plan（章节循环）；`workflow-smoke.ts` 断言 author-confirmation 门 run-succeeded 后为 awaiting-confirmation 且 currentStageId 不变（人工门不自推）、模板声明 continue-loop/quality-failed 回环 transition 存在；老书 legacy 跳 issue-triage→locate-source→…循环与 final-audit issues-found 回环均经集成 smoke 驱动。）
+- [x] 2.5 [Core/Test] 验证任意阶段的 asset-maintenance activity 不改变主 `currentStageId`，仅通过独立 `impactStatus` 标记相关阶段 stale/needs-review/conflicting，禁止将其当作 StageStatus（`workflow-integration-smoke.ts` L233-249：在 finalStage 上建 asset 依赖后确认 change-set candidate，断言阶段 `impactStatus` 变 needs-review 但 `status` 仍等于 `beforeImpactStageStatus`（生命周期态不变）；resolveImpact 后 impactStatus 回 none、status 仍等于原值，证明 impact 与 StageStatus 正交、从不把 impact 当作生命周期状态。）
 
 ## 3. SQLite 持久化与应用服务
 
