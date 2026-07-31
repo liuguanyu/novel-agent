@@ -83,6 +83,19 @@ export const WORKFLOW_TASK_GOAL: Readonly<Record<string, string>> = {
   'targeted-verification': '确认当前问题是否真正修好',
   'close-issue': '归档当前问题的修复结果',
   'final-audit': '对修订后的全书做最终复检',
+  // 新书创作模板阶段（与 legacy 阶段 id 不重叠）。
+  concept: '确立作品立意与类型定位',
+  worldbuilding: '搭建世界观设定基线',
+  'character-design': '设计互补的人物阵容与关系',
+  'book-outline': '规划全书主线与关键转折',
+  'chapter-plan': '把大纲拆解为卷章结构',
+  'scene-outline': '把本章目标拆解为分场节拍',
+  'draft-writing': '按分场大纲写出本章初稿',
+  'fact-extraction': '从定稿章节更新事实底稿',
+  'automatic-review': '对本章做连贯性与设定一致性检查',
+  'author-review': '由作者审阅并修订本章',
+  'chapter-finalization': '定稿本章并决定下一章走向',
+  'whole-book-audit': '对全书做整体总检',
 };
 
 /** 事实相关阶段：Graph 芯片可直接打开事实底稿。 */

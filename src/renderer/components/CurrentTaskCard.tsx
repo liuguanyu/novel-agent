@@ -36,6 +36,67 @@ const TASK_DETAILS: Readonly<Record<string, {
     execution: '逐章读取 → 模型抽取 → 规则校验 → 入库或等待裁决',
     output: '人物、事件、关系、时间线和伏笔事实',
   },
+  // 新书创作模板阶段（与旧作共用同一任务卡，不复制工作台）。
+  concept: {
+    purpose: '确立作品的核心命题、类型定位与目标读者。',
+    inputs: '初始构想和可选的类型、基调、读者偏好',
+    execution: '探索立意角度 → 差异化定位 → 等待作者确认',
+    output: '经作者确认的作品立意与定位',
+  },
+  worldbuilding: {
+    purpose: '在立意之上构建世界规则与设定基线。',
+    inputs: '已确认立意和可选的题材约束与参考',
+    execution: '起草世界设定 → 梳理规则与势力 → 等待作者确认',
+    output: '经作者确认的世界观设定基线',
+  },
+  'character-design': {
+    purpose: '从立意与世界观出发设计互补的人物阵容。',
+    inputs: '作品立意、世界观设定和人物关系偏好',
+    execution: '起草人物阵容 → 作者取舍 → 产出人物档案',
+    output: '经作者确认的结构化人物档案',
+  },
+  'book-outline': {
+    purpose: '整合立意、世界观与人物规划全书故事线。',
+    inputs: '立意、人物档案和世界观设定',
+    execution: '起草主支线与转折 → 等待作者确认大纲',
+    output: '经作者确认的全书故事线结构',
+  },
+  'chapter-plan': {
+    purpose: '把全书大纲拆解为卷章结构与每章目标。',
+    inputs: '全书大纲和可选的本次规划范围',
+    execution: '起草卷章结构 → 等待作者确认章节',
+    output: '经作者确认的卷章结构与每章目标',
+  },
+  'scene-outline': {
+    purpose: '把单章目标拆解为分场节拍。',
+    inputs: '目标章节规划和人物档案',
+    execution: '起草分场节拍 → 等待作者确认分场',
+    output: '经作者确认的分场大纲',
+  },
+  'draft-writing': {
+    purpose: '基于分场大纲写出本章初稿供作者审阅。',
+    inputs: '分场大纲、人物档案和世界观设定',
+    execution: '撰写章节初稿 → 等待作者确认或提修订',
+    output: '经作者确认的章节初稿',
+  },
+  'author-review': {
+    purpose: '接收作者修订意见并产出修订稿。',
+    inputs: '章节初稿和作者修订意见',
+    execution: '整理修订方案 → 作者取舍 → 产出修订稿',
+    output: '经作者确认的章节修订稿',
+  },
+  'automatic-review': {
+    purpose: '对章节稿做上下文与设定一致性检查。',
+    inputs: '待检查章节稿和事实底稿',
+    execution: '扫描一致性问题 → 等待作者裁决',
+    output: '经作者裁决的连贯性报告',
+  },
+  'fact-extraction': {
+    purpose: '从定稿章节抽取新事实并更新事实底稿。',
+    inputs: '定稿章节和既有事实底稿',
+    execution: '抽取新事实 → 作者裁决冲突 → 合并底稿',
+    output: '经作者裁决合并的事实底稿新版本',
+  },
 };
 
 export function CurrentTaskCard({ workflow, events, onOpenTaskCenter, onChooseSourceLocation, onControlTask, onEnterRefactor }: CurrentTaskCardProps): JSX.Element | null {

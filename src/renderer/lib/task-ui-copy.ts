@@ -34,6 +34,16 @@ const MANUSCRIPT_EMPTY_BY_STAGE: Readonly<Record<string, ManuscriptEmptyCopy>> =
   'targeted-verification': { title: '正在复检修订结果', hint: '系统正在确认当前问题是否真正修好。复检完成后会给出是否通过。' },
   'close-issue': { title: '正在归档问题', hint: '当前问题的修复结果正在归档，随后会推进到下一个问题或最终复检。' },
   'final-audit': { title: '正在做最终全书复检', hint: '系统正在做最终全书复检。若发现新问题会回到分诊，否则本次重建完成。' },
+  // 新书创作模板阶段（无旧正文，中栏用任务语言引导作者从零创作）。
+  concept: { title: '正在确立作品立意', hint: '请在右侧与立意助手确认核心命题与类型定位，确认后会进入世界观设定。' },
+  worldbuilding: { title: '正在搭建世界观', hint: '请在右侧与设定助手完善世界规则与背景，确认后会进入人物设计。' },
+  'character-design': { title: '正在设计人物阵容', hint: '请在右侧与人物助手确认主要人物与关系，确认后会进入全书大纲。' },
+  'book-outline': { title: '正在规划全书大纲', hint: '请在右侧与大纲助手确认主支线与关键转折，确认后会进入章节规划。' },
+  'chapter-plan': { title: '正在拆解卷章结构', hint: '请在右侧与规划助手确认卷章划分与每章目标，确认后会进入分场大纲。' },
+  'scene-outline': { title: '正在拆解分场节拍', hint: '请在右侧与分场助手确认本章分场节拍，确认后会进入章节初稿。' },
+  'draft-writing': { title: '正在生成章节初稿', hint: '系统正按分场大纲写出本章初稿。初稿完成后可在任务卡确认或提出修订。' },
+  'fact-extraction': { title: '正在更新事实底稿', hint: '系统正从定稿章节抽取新事实，本阶段不改正文。冲突项会等待你裁决。' },
+  'automatic-review': { title: '正在做连贯性检查', hint: '系统正对本章做上下文与设定一致性检查，发现问题会等你裁决是否返修。' },
 };
 
 const MANUSCRIPT_EMPTY_FALLBACK: ManuscriptEmptyCopy = {
@@ -54,6 +64,16 @@ const ASSISTANT_BY_STAGE: Readonly<Record<string, AssistantCopy>> = {
   'targeted-verification': { title: '修订审核助手', emptyHint: '可以让我说明复检结论，或补充需要额外核对的点。' },
   'close-issue': { title: '修订审核助手', emptyHint: '可以让我总结本问题的修复结果，或安排下一步。' },
   'final-audit': { title: '故事诊断助手', emptyHint: '可以让我汇报最终复检结果，或补充需要重点复检的方向。' },
+  // 新书创作模板阶段的右栏助手角色。
+  concept: { title: '立意助手', emptyHint: '可以和我探讨作品的核心命题、类型定位与目标读者。' },
+  worldbuilding: { title: '设定助手', emptyHint: '可以让我起草世界规则与背景，或讨论设定约束。' },
+  'character-design': { title: '人物助手', emptyHint: '可以和我讨论人物动机、缺陷与互相关系。' },
+  'book-outline': { title: '大纲助手', emptyHint: '可以和我推敲主支线、关键转折与节奏。' },
+  'chapter-plan': { title: '规划助手', emptyHint: '可以让我把大纲拆为卷章，或调整每章目标。' },
+  'scene-outline': { title: '分场助手', emptyHint: '可以和我拆解本章分场节拍与每场冲突。' },
+  'draft-writing': { title: '写手助手', emptyHint: '可以补充本章初稿的语气或情节要求，我会据此成文。' },
+  'fact-extraction': { title: '事实整理助手', emptyHint: '可以让我核对本章新事实，或说明冲突事实的取舍。' },
+  'automatic-review': { title: '连贯性审校助手', emptyHint: '可以让我解释某条一致性问题，或补充你更在意的检查角度。' },
 };
 
 const ASSISTANT_FALLBACK: AssistantCopy = {

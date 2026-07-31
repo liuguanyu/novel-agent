@@ -87,14 +87,16 @@ function shortJson(value: unknown): string {
 
 function workflowItem(workflow: WorkflowSnapshotDto | null): TaskActivityFeedItem | undefined {
   if (workflow === null) return undefined;
-  if (workflow.status === 'paused') return { id: 'workflow:paused', source: 'workflow', label: '书目整理', message: '整理已暂停，可从上方恢复', tone: 'waiting', feedback: '等待作者恢复整理' };
-  if (workflow.status === 'completed') return { id: 'workflow:completed', source: 'workflow', label: '书目整理', message: '本次书目整理已完成', tone: 'done', output: '所有业务阶段已关闭' };
-  if (workflow.status === 'cancelled') return { id: 'workflow:cancelled', source: 'workflow', label: '书目整理', message: '本次书目整理已取消', tone: 'idle', feedback: '不会继续推进后续阶段' };
-  if (workflow.status === 'failed') return { id: 'workflow:failed', source: 'workflow', label: '书目整理', message: '运行失败，请查看工作流提示', tone: 'error', feedback: '需要重试或人工处理失败原因' };
+  // 终态文案按任务类型区分：旧作沿用「书目整理」，新书用中性的「创作流程」，避免对新书任务泄露旧作语言。
+  const flowLabel = workflow.kind === 'legacy-book-revision' ? '书目整理' : '创作流程';
+  if (workflow.status === 'paused') return { id: 'workflow:paused', source: 'workflow', label: flowLabel, message: `${flowLabel}已暂停，可从上方恢复`, tone: 'waiting', feedback: '等待作者恢复' };
+  if (workflow.status === 'completed') return { id: 'workflow:completed', source: 'workflow', label: flowLabel, message: `本次${flowLabel}已完成`, tone: 'done', output: '所有业务阶段已关闭' };
+  if (workflow.status === 'cancelled') return { id: 'workflow:cancelled', source: 'workflow', label: flowLabel, message: `本次${flowLabel}已取消`, tone: 'idle', feedback: '不会继续推进后续阶段' };
+  if (workflow.status === 'failed') return { id: 'workflow:failed', source: 'workflow', label: flowLabel, message: '运行失败，请查看工作流提示', tone: 'error', feedback: '需要重试或人工处理失败原因' };
   const stage = workflow.stages.find((item) => item['stageId'] === workflow.currentStageId);
-  if (stage === undefined) return { id: 'workflow:sync', source: 'workflow', label: '书目整理', message: '正在同步当前任务', tone: 'running' };
+  if (stage === undefined) return { id: 'workflow:sync', source: 'workflow', label: flowLabel, message: '正在同步当前任务', tone: 'running' };
   const templateStageId = typeof stage['templateStageId'] === 'string' ? stage['templateStageId'] : '';
-  const goal = WORKFLOW_TASK_GOAL[templateStageId] ?? '完成当前整理任务';
+  const goal = WORKFLOW_TASK_GOAL[templateStageId] ?? '完成当前任务';
   const status = typeof stage['status'] === 'string' ? stage['status'] : 'ready';
   const runCount = asArray(stage['runIds']).length;
   const artifactCount = asArray(stage['artifactRefs']).length;

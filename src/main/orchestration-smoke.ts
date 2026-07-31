@@ -26,7 +26,7 @@ import {
   WorkflowIssueRepository,
   WorkflowRepository,
 } from './db/index.js';
-import { OrchestrationRuntime, targetedVerificationAgentFor, type BackfillFactsParams, type PlaybookRegistration, type SummonParams } from './orchestration/runtime.js';
+import { OrchestrationRuntime, targetedVerificationAgentFor, type BackfillFactsParams, type PlaybookRegistration, type PlaybookStepHandler, type SummonParams } from './orchestration/runtime.js';
 import { WorkflowApplicationService } from './workflow-application-service.js';
 import { readManifestChapterIds } from './novel-reader.js';
 import { InlineAuditRunner, type AuditRunner } from './audit/audit-runner.js';
@@ -2637,6 +2637,207 @@ async function smokeNewBookWritingPlaybooks(): Promise<void> {
 }
 
 /**
+ * 5.4 [Integration Test] 新书主路径端到端 + 新书/旧作切换共用契约：
+ *
+ * A) 无旧正文的新书主路径：在同一 OrchestrationRuntime + 同一 TaskRunRepository 上，
+ *    顺序驱动「立意→世界观→人物设计→全书大纲→章节规划→分场大纲」六个规划任务，
+ *    再驱动「章节初稿生成→作者修订」写作循环，逐阶段把上一任务产物作为下一任务输入
+ *    （分场大纲 sceneOutline 喂给初稿生成），验证：
+ *      - 全程无 project/book/manuscript 引用（不依赖既有正文）；
+ *      - 每个任务经作者决策收敛 completed、复用同一 taskRunId、产物与决策持久化；
+ *      - 写作循环用的是与生产同源的真实执行器注册（buildNewBookWritingRegistrations）。
+ * B) 新书/旧作切换共用 Task Runtime 与 IPC 契约：同一 runtime/taskRuns 注册新书写作
+ *    playbook 与旧作 locate-source playbook，各跑一条 run，验证两者：
+ *      - 落到同一 TaskRunRepository（共用运行态存储）；
+ *      - 走同一 taskActivityEvent IPC 通道、同一事件结构（BackendTaskActivityEvent）；
+ *      - 仅 kind 字段按任务族区分（new-book-planning vs locate-source）。
+ * 红线：活动不得泄露隐藏思维链（prompt/reasoning 字段）。
+ */
+async function smokeNewBookMainPathEndToEnd(): Promise<void> {
+  const dir = await mkdtemp(join(tmpdir(), 'na-new-book-e2e-'));
+  const opened = await openDatabase(join(dir, 'new-book-e2e.db'));
+  if (!opened.ok) {
+    check('new-book E2E SQLite 可用', false, opened.message);
+    await rm(dir, { recursive: true, force: true });
+    return;
+  }
+  const db = opened.db;
+  try {
+    const taskRuns = new TaskRunRepository(db);
+    // fake 模型：写作执行器经注入 resolver 取能力，回确定性文本。
+    const fakeResolver: NewBookModelResolver = {
+      createAdapter: (agentId: string, tier: CapabilityTier): Pick<ModelAdapter, 'complete'> => ({
+        complete: async () => ({ text: `【${agentId}/${tier}】`, finishReason: 'stop' as const }),
+      }),
+    };
+    // 单一 runtime + 单一 taskRuns：证明整条主路径共用同一 Task Runtime。
+    const runtime = new OrchestrationRuntime({
+      getModelResolver: () => undefined,
+      getCheckpointer: () => undefined,
+      getFactStore: () => undefined,
+      taskRuns,
+    });
+
+    // 为规划 playbook 构造 fake 生产注册：每步产出其声明的全部输出产物（作者可见结构化结果），
+    // 作者决策步经 apply 收敛。写作 playbook 用与生产同源的真实注册。
+    const buildPlanningRegistration = (playbook: TaskPlaybook): PlaybookRegistration => {
+      const outputArtifacts = playbook.outputs.map((output) => ({
+        outputKey: output.key,
+        value: { producedBy: playbook.id, key: output.key },
+        ref: { kind: 'draft' as const, label: output.label, ref: `${playbook.id}:${output.key}` },
+      }));
+      const lastStepId = playbook.steps[playbook.steps.length - 1]?.id;
+      const handlers: Record<string, PlaybookStepHandler> = {};
+      for (const step of playbook.steps) {
+        // 只在最后一步挂产物，确保产物出现在任务收敛前的终态步骤。
+        const artifacts = step.id === lastStepId ? outputArtifacts : [];
+        if (step.requiresAuthorDecision) {
+          handlers[step.id] = {
+            requiresAuthor: true,
+            prompt: async () => ({ message: `请确认「${playbook.title}」结果`, nextAction: '在任务卡提交确认' }),
+            apply: async () => ({ message: '已收到作者确认', artifacts }),
+          };
+        } else {
+          handlers[step.id] = {
+            run: async () => ({ message: `已产出「${step.title}」`, artifacts }),
+          };
+        }
+      }
+      return { playbook, title: playbook.title, completedSummary: `已完成「${playbook.title}」`, handlers };
+    };
+
+    const writingRegistrations = buildNewBookWritingRegistrations(fakeResolver);
+    const draftRegistration = writingRegistrations.find((item) => item.playbook.id === 'new-book.draft-writing');
+    const revisionRegistration = writingRegistrations.find((item) => item.playbook.id === 'new-book.author-revision');
+    if (draftRegistration === undefined || revisionRegistration === undefined) throw new Error('缺少写作循环注册项');
+
+    // 从产物列表取某 outputKey 的值，作为下一阶段输入（阶段间产物依赖）。
+    const artifactValue = (run: TaskRun | null, outputKey: string): unknown =>
+      run?.artifacts.find((artifact) => artifact.outputKey === outputKey)?.value;
+
+    // 驱动单个 playbook 到 completed：run→(若 awaiting-author 则逐步 submit)→completed，全程共用 wc。
+    const drive = async (
+      registration: PlaybookRegistration,
+      inputs: Readonly<Record<string, unknown>>,
+    ): Promise<TaskRun> => {
+      // 作者决策提交需从 #playbooks 查找注册，故驱动前先注册。
+      runtime.registerPlaybook(registration);
+      const wc = new FakeWebContents();
+      const runId = randomUUID();
+      await runtime.runPlaybookTask(wc.asWebContents(), { registration, taskRunId: runId, inputs });
+      // 循环消化所有作者决策步（规划/写作可能有多个）。
+      let guard = 0;
+      for (;;) {
+        const current = await taskRuns.get(runId);
+        if (current === null) throw new Error(`任务 ${registration.playbook.id} 未持久化`);
+        if (current.status !== 'awaiting-author') break;
+        const stepId = current.currentStepId;
+        if (stepId === null) throw new Error('awaiting-author 缺 currentStepId');
+        await runtime.submitPlaybookAuthorDecision(wc.asWebContents(), runId, stepId, { accepted: true }, `decision:${runId}:${guard}`);
+        guard += 1;
+        if (guard > 6) throw new Error('作者决策步过多，疑似未收敛');
+      }
+      const done = await taskRuns.get(runId);
+      if (done === null) throw new Error('任务终态未持久化');
+      // 主路径红线：不依赖既有正文——无 project/book/manuscript 引用。
+      check(`E2E 主路径「${registration.playbook.title}」无旧正文引用（project/book/manuscript 均 null）`,
+        done.refs.projectId === null && done.refs.bookId === null && done.refs.manuscriptId === null);
+      check(`E2E 主路径「${registration.playbook.title}」经作者决策收敛 completed 且复用同一 taskRunId`,
+        done.id === runId && done.status === 'completed' && done.authorDecisions.length >= 1);
+      // 红线：活动不得携带隐藏思维链。
+      const leaksCot = wc.taskActivity.some((event) =>
+        Object.prototype.hasOwnProperty.call(event, 'prompt') ||
+        Object.prototype.hasOwnProperty.call(event, 'reasoning'));
+      check(`E2E 主路径「${registration.playbook.title}」活动不泄露隐藏思维链`, !leaksCot);
+      check(`E2E 主路径「${registration.playbook.title}」kind 为 new-book-planning`,
+        wc.taskActivity.every((event) => event.kind === 'new-book-planning'));
+      return done;
+    };
+
+    // —— A. 规划链：逐阶段把上一任务产物喂给下一任务的必填输入 ——
+    const conceptRun = await drive(buildPlanningRegistration(NEW_BOOK_STAGE_PLAYBOOKS.concept), { premise: '一座会呼吸的城市' });
+    const concept = artifactValue(conceptRun, 'concept');
+    const worldRun = await drive(buildPlanningRegistration(NEW_BOOK_STAGE_PLAYBOOKS.worldbuilding), { concept });
+    const worldSetting = artifactValue(worldRun, 'worldSetting');
+    const castRun = await drive(buildPlanningRegistration(NEW_BOOK_STAGE_PLAYBOOKS['character-design']), { concept, worldSetting });
+    const characterProfiles = artifactValue(castRun, 'characterProfiles');
+    const outlineRun = await drive(buildPlanningRegistration(NEW_BOOK_STAGE_PLAYBOOKS['book-outline']), { concept, characterProfiles, worldSetting });
+    const bookOutline = artifactValue(outlineRun, 'bookOutline');
+    const chapterPlanRun = await drive(buildPlanningRegistration(NEW_BOOK_STAGE_PLAYBOOKS['chapter-plan']), { bookOutline });
+    const chapterPlan = artifactValue(chapterPlanRun, 'chapterPlan');
+    const sceneRun = await drive(buildPlanningRegistration(NEW_BOOK_STAGE_PLAYBOOKS['scene-outline']), { chapterPlan, characterProfiles });
+    const sceneOutline = artifactValue(sceneRun, 'sceneOutline');
+    check('E2E 主路径规划链阶段间产物依赖成立（各阶段产出非空并向后传递）',
+      concept !== undefined && worldSetting !== undefined && characterProfiles !== undefined &&
+        bookOutline !== undefined && chapterPlan !== undefined && sceneOutline !== undefined);
+
+    // —— A. 写作循环：真实执行器注册，初稿生成消费分场大纲，作者修订消费初稿 ——
+    const draftRun = await drive(draftRegistration, { sceneOutline, characterProfiles, worldSetting });
+    const chapterDraft = artifactValue(draftRun, 'chapterDraft');
+    check('E2E 主路径章节初稿生成消费分场大纲并产出章节初稿',
+      chapterDraft !== undefined && draftRun.artifacts.some((artifact) => artifact.outputKey === 'chapterDraft'));
+    const revisionRun = await drive(revisionRegistration, { chapterDraft });
+    check('E2E 主路径作者修订消费初稿并产出修订稿',
+      revisionRun.artifacts.some((artifact) => artifact.outputKey === 'revisedDraft'));
+
+    // 整条主路径共用同一 TaskRunRepository：八条 run 均可从同一仓储取回，taskRunId 互异。
+    const allRunIds = [conceptRun, worldRun, castRun, outlineRun, chapterPlanRun, sceneRun, draftRun, revisionRun].map((run) => run.id);
+    check('E2E 主路径八阶段共用同一 Task Runtime 存储且 taskRunId 互异',
+      new Set(allRunIds).size === 8 && (await Promise.all(allRunIds.map((id) => taskRuns.get(id)))).every((run) => run?.status === 'completed'));
+
+    // —— B. 新书/旧作切换共用 Task Runtime 与 IPC 契约 ——
+    // 旧作 locate-source fixture 用 fake handler（此处只验证 kind/通道契约，不接真实定位）。
+    const legacyRegistration: PlaybookRegistration = {
+      playbook: LEGACY_LOCATE_SOURCE_PLAYBOOK,
+      title: '定位诊断问题对应的原文',
+      completedSummary: '已确认原文位置',
+      handlers: {
+        'read-chapter': { run: async () => ({ message: '已读取目标章节', artifacts: [] }) },
+        'match-evidence': { run: async () => ({ message: '已匹配诊断证据', artifacts: [] }) },
+        'confirm-location': {
+          requiresAuthor: true,
+          prompt: async () => ({ message: '请确认原文位置', nextAction: '在任务卡选择候选' }),
+          apply: async () => ({ message: '已确认原文位置', artifacts: [{ outputKey: 'sourceLocation', value: { chapter: 'c1' }, ref: { kind: 'source-location' as const, label: '原文定位', ref: 'loc:1' } }] }),
+        },
+      },
+    };
+    runtime.registerPlaybook(draftRegistration);
+    runtime.registerPlaybook(legacyRegistration);
+
+    const nbWc = new FakeWebContents();
+    const nbId = randomUUID();
+    await runtime.runPlaybookTask(nbWc.asWebContents(), { registration: draftRegistration, taskRunId: nbId, inputs: { sceneOutline } });
+    await runtime.submitPlaybookAuthorDecision(nbWc.asWebContents(), nbId, 'author-accept-draft', { accepted: true }, `switch:nb:${nbId}`);
+
+    const lgWc = new FakeWebContents();
+    const lgId = randomUUID();
+    await runtime.runPlaybookTask(lgWc.asWebContents(), {
+      registration: legacyRegistration, taskRunId: lgId,
+      inputs: { issue: { id: 'i1' }, evidence: { quote: 'q' }, chapterAnchor: 'c1' },
+    });
+    await runtime.submitPlaybookAuthorDecision(lgWc.asWebContents(), lgId, 'confirm-location', { candidate: 0 }, `switch:lg:${lgId}`);
+
+    const nbRun = await taskRuns.get(nbId);
+    const lgRun = await taskRuns.get(lgId);
+    check('B 新书/旧作两条 run 落到同一 TaskRunRepository 并均 completed',
+      nbRun?.status === 'completed' && lgRun?.status === 'completed' && nbRun.id !== lgRun.id);
+    // 两者走同一 taskActivityEvent 通道、同一事件结构；仅 kind 按任务族区分。
+    check('B 新书任务经 taskActivityEvent 通道且 kind=new-book-planning',
+      nbWc.taskActivity.length > 0 && nbWc.taskActivity.every((event) => event.kind === 'new-book-planning') &&
+        nbWc.stream.length === 0 && nbWc.modelTask.length === 0);
+    check('B 旧作任务经同一 taskActivityEvent 通道且 kind=locate-source',
+      lgWc.taskActivity.length > 0 && lgWc.taskActivity.every((event) => event.kind === 'locate-source') &&
+        lgWc.stream.length === 0 && lgWc.modelTask.length === 0);
+    check('B 两任务事件共用同一结构（均含 taskRunId 且下发完成事件）',
+      nbWc.taskActivity.some((event) => event.type === 'task-run-completed' && event.taskRunId === nbId) &&
+        lgWc.taskActivity.some((event) => event.type === 'task-run-completed' && event.taskRunId === lgId));
+  } finally {
+    await db.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+}
+
+/**
  * 4.4 [Integration Test] locate-source 端到端验收：
  * 单条 issue 贯穿「选择问题 → 创建任务 → 展示输入 → 读取证据 → 查找/匹配正文 →
  * 真实活动 → UI Effect → 作者确认 → 进入局部改写」的有序旅程。
@@ -3215,6 +3416,7 @@ async function main(): Promise<void> {
   await smokeLocateCandidateOverflow();
   await smokeGenericPlaybookTask();
   await smokeNewBookWritingPlaybooks();
+  await smokeNewBookMainPathEndToEnd();
   await smokeExplicitFactExtraction();
   await smokeAutoExtractAfterWriter();
   await smokeBackfillFacts();
