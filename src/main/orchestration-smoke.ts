@@ -1789,7 +1789,19 @@ async function smokeWorkflowReviewerIssuePersistence(): Promise<void> {
         const applied = refactorWc.control.find((item) => item.type === 'refactor-applied');
         const applyFailed = refactorWc.control.find((item) => item.type === 'refactor-apply-failed');
         check('legacy 完整 E2E 写回隔离正文', manuscriptText === rewritten, applyFailed?.type === 'refactor-apply-failed' ? JSON.stringify(applyFailed) : undefined);
-        check('legacy 完整 E2E 产生 refactor-applied', applied?.type === 'refactor-applied');
+        const legacyApplies = await workflowIssues.listRefactorApplies(legacyIssue.issueId);
+        const legacyAfterApply = await workflowIssues.get(legacyIssue.issueId);
+        check('task 7.4：老书 refactor-applied 原子关联 accepted hunks、checkpoint 与 issue，仅进 verifying',
+          applied?.type === 'refactor-applied'
+          && applied.workflowRef?.issueId === legacyIssue.issueId
+          && applied.checkpointId !== undefined
+          && applied.acceptedHunkIds.length === diffEvent.hunks.length
+          && legacyApplies.length === 1
+          && legacyApplies[0]?.refactorRunId === refactorRunId
+          && legacyApplies[0]?.checkpointId === applied.checkpointId
+          && legacyApplies[0]?.acceptedHunkIds.join(',') === applied.acceptedHunkIds.join(',')
+          && legacyAfterApply?.status === 'verifying'
+          && legacyAfterApply.checkpointIds.includes(applied.checkpointId));
       }
       const checkpoint = `${workflowId}-checkpoint`;
       const currentIssue = await workflowIssues.get(legacyIssue.issueId);
