@@ -1,3 +1,12 @@
+/**
+ * workflow 状态机冲烟 fixture（tasks 11.1 记录语义）：
+ * - workflowId 长生命周期贯穿全部阶段；runId 单次执行，stage.runIds 只追加不清空（重试也保留历史）。
+ * - 两套模板：new-book-creation v1（章节循环 continue/finish-loop 显式转移）与
+ *   legacy-book-revision v1（issue 循环与 targeted-verification 的 quality-failed 回跳）。
+ * - 人工门：author-confirmation 阶段 run 成功后停 awaiting-confirmation，必须 confirm-stage 才推进；
+ *   非法迁移/skip 不改变聚合（乐观并发 version + operationId 幂等）。
+ * 详见 docs/workflow-guided-workbench.md。
+ */
 import assert from 'node:assert/strict';
 import {
   LEGACY_BOOK_REVISION_TEMPLATE,

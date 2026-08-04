@@ -107,7 +107,7 @@
 
 ## 11. 迁移、回归与验收
 
-- [ ] 11.1 [All] 更新相关文档与 smoke fixture，记录 `workflowId`/`runId` 语义、两套模板、人工门和 standalone 兼容路径
+- [x] 11.1 [All] 更新相关文档与 smoke fixture，记录 `workflowId`/`runId` 语义、两套模板、人工门和 standalone 兼容路径（已完成：新增 `docs/workflow-guided-workbench.md`，记录 workflowId/stageId/runId/WorkflowRef 语义与并发幂等、issue 侧 run 关联与指纹 reopen、两套模板全阶段与循环转移、六类人工门（含 7.6 final-audit 确认门、资产候选/影响分流、hunk 裁决）、standalone 兼容路径及各 smoke fixture 分工表；并给 `workflow-smoke.ts`/`workflow-integration-smoke.ts` 补文件头语义注释。typecheck、ESLint、smoke:workflow 全绿。）
 - [ ] 11.2 [Core/Main] 运行 node TypeScript、ESLint、领域/SQLite/IPC/LangGraph 单元与集成测试
 - [ ] 11.3 [Renderer] 运行 web TypeScript、ESLint、组件测试和 Electron build
 - [x] 11.4 [Smoke] 扩展并运行 orchestration smoke，验证阶段允许专家、跨 run 聚合、continuation 路由与既有单次召唤

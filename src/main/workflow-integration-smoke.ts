@@ -1,3 +1,11 @@
+/**
+ * workflow 集成冲烟 fixture（tasks 11.1 记录语义）：SQLite + WorkflowApplicationService 真实落库。
+ * - 两套模板全阶段推进：runId 按阶段挂载并经 SqliteStageRunEvidenceRecorder 留证；
+ *   人工门（author/expert 阶段）必须显式 workflow-confirm-stage，质量门阶段需 completion.passed 证据。
+ * - 命令带 expectedVersion（乐观并发）与 requestId/operationId（幂等）；规划产出落入版本化创作资产。
+ * - standalone 兼容：不携 workflowRef 的 run 不受阶段门限制（由 orchestration-smoke 覆盖）。
+ * 详见 docs/workflow-guided-workbench.md。
+ */
 import assert from 'node:assert/strict';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { join } from 'node:path';
