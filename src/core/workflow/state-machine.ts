@@ -115,12 +115,14 @@ export function transitionWorkflow(workflow: WorkflowInstance, template: Workflo
     if (current.status !== 'running' || definition.completionGate.kind !== 'quality' || !current.runIds.includes(command.runId)) return fail('quality-evidence-required');
     const assessed = { ...current, completionEvidence: [...current.completionEvidence, { kind: 'quality-gate' as const, runId: command.runId, passed: command.passed }] };
     if (command.passed) {
-      next = advance(
-        replaceCurrent(workflow, { ...assessed, status: 'completed', completedAt: envelope.at }),
-        template,
-        envelope.at,
-        'completed',
-      );
+      next = definition.id === 'final-audit'
+        ? replaceCurrent(workflow, { ...assessed, status: 'awaiting-confirmation' })
+        : advance(
+            replaceCurrent(workflow, { ...assessed, status: 'completed', completedAt: envelope.at }),
+            template,
+            envelope.at,
+            'completed',
+          );
     } else {
       const transition = command.transition ?? (command.issueIds !== undefined && command.issueIds.length > 0 ? 'issues-found' : 'quality-failed');
       const targetId = definition.transitions.find((item) => item.when === transition)?.to;
@@ -136,7 +138,8 @@ export function transitionWorkflow(workflow: WorkflowInstance, template: Workflo
     const confirmingExpertOutput =
       current.status === 'awaiting-confirmation' &&
       definition.completionGate.kind === 'author-confirmation';
-    if (!authorCompletingOwnStep && !confirmingExpertOutput) return fail('confirmation-required');
+    const confirmingFinalAudit = current.status === 'awaiting-confirmation' && definition.id === 'final-audit';
+    if (!authorCompletingOwnStep && !confirmingExpertOutput && !confirmingFinalAudit) return fail('confirmation-required');
     const completed = { ...current, status: 'completed' as const, completedAt: envelope.at, completionEvidence: [...current.completionEvidence, { kind: 'author-confirmation' as const, confirmationId: command.confirmationId }] };
     next = advance(
       replaceCurrent(workflow, completed),

@@ -148,6 +148,10 @@ export class WorkflowApplicationService {
     if ((action === 'start-stage' || action === 'confirm-stage') && stage.impactStatus === 'conflicting') {
       throw new Error('workflow stage has unresolved conflicting asset impact');
     }
+    if (action === 'start-stage' && stage.templateStageId === 'final-audit') {
+      const blockingIssues = await this.issues.countFinalizationBlocking(record.workflowId);
+      if (blockingIssues > 0) throw new Error(`workflow has ${blockingIssues} blocking issue(s)`);
+    }
 
     if (action === 'select-issue' || action === 'dismiss-issue' || action === 'verify-issue') {
       if (command.issueId === undefined) throw new Error('issueId is required');

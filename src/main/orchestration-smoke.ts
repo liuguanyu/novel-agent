@@ -1997,7 +1997,20 @@ async function smokeWorkflowReviewerIssuePersistence(): Promise<void> {
     });
     await finalPassRuntime.runGlobalAudit(finalPassWc.asWebContents(), finalPassRunId, finalPass.workflowRef);
     const finalPassSnapshot = await workflows.get(finalPass.workflowRef.workflowId);
-    check('final-audit 无问题后工作流完成', finalPassSnapshot?.status === 'completed');
+    const finalPassStage = finalPassSnapshot?.stages.find((stage) => stage.stageId === finalPassSnapshot.currentStageId);
+    check('task 7.6：final-audit 无问题后等待作者确认而非自动完成',
+      finalPassSnapshot?.status === 'active'
+      && finalPassStage?.templateStageId === 'final-audit'
+      && finalPassStage.status === 'awaiting-confirmation');
+    if (finalPassSnapshot === null || finalPassSnapshot?.currentStageId === null || finalPassSnapshot?.currentStageId === undefined) {
+      throw new Error('final pass confirmation fixture missing');
+    }
+    const finalConfirmed = await service.command({
+      type: 'workflow-confirm-stage', workflowId: finalPassSnapshot.workflowId,
+      stageId: finalPassSnapshot.currentStageId, expectedVersion: finalPassSnapshot.version,
+      requestId: 'legacy-final-pass-confirm', operationId: 'legacy-final-pass-confirm-op',
+    });
+    check('task 7.6：最终复检通过且作者确认后工作流完成', finalConfirmed?.status === 'completed');
 
     const finalFinding = {
       ...JSON.parse(issueText)[0] as ConsistencyIssue,
