@@ -171,6 +171,8 @@ export interface SummonParams {
   instruction?: string;
   /** writer 产出新正文后是否自动抽取低风险事实；冲突仍必须人工裁决。 */
   autoExtractFacts?: boolean;
+  /** 跨阶段资产澄清时由作者明确选择的目标资产。 */
+  targetAssetId?: string;
   /** Lightweight ownership only; workflow history remains in the workflow service. */
   workflowRef?: WorkflowRef;
 }
@@ -325,6 +327,8 @@ interface ActiveRun {
    * 不作为当前阶段的承担运行——因此不写 stage-run、也不驱动阶段状态机 attach-run，避免污染主阶段进度。
    */
   readonly assetClarification?: boolean;
+  /** asset-clarification 经 Main 消歧后锁定的长生命周期资产。 */
+  readonly targetAssetId?: string;
   continuationTarget?: string;
   /** dialogue 分片序号（前端按序拼接）。 */
   seq: number;
@@ -806,9 +810,9 @@ export class OrchestrationRuntime {
     const scope = chapterId !== undefined && planningAssetScopeKind(kind) === 'chapter'
       ? { kind: 'chapter', projectId, chapterId }
       : { kind: 'project', projectId };
-    const assetId = chapterId !== undefined && planningAssetScopeKind(kind) === 'chapter'
+    const assetId = run.targetAssetId ?? (chapterId !== undefined && planningAssetScopeKind(kind) === 'chapter'
       ? `asset:${projectId}:${kind}:${chapterId}`
-      : `asset:${projectId}:${kind}`;
+      : `asset:${projectId}:${kind}`);
     let asset = await assets.get(assetId);
     if (asset === null) {
       asset = await assets.create({
@@ -1193,13 +1197,36 @@ export class OrchestrationRuntime {
     // task 5.3：先将本次召唤在工作流上下文中分类（in-stage / asset-clarification / standalone），再决定校验与记录策略。
     let route: SummonRoute = { route: 'standalone' };
     if (params.workflowRef !== undefined) {
+      const workflowRef = params.workflowRef;
       try {
-        await this.#assertWorkflowRef(params.workflowRef, undefined, true);
-        route = await this.#resolveSummonRoute(params.workflowRef, params.agent);
+        await this.#assertWorkflowRef(workflowRef, undefined, true);
+        route = await this.#resolveSummonRoute(workflowRef, params.agent);
+        if (route.route === 'asset-clarification') {
+          const workflow = await this.#deps.workflows?.get(workflowRef.workflowId);
+          const assets = this.#deps.creativeAssets;
+          if (workflow !== null && workflow !== undefined && assets !== undefined) {
+            const candidates = await assets.listByProjectKind(workflow.projectId, route.targetAssetKind);
+            if (params.targetAssetId !== undefined) {
+              const selected = candidates.find((asset) => asset.assetId === params.targetAssetId);
+              if (selected === undefined) throw new Error('target asset does not belong to workflow project or kind');
+            } else if (candidates.length !== 1) {
+              this.#sendControl(wc, {
+                type: 'asset-target-selection-required', runId,
+                targetAssetKind: route.targetAssetKind,
+                candidates: candidates.map((asset) => ({ assetId: asset.assetId, version: asset.version, content: asset.content })),
+                workflowRef,
+              });
+              return;
+            } else {
+              const only = candidates[0];
+              if (only !== undefined) params = { ...params, targetAssetId: only.assetId };
+            }
+          }
+        }
         // asset-clarification 不是当前阶段的承担运行（跨阶段对目标资产的澄清），不适用阶段写入专家约束；
         // in-stage / standalone 仍需 5.2 校验——mutate 专家必须在当前阶段 allowedExperts 内（否则以 validation 拒绝）。
         if (route.route !== 'asset-clarification') {
-          await this.#assertStageActorAllowed(params.workflowRef, params.mode, params.agent);
+          await this.#assertStageActorAllowed(workflowRef, params.mode, params.agent);
         }
       }
       catch (err) {
@@ -1228,6 +1255,7 @@ export class OrchestrationRuntime {
       ...(params.workflowRef !== undefined ? { workflowRef: params.workflowRef } : {}),
       // 跨阶段资产澄清：保持主阶段不变，不写 stage-run / 不驱阶段状态机（见 ActiveRun.assetClarification）。
       ...(route.route === 'asset-clarification' ? { assetClarification: true } : {}),
+      ...(params.targetAssetId !== undefined ? { targetAssetId: params.targetAssetId } : {}),
     };
     this.#runs.set(runId, run);
     await this.#recordStageRun(run, 'started');

@@ -2275,6 +2275,204 @@ async function smokeTask67GuidedMainPaths(): Promise<void> {
   }
 }
 
+/** task 6.8：正文阶段横切资产澄清、目标消歧、影响清单与阻断分流。 */
+async function smokeTask68AssetClarificationImpacts(): Promise<void> {
+  const dir = await mkdtemp(join(tmpdir(), 'na-task-68-'));
+  const opened = await openDatabase(join(dir, 'task-68.db'));
+  if (!opened.ok) {
+    check('task 6.8 SQLite 可用', false, opened.message);
+    await rm(dir, { recursive: true, force: true });
+    return;
+  }
+  const db = opened.db;
+  try {
+    const workflows = new WorkflowRepository(db);
+    const workflowIssues = new WorkflowIssueRepository(db);
+    const creativeAssets = new CreativeAssetRepository(db);
+    const stageRunEvidence = new SqliteStageRunEvidenceRecorder(db);
+    const service = new WorkflowApplicationService(workflows, creativeAssets, workflowIssues);
+    const workflowId = 'task-68-workflow';
+    const projectId = 'task-68-project';
+    await service.command({
+      type: 'start-workflow', workflowId, projectId, kind: 'new-book-creation',
+      objective: 'task 6.8 asset clarification', requestId: 'task-68-start', operationId: 'task-68-start-op',
+    });
+    const currentStage = async () => {
+      const workflow = await workflows.get(workflowId);
+      if (workflow === null || workflow.currentStageId === null) throw new Error('task 6.8 workflow missing');
+      const stage = workflow.stages.find((candidate) => candidate.stageId === workflow.currentStageId);
+      if (stage === undefined) throw new Error('task 6.8 stage missing');
+      return { workflow, stage };
+    };
+    for (const [index, expected] of ['concept', 'worldbuilding', 'character-design', 'book-outline', 'chapter-plan', 'scene-outline'].entries()) {
+      const current = await currentStage();
+      if (current.stage.templateStageId !== expected) throw new Error(`task 6.8 expected ${expected}`);
+      const runId = `task-68:advance:${index}` as RunId;
+      await service.command({
+        type: 'workflow-start-stage', workflowId, stageId: current.stage.stageId,
+        expectedVersion: current.workflow.version, runId,
+        requestId: `task-68-advance-${index}`, operationId: `task-68-advance-${index}-op`,
+      });
+      await stageRunEvidence.record({ runId, workflowRef: { workflowId, stageId: current.stage.stageId }, status: 'started' });
+      await stageRunEvidence.record({ runId, workflowRef: { workflowId, stageId: current.stage.stageId }, status: 'completed' });
+      const awaiting = await currentStage();
+      await service.command({
+        type: 'workflow-confirm-stage', workflowId, stageId: awaiting.stage.stageId,
+        expectedVersion: awaiting.workflow.version,
+        requestId: `task-68-confirm-${index}`, operationId: `task-68-confirm-${index}-op`,
+      });
+    }
+    const writing = await currentStage();
+    if (writing.stage.templateStageId !== 'draft-writing') throw new Error('task 6.8 draft-writing missing');
+    const writingStageId = writing.stage.stageId;
+
+    const linMoAssetId = 'asset:task-68:character:lin-mo';
+    const linLanAssetId = 'asset:task-68:character:lin-lan';
+    await creativeAssets.create({
+      assetId: linMoAssetId, projectId, kind: 'character', scope: { kind: 'project', projectId },
+      content: { canonicalName: '林默', attributes: { fear: '失去同伴' } }, version: 1,
+      status: 'confirmed', provenance: { runId: 'task-68-seed-lin-mo' },
+    });
+    await creativeAssets.create({
+      assetId: linLanAssetId, projectId, kind: 'character', scope: { kind: 'project', projectId },
+      content: { canonicalName: '林岚', attributes: { fear: '水' } }, version: 1,
+      status: 'confirmed', provenance: { runId: 'task-68-seed-lin-lan' },
+    });
+    const clarificationDraft = JSON.stringify({
+      canonicalName: '林岚', aliases: ['岚姐'],
+      attributes: { fear: '封闭空间', role: 'guide' },
+    });
+    const runtime = new OrchestrationRuntime({
+      getModelResolver: () => new FakeModelResolver(clarificationDraft, '[]').asResolver(),
+      getCheckpointer: () => new SqliteCheckpointer(db),
+      getFactStore: () => new SqliteFactStore(db),
+      workflows, workflowIssues, creativeAssets, stageRunEvidence,
+    });
+    const ambiguousRunId = 'task-68-ambiguous' as RunId;
+    const ambiguousWc = new FakeWebContents();
+    await runtime.summon(ambiguousWc.asWebContents(), {
+      runId: ambiguousRunId, mode: 'mutate', agent: 'character-generator',
+      instruction: '林岚不怕水，她害怕封闭空间',
+      workflowRef: { workflowId, stageId: writingStageId },
+    });
+    const selection = ambiguousWc.control.find((event) => event.type === 'asset-target-selection-required');
+    const candidateCountBefore = Number((await db.get('SELECT COUNT(*) AS n FROM creative_asset_candidates'))?.['n'] ?? 0);
+    const afterAmbiguous = await currentStage();
+    check('task 6.8：同类人物目标不唯一时 Main 要求显式消歧且零候选副作用',
+      selection?.type === 'asset-target-selection-required'
+      && selection.candidates.map((candidate) => candidate.assetId).join(',') === [linLanAssetId, linMoAssetId].sort().join(',')
+      && candidateCountBefore === 0
+      && afterAmbiguous.stage.stageId === writingStageId
+      && afterAmbiguous.stage.runIds?.includes(ambiguousRunId) !== true);
+
+    const dependentStaleId = 'asset:task-68:chapter-plan';
+    const dependentConflictId = 'asset:task-68:scene-outline';
+    await creativeAssets.create({
+      assetId: dependentStaleId, projectId, kind: 'chapter-plan', scope: { kind: 'project', projectId },
+      content: { title: '依赖林岚旧设定的章节规划' }, status: 'confirmed', provenance: { runId: 'seed-stale' },
+    });
+    await creativeAssets.create({
+      assetId: dependentConflictId, projectId, kind: 'scene-outline', scope: { kind: 'project', projectId },
+      content: { title: '与林岚新设定冲突的分场' }, status: 'confirmed', provenance: { runId: 'seed-conflict' },
+    });
+    await creativeAssets.addDependency({
+      sourceAssetId: linLanAssetId, sourceVersion: 1, dependentAssetId: dependentStaleId,
+      kind: 'reference', targetType: 'asset', targetId: dependentStaleId,
+      workflowId, stageId: writingStageId, scope: { impactLevel: 'stale' },
+    });
+    await creativeAssets.addDependency({
+      sourceAssetId: linLanAssetId, sourceVersion: 1, dependentAssetId: dependentConflictId,
+      kind: 'semantic-conflict', targetType: 'workflow-stage', targetId: writingStageId,
+      workflowId, stageId: writingStageId, scope: { impactLevel: 'conflicting' },
+    });
+
+    const selectedRunId = 'task-68-selected' as RunId;
+    const selectedWc = new FakeWebContents();
+    await runtime.summon(selectedWc.asWebContents(), {
+      runId: selectedRunId, mode: 'mutate', agent: 'character-generator', targetAssetId: linLanAssetId,
+      instruction: '林岚不怕水，她害怕封闭空间',
+      workflowRef: { workflowId, stageId: writingStageId },
+    });
+    const proposed = selectedWc.control.find((event) => event.type === 'creative-asset-change-proposed');
+    if (proposed?.type !== 'creative-asset-change-proposed') throw new Error('task 6.8 selected candidate missing');
+    const candidateId = proposed.candidate.candidateId;
+    const candidate = await creativeAssets.getCandidate(candidateId);
+    const changeSet = candidate?.changeSetId === undefined ? null : await db.get(
+      'SELECT * FROM creative_asset_change_sets WHERE change_set_id=?', candidate.changeSetId,
+    );
+    const afterProposal = await currentStage();
+    check('task 6.8：显式目标生成绑定正确 asset/baseVersion 的字段 change set，主阶段保持',
+      candidate?.assetId === linLanAssetId
+      && candidate.baseVersion === 1
+      && changeSet !== null
+      && (JSON.parse(String(changeSet['operations_json'])) as unknown[]).length > 0
+      && afterProposal.stage.stageId === writingStageId
+      && afterProposal.stage.status === 'ready'
+      && afterProposal.stage.runIds?.includes(selectedRunId) !== true
+      && (await creativeAssets.get(linLanAssetId))?.version === 1);
+
+    await service.command({
+      type: 'workflow-confirm-asset-change', workflowId, stageId: writingStageId,
+      expectedVersion: afterProposal.workflow.version, candidateId, runId: 'task-68-confirm-asset',
+      requestId: 'task-68-confirm-asset', operationId: 'task-68-confirm-asset-op',
+    });
+    const assetEvents = service.drainAssetEvents();
+    const confirmed = await creativeAssets.get(linLanAssetId);
+    const impacts = await creativeAssets.listImpacts(linLanAssetId, 2);
+    const impacted = await currentStage();
+    check('task 6.8：Main 确认创建新版本并下发 stale/conflicting 完整影响清单',
+      confirmed?.version === 2
+      && impacts.length === 2
+      && impacts.some((impact) => impact.status === 'stale')
+      && impacts.some((impact) => impact.status === 'conflicting')
+      && assetEvents.filter((event) => event['type'] === 'asset-impact-detected').length === 2
+      && impacted.stage.stageId === writingStageId
+      && impacted.stage.status === 'ready'
+      && impacted.stage.impactStatus === 'conflicting');
+    const versionRows = await db.all('SELECT version FROM creative_asset_versions WHERE asset_id=? ORDER BY version', linLanAssetId);
+    check('task 6.8：资产旧版本与 applied change set 均持久保留',
+      versionRows.map((row) => Number(row['version'])).join(',') === '1,2'
+      && changeSet !== null
+      && String((await db.get('SELECT status FROM creative_asset_change_sets WHERE change_set_id=?', String(changeSet['change_set_id'])))?.['status']) === 'applied');
+
+    let conflictBlocked = false;
+    try {
+      await service.command({
+        type: 'workflow-start-stage', workflowId, stageId: writingStageId,
+        expectedVersion: impacted.workflow.version, runId: 'task-68-writing',
+        requestId: 'task-68-writing-blocked', operationId: 'task-68-writing-blocked-op',
+      });
+    } catch (error) {
+      conflictBlocked = error instanceof Error && /conflicting asset impact/.test(error.message);
+    }
+    const conflictingImpact = impacts.find((impact) => impact.status === 'conflicting');
+    if (conflictingImpact === undefined) throw new Error('task 6.8 conflicting impact missing');
+    await service.command({
+      type: 'workflow-resolve-asset-impact', workflowId, stageId: writingStageId,
+      expectedVersion: impacted.workflow.version, impactId: conflictingImpact.impactId, result: 'handle-now',
+      requestId: 'task-68-resolve-conflict', operationId: 'task-68-resolve-conflict-op',
+    });
+    const staleOnly = await currentStage();
+    const startedWriting = await service.command({
+      type: 'workflow-start-stage', workflowId, stageId: writingStageId,
+      expectedVersion: staleOnly.workflow.version, runId: 'task-68-writing',
+      requestId: 'task-68-writing-start', operationId: 'task-68-writing-start-op',
+    });
+    const staleImpact = impacts.find((impact) => impact.status === 'stale');
+    check('task 6.8：conflicting 阻断受影响阶段，处理后 stale 作为 non-blocking 提醒放行',
+      conflictBlocked
+      && staleOnly.stage.impactStatus === 'stale'
+      && startedWriting?.currentStageId === writingStageId
+      && (startedWriting?.stages.find((stage) => stage['stageId'] === writingStageId)?.['status'] === 'running')
+      && staleImpact !== undefined
+      && (await creativeAssets.listImpacts(linLanAssetId, 2)).some((impact) =>
+        impact.impactId === conflictingImpact.impactId && impact.status === 'resolved'));
+  } finally {
+    await db.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+}
+
 /**
  * 视觉设计契约冒烟 (I8 visual-design)：验证 core 侧可测契约——
  * 每个 agent 目录条目都有图标名；主题解析真值表正确；三态循环遍历全部偏好。
@@ -4466,6 +4664,7 @@ async function main(): Promise<void> {
   await smokeNoFactStoreHappyPath();
   await smokeWorkflowReviewerIssuePersistence();
   await smokeTask67GuidedMainPaths();
+  await smokeTask68AssetClarificationImpacts();
   await smokeWorkflowContinuationResume();
   await smokeLocateSourceTask();
   await smokeLocateSourceEndToEnd();

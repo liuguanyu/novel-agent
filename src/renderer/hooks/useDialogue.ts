@@ -46,6 +46,8 @@ export interface SummonRequest {
   instruction?: string;
   /** writer 新草稿完成后是否触发事实抽取。 */
   autoExtractFacts?: boolean;
+  /** 跨阶段资产澄清时由作者明确选择的目标资产。 */
+  targetAssetId?: string;
   workflowRef?: WorkflowRefDto;
 }
 
@@ -188,6 +190,7 @@ export function useDialogue(workflowRef?: WorkflowRefDto): UseDialogueResult {
       ...(request.anchorNodeId !== undefined ? { anchorNodeId: request.anchorNodeId } : {}),
       ...(request.instruction !== undefined ? { instruction: request.instruction } : {}),
       ...(request.autoExtractFacts !== undefined ? { autoExtractFacts: request.autoExtractFacts } : {}),
+      ...(request.targetAssetId !== undefined ? { targetAssetId: request.targetAssetId } : {}),
       ...(request.workflowRef === undefined ? (workflowRef === undefined ? {} : { workflowRef }) : { workflowRef: request.workflowRef }),
     };
     if (command.workflowRef !== undefined) runRefsRef.current.set(runId, command.workflowRef);

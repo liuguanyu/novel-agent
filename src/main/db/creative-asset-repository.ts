@@ -73,6 +73,16 @@ export interface CreativeAssetCandidate {
 export class CreativeAssetRepository {
   constructor(private readonly db: SqliteDatabase) {}
 
+  async listByProjectKind(projectId: string, kind: string): Promise<ReadonlyArray<CreativeAssetRecord>> {
+    const rows = await this.db.all(
+      'SELECT asset_id FROM creative_assets WHERE project_id=? AND kind=? ORDER BY asset_id',
+      projectId,
+      kind,
+    );
+    const assets = await Promise.all(rows.map((row) => this.get(String(row['asset_id']))));
+    return assets.filter((asset): asset is CreativeAssetRecord => asset !== null);
+  }
+
   async get(assetId: string): Promise<CreativeAssetRecord | null> {
     const asset = await this.db.get('SELECT * FROM creative_assets WHERE asset_id=?', assetId);
     if (asset === null) return null;

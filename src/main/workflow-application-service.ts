@@ -124,6 +124,9 @@ export class WorkflowApplicationService {
     if (stageId === null) throw new Error('workflow has no current stage');
     const stage = record.stages.find((candidate) => candidate.stageId === stageId);
     if (stage === undefined) throw new Error('stage does not belong to workflow');
+    if ((action === 'start-stage' || action === 'confirm-stage') && stage.impactStatus === 'conflicting') {
+      throw new Error('workflow stage has unresolved conflicting asset impact');
+    }
 
     if (action === 'select-issue' || action === 'dismiss-issue' || action === 'verify-issue') {
       if (command.issueId === undefined) throw new Error('issueId is required');

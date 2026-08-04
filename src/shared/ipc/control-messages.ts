@@ -452,6 +452,15 @@ export interface CorpusRetrievalFailedEvent {
   };
 }
 
+/** 跨阶段资产澄清命中多个目标时要求作者显式消歧；此事件不创建 change set。 */
+export interface AssetTargetSelectionRequiredEvent {
+  type: 'asset-target-selection-required';
+  runId: RunId;
+  targetAssetKind: string;
+  candidates: ReadonlyArray<{ assetId: string; version: number; content: unknown }>;
+  workflowRef: WorkflowRefDto;
+}
+
 /** 待作者确认的创作资产候选；增量 optional-friendly DTO，不代表 Renderer 已提交。 */
 export interface CreativeAssetCandidateDto {
   candidateId: string;
@@ -502,6 +511,7 @@ export interface AssetImpactDetectedEvent {
 export type BackendControlEvent =
   | WorkflowSnapshotEvent
   | WorkflowFailureEvent
+  | AssetTargetSelectionRequiredEvent
   | CreativeAssetChangeProposedEvent
   | CreativeAssetUpdatedEvent
   | AssetImpactDetectedEvent

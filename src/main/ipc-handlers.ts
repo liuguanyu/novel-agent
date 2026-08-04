@@ -97,8 +97,8 @@ const workflowActionSchema = z.object({
     'workflow-pause', 'workflow-resume', 'workflow-cancel', 'workflow-update-goal', 'workflow-update-author-intents', 'workflow-select-issue', 'workflow-dismiss-issue',
     'workflow-verify-issue', 'workflow-change-asset', 'workflow-confirm-asset-change', 'workflow-reject-asset-change',
     'workflow-resolve-asset-impact',
-  ]), workflowId: idSchema, stageId: idSchema.optional(), issueId: idSchema.optional(), assetId: idSchema.optional(),
-  impactId: idSchema.optional(), runId: idSchema.optional(), reason: z.string().max(10_000).optional(), result: z.string().max(256).optional(),
+  ]), workflowId: idSchema, stageId: idSchema.optional(), chapterId: idSchema.optional(), issueId: idSchema.optional(), assetId: idSchema.optional(),
+  candidateId: idSchema.optional(), impactId: idSchema.optional(), runId: idSchema.optional(), reason: z.string().max(10_000).optional(), result: z.string().max(256).optional(),
   content: z.unknown().optional(), provenance: z.unknown().optional(), objective: z.string().trim().min(1).max(10_000).optional(), authorIntents: z.array(authorIntentSchema).max(100).optional(),
 }).strict();
 const workflowCommandSchema = z.union([startWorkflowSchema, workflowActionSchema]);
@@ -209,6 +209,7 @@ export function registerIpcHandlers(runtime: OrchestrationRuntime, workflowServi
           ...(message.keywords !== undefined ? { keywords: message.keywords } : {}),
           ...(message.instruction !== undefined ? { instruction: message.instruction } : {}),
           ...(message.autoExtractFacts !== undefined ? { autoExtractFacts: message.autoExtractFacts } : {}),
+          ...(message.targetAssetId !== undefined ? { targetAssetId: message.targetAssetId } : {}),
           ...(message.workflowRef !== undefined ? { workflowRef: message.workflowRef } : {}),
         };
         void runtime.summon(wc, params);

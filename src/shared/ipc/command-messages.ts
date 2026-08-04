@@ -51,6 +51,8 @@ export interface SummonRunCommand {
   instruction?: string;
   /** 可选：writer 产出新草稿后自动抽取低风险事实；冲突仍走手刹。 */
   autoExtractFacts?: boolean;
+  /** 跨阶段资产澄清时由作者明确选择的目标资产；未提供且候选不唯一时 Main 必须要求消歧。 */
+  targetAssetId?: string;
   /** Optional ownership by a long-running workflow stage. */
   workflowRef?: WorkflowRefDto;
 }
