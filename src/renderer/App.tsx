@@ -56,6 +56,7 @@ import { useAssetReview } from './hooks/useAssetReview.js';
 import { useTaskActivityStream } from './hooks/useTaskActivityStream.js';
 import { useTaskUiEffects } from './hooks/useTaskUiEffects.js';
 import { buildIssueRefactorIntent, resolveIssueChapterTarget } from './lib/workflow-ui-contracts.js';
+import { resolveViewModeSurfaces, type AppViewMode } from './lib/workbench-view-contracts.js';
 
 function findChapterPath(
   nodes: ReadonlyArray<ChapterTreeNodeDto>,
@@ -72,11 +73,12 @@ function findChapterPath(
 }
 
 /**
- * 全局显示模式（task 10.7）：单一判别状态，三模式互斥。
+ * 全局显示模式（task 10.7）：单一判别状态，三模式互斥；
+ * 可见面矩阵由 lib/workbench-view-contracts 的 resolveViewModeSurfaces 统一给出（与冲烟同源）。
  * 工作台内容在非 workbench 模式下仅隐藏不卸载，保留阅读位置、高亮与栏宽；
  * 后台任务全部在 Main 进程，模式切换天然不中断运行。
  */
-type ViewMode = 'workbench' | 'reading' | 'conversation';
+type ViewMode = AppViewMode;
 
 export function App(): JSX.Element {
   const {
@@ -632,10 +634,12 @@ export function App(): JSX.Element {
   );
 
   const bookTitle = tree?.title.trim();
+  // 三模式可见面矩阵（task 10.7/10.10）：与 orchestration 冲烟同源，互斥关系不在 JSX 里散落判断。
+  const surfaces = resolveViewModeSurfaces(viewMode);
 
   return (
     <div className="flex h-screen flex-col bg-background text-foreground">
-      {viewMode === 'workbench' && (
+      {surfaces.header && (
         <header className="flex items-center justify-between border-b border-border bg-card px-4 py-2">
           <div className="flex min-w-0 items-center gap-2">
             <div className="flex shrink-0 items-center gap-2 font-semibold">
@@ -693,7 +697,7 @@ export function App(): JSX.Element {
         </div>
       )}
 
-      {viewMode === 'reading' && (
+      {surfaces.readingSurface && (
         <div className="min-h-0 flex-1">
           <ReadingMode
             tree={tree}
@@ -709,7 +713,7 @@ export function App(): JSX.Element {
         </div>
       )}
 
-      {viewMode === 'conversation' && (
+      {surfaces.conversationSurface && (
         <div className="min-h-0 flex-1">
           <ConversationMode
             expertLabel={conversationAgentLabel}
@@ -722,7 +726,7 @@ export function App(): JSX.Element {
       )}
 
       {/* 工作台主体：非 workbench 模式仅隐藏不卸载，保留滚动位置/高亮/栏宽与后台订阅。 */}
-      <div className={viewMode === 'workbench' ? 'flex min-h-0 flex-1 flex-col' : 'hidden'}>
+      <div className={surfaces.workbenchBodyVisible ? 'flex min-h-0 flex-1 flex-col' : 'hidden'}>
         <WorkflowGraph
           projectId={workspaceProjectId}
           tree={tree}
@@ -798,7 +802,7 @@ export function App(): JSX.Element {
           </ResizablePanel>
           <ResizableHandle withHandle />
           <ResizablePanel defaultSize={26} minSize={16} maxSize={44} className="min-h-0">
-            {viewMode === 'conversation' ? null : dialogueAxis}
+            {surfaces.dialogueAxisInPanel ? dialogueAxis : null}
           </ResizablePanel>
         </ResizablePanelGroup>
 
@@ -823,7 +827,7 @@ export function App(): JSX.Element {
 
       {/* Hero 连线为全屏工作台专属（task 10.10）：其他模式下卸载，停止坐标计算；
           返回后仅当选中问题与锚点仍存在时自然恢复。 */}
-      {viewMode === 'workbench' && (
+      {surfaces.findingConnector && (
         <FindingConnector
           runId={activeFinding?.runId}
           index={activeFinding?.index}

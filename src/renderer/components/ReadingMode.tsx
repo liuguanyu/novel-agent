@@ -9,6 +9,7 @@
 import { useEffect, useMemo, useRef } from 'react';
 import { ArrowLeft, ChevronLeft, ChevronRight, Loader2, CircleAlert } from 'lucide-react';
 import { Button } from './ui/button.js';
+import { readingBackgroundBadge } from '../lib/workbench-view-contracts.js';
 import type { ChapterTreeDto, ChapterTreeNodeDto } from '../../shared/ipc/index.js';
 
 interface ReadingModeProps {
@@ -50,6 +51,8 @@ export function ReadingMode({
   onExit,
 }: ReadingModeProps): JSX.Element {
   const scrollRef = useRef<HTMLDivElement>(null);
+  // 后台徽标投影与冲烟同源：attention 优先且只提示不强制退出阅读。
+  const badge = readingBackgroundBadge(backgroundBusy, backgroundNeedsAttention);
 
   const chapters = useMemo(() => (tree === undefined ? [] : flattenChapters(tree.roots)), [tree]);
   const currentIndex = useMemo(
@@ -174,9 +177,9 @@ export function ReadingMode({
         </article>
       </div>
 
-      {(backgroundBusy || backgroundNeedsAttention) && (
+      {badge !== 'none' && (
         <div className="pointer-events-none absolute bottom-4 right-4">
-          {backgroundNeedsAttention ? (
+          {badge === 'attention' ? (
             <button
               type="button"
               onClick={onExit}

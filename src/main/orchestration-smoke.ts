@@ -90,8 +90,11 @@ import {
   buildWorkflowView,
   impactStatusLabel,
   observationSummary,
+  readingBackgroundBadge,
+  resolveViewModeSurfaces,
   stageStatusLabel,
   workflowStageView,
+  type AppViewMode,
 } from '../renderer/lib/workbench-view-contracts.js';
 import type { WorkflowSnapshotDto } from '../shared/ipc/index.js';
 import type { WorkbenchActivities } from '../core/shell/workbench-graph.js';
@@ -4972,6 +4975,35 @@ function smokeTask96WorkbenchViewContracts(): void {
 }
 
 /**
+ * 10.11 冲烟（可自动化部分）：三模式互斥可见面矩阵与读书模式后台徽标投影，
+ * 与 App/ReadingMode 同源复用 workbench-view-contracts。窗口宽窄/hover/focus 等纯交互项见 tasks.md 手工清单。
+ */
+function smokeTask1011ViewModeContracts(): void {
+  const modes: ReadonlyArray<AppViewMode> = ['workbench', 'reading', 'conversation'];
+  const all = modes.map((mode) => resolveViewModeSurfaces(mode));
+  check('task 10.11：任一模式恰有一个主面可见（三模式互斥）',
+    all.every((surface) =>
+      [surface.workbenchBodyVisible, surface.readingSurface, surface.conversationSurface]
+        .filter(Boolean).length === 1));
+  const workbench = resolveViewModeSurfaces('workbench');
+  const reading = resolveViewModeSurfaces('reading');
+  const conversation = resolveViewModeSurfaces('conversation');
+  check('task 10.11：顶栏与 Hero 连线为全屏工作台专属，其余模式卸载停算',
+    workbench.header && workbench.findingConnector
+    && !reading.header && !reading.findingConnector
+    && !conversation.header && !conversation.findingConnector);
+  check('task 10.11：对话轴仅在专注对话模式移出三栏面板（不重复挂载）',
+    workbench.dialogueAxisInPanel && reading.dialogueAxisInPanel && !conversation.dialogueAxisInPanel);
+  check('task 10.11：读书/对话模式下工作台主体不可见（App 侧仅隐藏不卸载，后台订阅保留）',
+    !reading.workbenchBodyVisible && !conversation.workbenchBodyVisible && workbench.workbenchBodyVisible);
+  check('task 10.11：读书模式后台徽标裁决事项优先且只提示不强制退出',
+    readingBackgroundBadge(true, true) === 'attention'
+    && readingBackgroundBadge(false, true) === 'attention'
+    && readingBackgroundBadge(true, false) === 'busy'
+    && readingBackgroundBadge(false, false) === 'none');
+}
+
+/**
  * 3.6 冲烟（静态守卫）：Renderer 不得直接访问 DB/LLM/fs 或主进程模块。
  * 递归扫描 src/renderer 下所有 .ts/.tsx 源文件，断言无任何 import 命中禁用模块白名单以外的副作用源：
  * node 内置（node: 前缀、fs/path/os 等）、electron、sqlite/better-sqlite3、模型适配层、main/ 与 core/ 的 db/model 模块。
@@ -5255,6 +5287,7 @@ async function main(): Promise<void> {
   await smokeModelAuditNoCoT();
   smokeTask87RendererContracts();
   smokeTask96WorkbenchViewContracts();
+  smokeTask1011ViewModeContracts();
   await smokeRendererIsolation();
   await smokeNewBookWritingPlaybooks();
   await smokeNewBookMainPathEndToEnd();

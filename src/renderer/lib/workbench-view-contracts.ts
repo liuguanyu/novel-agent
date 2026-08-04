@@ -169,3 +169,49 @@ export function observationSummary(observation: WorkbenchObservationLike | undef
     ? '等待工作任务'
     : `轨迹 ${observation.count} · ${nodeLabel(observation.node)}${observation.phase === 'enter' ? '进入' : '完成'}`;
 }
+
+/** 产品外壳单一判别三模式（task 10.7）：互斥全屏面，切换不中断后台。 */
+export type AppViewMode = 'workbench' | 'reading' | 'conversation';
+
+/**
+ * 模式→可见面矩阵（task 10.7/10.10）：App 外壳与冲烟同源复用，保证三模式互斥不漂移。
+ * 注意：workbenchBodyVisible=false 时工作台主体只隐藏不卸载（保留滚动/高亮/订阅）；
+ * findingConnector 为全屏工作台专属，其余模式卸载以停止坐标计算。
+ */
+export interface ViewModeSurfaces {
+  /** 顶部产品栏（书目面包屑 + 模式入口）仅 workbench。 */
+  readonly header: boolean;
+  /** 全屏读书视图。 */
+  readonly readingSurface: boolean;
+  /** 全屏专注对话视图。 */
+  readonly conversationSurface: boolean;
+  /** 工作台主体可见；不可见时仅隐藏不卸载。 */
+  readonly workbenchBodyVisible: boolean;
+  /** 对话轴留在三栏面板；conversation 模式移入全屏对话且不重复挂载。 */
+  readonly dialogueAxisInPanel: boolean;
+  /** Hero 连线仅全屏工作台挂载（task 10.10）。 */
+  readonly findingConnector: boolean;
+}
+
+export function resolveViewModeSurfaces(mode: AppViewMode): ViewModeSurfaces {
+  return {
+    header: mode === 'workbench',
+    readingSurface: mode === 'reading',
+    conversationSurface: mode === 'conversation',
+    workbenchBodyVisible: mode === 'workbench',
+    dialogueAxisInPanel: mode !== 'conversation',
+    findingConnector: mode === 'workbench',
+  };
+}
+
+/**
+ * 读书模式右下角极简后台徽标（task 10.8）：裁决事项优先于常规忙碌；
+ * attention 只是可点击提示，绝不自动把作者踢回工作台。
+ */
+export function readingBackgroundBadge(
+  busy: boolean,
+  needsAttention: boolean,
+): 'attention' | 'busy' | 'none' {
+  if (needsAttention) return 'attention';
+  return busy ? 'busy' : 'none';
+}

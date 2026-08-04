@@ -97,7 +97,7 @@
 - [x] 10.8 [Renderer] 实现读书模式：全屏人类阅读排版、书名/章节上下文、上一章/下一章、返回工作台、极简后台状态；隐藏 Graph、导航、对话、按需面板与 Hero 连线
 - [x] 10.9 [Renderer] 实现对话专注模式：全屏对话、当前专家/任务/章节上下文、召唤/切换专家、返回工作台；隐藏正文、导航、Graph 与 Hero 连线
 - [x] 10.10 [Renderer] 将 Hero 连线约束为非全屏工作台专属；模式切换时停止无意义渲染/坐标计算，返回工作台后仅在锚点仍有效时恢复
-- [ ] 10.11 [Renderer Test/Manual] 验证窗口窄宽适配、键盘/hover/focus 可访问性、三种模式互斥、后台任务跨模式继续、冲突不强制退出读书模式、底部实时章节更新和事实底稿按需打开
+- [x] 10.11 [Renderer Test/Manual] 验证窗口窄宽适配、键盘/hover/focus 可访问性、三种模式互斥、后台任务跨模式继续、冲突不强制退出读书模式、底部实时章节更新和事实底稿按需打开（已完成：① 自动化部分——新增 `resolveViewModeSurfaces`/`readingBackgroundBadge` 纯契约并由 App/ReadingMode 真实复用（取代 JSX 里散落的 viewMode 判断），orchestration smoke 新增 `smokeTask1011ViewModeContracts` 5 项断言：任一模式恰有一个主面可见、顶栏/Hero 连线为工作台专属、对话轴仅在专注对话移出三栏面板、非 workbench 模式主体不可见、读书徽标裁决优先且只提示。② 代码审计部分——后台任务跨模式继续：任务全在 Main 进程且工作台主体用 `hidden` class 隐藏而非卸载（订阅/滚动/栏宽保留）；冲突不强制退出读书：ReadingMode 无任何自动 onExit 调用，attention 徽标仅作者点击才返回；键盘：Esc 返回工作台（尊重 defaultPrevented）、读书模式 ←/→ 翻章且避开修饰键，入口均为原生 button（可 focus，hover/focus 样式由 shadcn Button 与 hover: class 提供）；窄宽：三栏 ResizablePanel 均设 minSize/maxSize，面包屑/读书页眉用 min-w-0+truncate；底部实时：StatusFooter 消费 taskStream 实时 items（含章节 label，aria-live=polite）；事实底稿：仅经 StatusFooter/Graph/任务中心入口 setFactSheetOpen 按需打开。③ 纯交互目测项（窄窗口视觉效果、hover/focus 视觉反馈、模式切换体感）已列为手工清单，需在应用内人工复核，未伪造自动化结论。typecheck、相关 ESLint、workflow/orchestration smoke 全绿。）
 - [x] 10.12 [Core/Main] 定义 `ModelTask`、`ModelTaskAttempt`、`ModelTaskActivity`、任务类型、活动阶段、任务作用域和结构化冲突裁决 DTO；明确任务会话与专家对话的边界
 - [x] 10.13 [IPC] 定义模型任务活动、任务消息、失败、完成、作者补充、重试和中断的判别联合与命令契约；要求 task/run/workflow/stage/chapter scope、request metadata 和幂等性
 - [x] 10.14 [Main] 将事实抽取 run 映射到独立模型任务会话，发布结构化活动和结果摘要；不发布隐藏思维链，不将任务消息写入专家聊天历史
