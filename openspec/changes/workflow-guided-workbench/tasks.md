@@ -57,7 +57,7 @@
 
 ## 7. 老书问题修订闭环
 
-- [ ] 7.1 [Main/utilityProcess] 将项目导入、全书事实回填与首次全书总检接入老书模板，并记录 factVersion 与 audit run 引用
+- [x] 7.1 [Main/utilityProcess] 将项目导入、全书事实回填与首次全书总检接入老书模板，并记录 factVersion 与 audit run 引用（已实现并核实：`legacy-book-revision` 的 import-book 作者确认后进入 fact-backfill；Renderer 的工作流按钮经 `backfill-facts + workflowRef` 调用 Main，未显式指定章节时由 Main 按 manifest 顺序读取全部 chapter 正文，Runtime 在单一 workflow stage-run 中串行执行抽取/冲突处理并记录最终 `factVersion/autoIngested/conflicts/skipped`，完成后自动进入 initial-audit。首次总检经既有 AuditRunner 抽象（生产默认 utilityProcess，失败回退 Inline）读取 Story Bible 最新快照，持久 stage-run 的 `auditRunId/factVersion` 与 dashboard factVersion，并推进 issue-triage。核实时发现连续章节快速写入的 fact_versions 可能同毫秒，旧 `getLatestVersion()` 只按 created_at 排序会误取旧版本；现增加 `rowid DESC` 平局顺序，确保总检实际消费回填最终版本。orchestration smoke 现串联导入→全书回填→首次总检，精确断言回填 evidence、audit evidence、dashboard 三处 factVersion 相等，audit run 引用正确且进入问题分诊。）
 - [ ] 7.2 [Main] 将总检 `ConsistencyIssue` 映射/去重为持久化 workflow issue records，并支持按 severity/status 选择修订项
 - [ ] 7.3 [Main] 将 WorkflowIssueRecord 的 discovery/audit/history、问题定位、diff/hunk/checkpoint/verifying/复检回环与稳定 issue/chapter/node 锚点关联，并支持 resolved 后 reopen；锚点失效时阻塞而非猜测写入
 - [ ] 7.4 [Main] 在 `refactor-applied` 事务结果中关联 accepted hunks、checkpoint 与 issue，并仅将问题推进到 verifying

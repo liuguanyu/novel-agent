@@ -668,10 +668,10 @@ export class SqliteFactStore implements FactStoreReader {
     return version;
   }
 
-  /** 取最近一次 appendVersion 的版本 id（按 created_at 降序）。无版本时返回 null。 */
+  /** 取最近一次 appendVersion 的版本 id；同毫秒写入时以 SQLite 插入顺序消除歧义。 */
   async getLatestVersion(): Promise<FactVersionId | null> {
     const row = await this.#db.get(
-      'SELECT id FROM fact_versions ORDER BY created_at DESC LIMIT 1',
+      'SELECT id FROM fact_versions ORDER BY created_at DESC, rowid DESC LIMIT 1',
     );
     return row === null ? null : asFactVersionId(String(row['id']));
   }

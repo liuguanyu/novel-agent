@@ -920,7 +920,7 @@ async function smokeBackfillFacts(): Promise<void> {
   const factEvidence = stageRuns[0]?.['evidence_json'] === undefined
     ? undefined
     : JSON.parse(String(stageRuns[0]['evidence_json'])) as { factVersion?: string; conflicts?: string };
-  check('task 6.3：事实抽取结果映射 stage-run 质量证据',
+  check('task 7.1：老书全书回填记录最终 factVersion',
     typeof factEvidence?.factVersion === 'string' && factEvidence.factVersion.length > 0 && factEvidence.conflicts === '0');
   if (advanced?.currentStageId === null || advanced?.currentStageId === undefined) throw new Error('老书全书诊断阶段缺失');
   const auditWc = new FakeWebContents();
@@ -931,8 +931,16 @@ async function smokeBackfillFacts(): Promise<void> {
   const auditEvidence = auditStageRun === null
     ? undefined
     : JSON.parse(String(auditStageRun['evidence_json'])) as { auditRunId?: string; factVersion?: string; completion?: { passed?: boolean } };
-  check('task 6.3：审校结果映射 audit run/factVersion/质量门证据',
-    auditEvidence?.auditRunId === auditRunId && typeof auditEvidence.factVersion === 'string' && typeof auditEvidence.completion?.passed === 'boolean');
+  const afterInitialAudit = await workflows.get(workflowId);
+  const afterInitialAuditStage = afterInitialAudit?.stages.find((stage) => stage.stageId === afterInitialAudit.currentStageId);
+  check('task 7.1：首次全书总检精确引用回填 factVersion 与 audit run，并推进问题分诊',
+    auditEvidence?.auditRunId === auditRunId
+    && auditEvidence.factVersion === factEvidence?.factVersion
+    && auditCompleted?.type === 'global-audit-completed'
+    && auditCompleted.dashboard.factVersion === factEvidence?.factVersion
+    && typeof auditEvidence.completion?.passed === 'boolean'
+    && afterInitialAuditStage?.templateStageId === 'issue-triage',
+    `backfill=${factEvidence?.factVersion ?? 'none'} evidence=${auditEvidence?.factVersion ?? 'none'} dashboard=${auditCompleted?.type === 'global-audit-completed' ? auditCompleted.dashboard.factVersion : 'none'} stage=${afterInitialAuditStage?.templateStageId ?? 'none'}`);
   const diagnosisAsset = await creativeAssets.get(`${workflowId}:legacy-revision-diagnosis`);
   check(
     '老书重建：全书诊断消费作者意图并返回结构化结果',
