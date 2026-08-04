@@ -104,6 +104,32 @@ try {
   assert.equal((await issues.get(created.issueId))?.status, 'resolved');
   assert.equal(await issues.countBlocking('new-book'), 0);
 
+  const [dismissedCandidate] = await issues.upsertFromAudit('new-book', 'audit-new-dismissed', [{
+    type: 'editorial-choice', description: '作者决定保留此处有意留白。',
+    anchors: [{ kind: 'chapter', id: 'chapter-1' }],
+  }]);
+  assert.ok(dismissedCandidate !== undefined);
+  const beforeDismissal = await workflows.get('new-book');
+  assert.ok(beforeDismissal !== null && beforeDismissal.currentStageId !== null);
+  await assert.rejects(service.command({
+    type: 'workflow-dismiss-issue', workflowId: 'new-book', stageId: beforeDismissal.currentStageId,
+    issueId: dismissedCandidate.issueId, reason: '   ', expectedVersion: beforeDismissal.version,
+    requestId: 'req-dismiss-empty', operationId: 'op-dismiss-empty',
+  }), /missing-reason/);
+  assert.equal((await issues.get(dismissedCandidate.issueId))?.status, 'open');
+  assert.equal(await issues.countFinalizationBlocking('new-book'), 1);
+  await service.command({
+    type: 'workflow-dismiss-issue', workflowId: 'new-book', stageId: beforeDismissal.currentStageId,
+    issueId: dismissedCandidate.issueId, reason: '作者确认这是有意留白，不需要修改', expectedVersion: beforeDismissal.version,
+    requestId: 'req-dismiss-reasoned', operationId: 'op-dismiss-reasoned',
+  });
+  const dismissedIssue = await new WorkflowIssueRepository(db).get(dismissedCandidate.issueId);
+  assert.equal(dismissedIssue?.status, 'dismissed');
+  assert.equal(dismissedIssue?.resolutionReason, '作者确认这是有意留白，不需要修改');
+  assert.equal(dismissedIssue?.resolutionHistory.at(-1)?.actor, 'author');
+  assert.equal(dismissedIssue?.resolutionHistory.at(-1)?.note, '作者确认这是有意留白，不需要修改');
+  assert.equal(await issues.countFinalizationBlocking('new-book'), 0);
+
   const afterSelection = await workflows.get('new-book');
   assert.ok(afterSelection !== null);
   const finalized = await service.command({

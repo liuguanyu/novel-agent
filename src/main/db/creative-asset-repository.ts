@@ -528,6 +528,17 @@ export class WorkflowIssueRepository {
     return Number(row?.['n'] ?? 0);
   }
 
+  async countFinalizationBlocking(workflowId: string): Promise<number> {
+    const row = await this.db.get(
+      `SELECT COUNT(*) AS n FROM workflow_issues
+       WHERE workflow_id=?
+         AND status <> 'resolved'
+         AND NOT (status = 'dismissed' AND LENGTH(TRIM(COALESCE(resolution_reason, ''))) > 0)`,
+      workflowId,
+    );
+    return Number(row?.['n'] ?? 0);
+  }
+
   private async transition(issueId: string, command: Parameters<typeof transitionWorkflowIssue>[1]): Promise<WorkflowIssueRecord> {
     return this.db.transaction((tx) => this.transitionWith(tx, issueId, command));
   }

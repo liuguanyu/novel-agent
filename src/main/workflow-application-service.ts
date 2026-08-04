@@ -200,8 +200,11 @@ export class WorkflowApplicationService {
     else if (action === 'retry-stage') coreCommand = { kind: 'retry-stage', runId: command.runId ?? command.operationId ?? `run:${Date.now()}` };
     else if (action === 'skip-stage') coreCommand = { kind: 'skip-stage' };
     else if (action === 'confirm-stage') {
-      const blocking = await this.issues.countBlocking(record.workflowId);
-      if (blocking > 0 && ['chapter-finalization', 'whole-book-audit', 'final-audit'].includes(stage.templateStageId)) {
+      const isFinalizationGate = ['chapter-finalization', 'whole-book-audit', 'final-audit'].includes(stage.templateStageId);
+      const blocking = isFinalizationGate
+        ? await this.issues.countFinalizationBlocking(record.workflowId)
+        : await this.issues.countBlocking(record.workflowId);
+      if (blocking > 0 && isFinalizationGate) {
         throw new Error(`workflow has ${blocking} blocking issue(s)`);
       }
       const transition = command.result === undefined ? 'completed' : command.result;
