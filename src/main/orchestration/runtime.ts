@@ -127,6 +127,19 @@ import {
 } from './graph.js';
 import { parseReviewerIssuesWithDiagnostics } from './consistency-schema.js';
 
+function planningCandidateContent(kind: string, draft: string): Record<string, unknown> {
+  if (kind !== 'character' && kind !== 'worldbuilding') return { draft };
+  try {
+    const parsed = JSON.parse(draft) as unknown;
+    if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) {
+      return { ...(parsed as Record<string, unknown>), draft };
+    }
+  } catch {
+    // Non-JSON planning prose remains a valid draft candidate but is not synced to Story Bible.
+  }
+  return { draft };
+}
+
 /** 审校类 agent：产 activeBugs、运行结束后结构化下发 review-completed（与写手/规划类区分）。 */
 const REVIEW_AGENTS: ReadonlySet<string> = new Set([
   'reviewer',
@@ -808,10 +821,15 @@ export class OrchestrationRuntime {
         provenance: { runId: run.threadId, workflowRef },
       });
     }
-    const candidate = await assets.createCandidate(asset.assetId, { draft: state.currentDraft }, {
+    const candidate = await assets.createCandidate(asset.assetId, planningCandidateContent(kind, state.currentDraft), {
       runId: run.threadId,
       workflowRef,
       authorClarification: `规划专家 ${agentId} 产出，待作者确认`,
+      sources: [{
+        location: { id: projectId, kind: 'project' },
+        quote: state.currentDraft.slice(0, 240),
+        confidence: 1,
+      }],
     });
     this.#sendControl(run.wc, this.#withWorkflow(run, {
       type: 'creative-asset-change-proposed',

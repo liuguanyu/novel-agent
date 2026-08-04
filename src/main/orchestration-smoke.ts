@@ -1925,6 +1925,356 @@ async function smokeWorkflowReviewerIssuePersistence(): Promise<void> {
   }
 }
 
+/** task 6.7：用同一个新书 workflow 串联人物资产确认与完整章节修复/定稿循环。 */
+async function smokeTask67GuidedMainPaths(): Promise<void> {
+  const dir = await mkdtemp(join(tmpdir(), 'na-task-67-'));
+  const opened = await openDatabase(join(dir, 'task-67.db'));
+  if (!opened.ok) {
+    check('task 6.7 SQLite 可用', false, opened.message);
+    await rm(dir, { recursive: true, force: true });
+    return;
+  }
+  const db = opened.db;
+  try {
+    const workflows = new WorkflowRepository(db);
+    const workflowIssues = new WorkflowIssueRepository(db);
+    const creativeAssets = new CreativeAssetRepository(db);
+    const stageRunEvidence = new SqliteStageRunEvidenceRecorder(db);
+    const factStore = new SqliteFactStore(db);
+    const checkpointer = new SqliteCheckpointer(db);
+    const service = new WorkflowApplicationService(workflows, creativeAssets, workflowIssues);
+    const workflowId = 'task-67-main-path';
+    const projectId = 'task-67-project';
+    const [manifestChapterId] = await readManifestChapterIds();
+    const chapterId = manifestChapterId ?? 'task-67-chapter-1';
+    const chapter2Id = 'task-67-chapter-2';
+    const started = await service.command({
+      type: 'start-workflow', workflowId, projectId, kind: 'new-book-creation',
+      objective: 'task 6.7 guided main paths', requestId: 'task-67-start', operationId: 'task-67-start-op',
+    });
+    if (started === null) throw new Error('task 6.7 workflow fixture failed');
+
+    const current = async (): Promise<NonNullable<Awaited<ReturnType<WorkflowRepository['get']>>>> => {
+      const workflow = await workflows.get(workflowId);
+      if (workflow === null || workflow.currentStageId === null) throw new Error('task 6.7 workflow lost current stage');
+      return workflow;
+    };
+    const currentStage = async () => {
+      const workflow = await current();
+      const stage = workflow.stages.find((candidate) => candidate.stageId === workflow.currentStageId);
+      if (stage === undefined) throw new Error('task 6.7 current stage missing');
+      return { workflow, stage };
+    };
+    const completeStage = async (expectedTemplateStageId: string, label: string): Promise<void> => {
+      const before = await currentStage();
+      if (before.stage.templateStageId !== expectedTemplateStageId) {
+        throw new Error(`task 6.7 expected ${expectedTemplateStageId}, got ${before.stage.templateStageId}`);
+      }
+      const runId = `task-67:${label}` as RunId;
+      await service.command({
+        type: 'workflow-start-stage', workflowId, stageId: before.stage.stageId,
+        expectedVersion: before.workflow.version, runId,
+        requestId: `${label}-start`, operationId: `${label}-start-op`,
+      });
+      await stageRunEvidence.record({
+        runId, workflowRef: { workflowId, stageId: before.stage.stageId }, status: 'started',
+      });
+      await stageRunEvidence.record({
+        runId, workflowRef: { workflowId, stageId: before.stage.stageId }, status: 'completed',
+        ...(before.stage.actor === 'quality-gate' ? { completion: { passed: true, issueIds: [] } } : {}),
+      });
+      const awaiting = await current();
+      const latestStage = awaiting.stages.find((candidate) => candidate.stageId === awaiting.currentStageId);
+      if (latestStage?.status === 'awaiting-confirmation') {
+        await service.command({
+          type: 'workflow-confirm-stage', workflowId, stageId: latestStage.stageId,
+          expectedVersion: awaiting.version, requestId: `${label}-confirm`, operationId: `${label}-confirm-op`,
+        });
+      }
+    };
+
+    await completeStage('concept', 'concept');
+    await completeStage('worldbuilding', 'worldbuilding');
+
+    const characterStage = await currentStage();
+    if (characterStage.stage.templateStageId !== 'character-design') throw new Error('task 6.7 character stage missing');
+    const characterDraft1 = JSON.stringify({
+      canonicalName: '林默', aliases: ['阿默'],
+      attributes: { role: 'protagonist', motivation: '寻找失踪的姐姐' },
+    });
+    const characterRuntime = new OrchestrationRuntime({
+      getModelResolver: () => new FakeModelResolver(characterDraft1, '[]').asResolver(),
+      getCheckpointer: () => checkpointer,
+      getFactStore: () => factStore,
+      workflows, workflowIssues, creativeAssets, stageRunEvidence,
+    });
+    const characterRunId = 'task-67-character-initial' as RunId;
+    const characterWc = new FakeWebContents();
+    await characterRuntime.summon(characterWc.asWebContents(), {
+      runId: characterRunId, mode: 'mutate', agent: 'character-generator',
+      instruction: '生成人物设计初稿',
+      workflowRef: { workflowId, stageId: characterStage.stage.stageId },
+    });
+    const proposed = characterWc.control.find((event) => event.type === 'creative-asset-change-proposed');
+    if (proposed?.type !== 'creative-asset-change-proposed') throw new Error('task 6.7 initial character candidate missing');
+    const firstCandidateId = proposed.candidate.candidateId;
+    const assetId = proposed.candidate.assetId;
+    const baselineAsset = await creativeAssets.get(assetId);
+    const afterInitial = await currentStage();
+    check('task 6.7：人物设计初稿形成 pending candidate，主阶段等待作者确认',
+      (await creativeAssets.getCandidate(firstCandidateId))?.status === 'pending'
+      && afterInitial.stage.templateStageId === 'character-design'
+      && afterInitial.stage.status === 'awaiting-confirmation');
+
+    const sources = [{
+      location: { id: projectId, kind: 'project' }, quote: '林默人物设定由作者逐轮确认。', confidence: 1,
+    }];
+    const characterDraft2 = {
+      canonicalName: '林默', aliases: ['阿默'], draft: '作者意见一：强化内在矛盾',
+      attributes: { role: 'protagonist', motivation: '寻找失踪的姐姐并偿还旧债' },
+    };
+    await service.command({
+      type: 'workflow-change-asset', workflowId, stageId: afterInitial.stage.stageId,
+      expectedVersion: afterInitial.workflow.version, assetId, content: characterDraft2,
+      provenance: { authorClarification: '第一轮人工意见：强化内在矛盾', sources },
+      runId: 'task-67-character-feedback-1', requestId: 'character-feedback-1', operationId: 'character-feedback-1-op',
+    });
+    const feedback1Event = service.drainAssetEvents()[0] as { candidate?: { candidateId?: string } } | undefined;
+    const secondCandidateId = feedback1Event?.candidate?.candidateId;
+    if (secondCandidateId === undefined) throw new Error('task 6.7 second character candidate missing');
+    const afterFeedback1 = await currentStage();
+    const characterDraft3 = {
+      canonicalName: '林默', aliases: ['阿默', '小默'], draft: '作者意见二：明确最终行动目标',
+      attributes: { role: 'protagonist', motivation: '找到姐姐并揭开城主隐瞒的真相' },
+    };
+    await service.command({
+      type: 'workflow-change-asset', workflowId, stageId: afterFeedback1.stage.stageId,
+      expectedVersion: afterFeedback1.workflow.version, assetId, content: characterDraft3,
+      provenance: { authorClarification: '第二轮人工意见：明确最终行动目标', sources },
+      runId: 'task-67-character-feedback-2', requestId: 'character-feedback-2', operationId: 'character-feedback-2-op',
+    });
+    const feedback2Event = service.drainAssetEvents()[0] as { candidate?: { candidateId?: string } } | undefined;
+    const finalCandidateId = feedback2Event?.candidate?.candidateId;
+    if (finalCandidateId === undefined) throw new Error('task 6.7 final character candidate missing');
+    const beforeAssetConfirmation = await currentStage();
+    const storyBibleBefore = await db.get('SELECT 1 FROM entities WHERE id=?', 'asset:character:林默');
+    check('task 6.7：两轮人工意见确认前不改 baseline，也不提前同步 Story Bible',
+      baselineAsset?.version === 1
+      && (await creativeAssets.get(assetId))?.version === 1
+      && (await creativeAssets.getCandidate(secondCandidateId))?.status === 'pending'
+      && (await creativeAssets.getCandidate(finalCandidateId))?.status === 'pending'
+      && storyBibleBefore === null);
+
+    await service.command({
+      type: 'workflow-confirm-asset-change', workflowId, stageId: beforeAssetConfirmation.stage.stageId,
+      expectedVersion: beforeAssetConfirmation.workflow.version, candidateId: finalCandidateId,
+      runId: 'task-67-character-confirm', requestId: 'character-confirm', operationId: 'character-confirm-op',
+    });
+    const assetEvents = service.drainAssetEvents();
+    const confirmedAsset = await creativeAssets.get(assetId);
+    const factVersion = await factStore.getLatestVersion();
+    const bibleView = factVersion === null ? null : await factStore.getView(factVersion);
+    const linMo = bibleView?.entities.find((entity) => entity.id === asEntityId('asset:character:林默'));
+    check('task 6.7：最终 candidate 经 Main 确认并携 workflowRef 下发资产更新',
+      assetEvents.some((event) => event['type'] === 'creative-asset-updated'
+        && (event['workflowRef'] as { workflowId?: string } | undefined)?.workflowId === workflowId)
+      && confirmedAsset?.version === 2
+      && JSON.stringify(confirmedAsset.content) === JSON.stringify(characterDraft3));
+    check('task 6.7：人物资产确认原子同步 Story Bible 的名称、别名与最终属性',
+      linMo?.canonicalName === '林默'
+      && linMo.aliasSet.aliases.includes('小默')
+      && linMo.attributes.some((attribute) => attribute.key === 'motivation'
+        && JSON.parse(attribute.value) === '找到姐姐并揭开城主隐瞒的真相'));
+    check('task 6.7：未选中的前两轮 candidate 保持 pending，未被错误确认',
+      (await creativeAssets.getCandidate(firstCandidateId))?.status === 'pending'
+      && (await creativeAssets.getCandidate(secondCandidateId))?.status === 'pending');
+
+    const characterAwaiting = await currentStage();
+    await service.command({
+      type: 'workflow-confirm-stage', workflowId, stageId: characterAwaiting.stage.stageId,
+      expectedVersion: characterAwaiting.workflow.version, requestId: 'character-stage-confirm', operationId: 'character-stage-confirm-op',
+    });
+    check('task 6.7：人物资产确认后由作者确认阶段并进入全书大纲',
+      (await currentStage()).stage.templateStageId === 'book-outline');
+
+    await completeStage('book-outline', 'book-outline');
+    await completeStage('chapter-plan', 'chapter-plan');
+    await completeStage('scene-outline', 'scene-outline');
+
+    const problematicDraft = '林默忽然丢下同伴独自离开。随后，他回头解释自己的决定。';
+    let manuscriptText = problematicDraft;
+    const manuscript = {
+      readChapterContent: async (nodeId: string) => ({ nodeId, content: manuscriptText }),
+      writeChapterDraft: async (_nodeId: string, content: string) => {
+        manuscriptText = content;
+        return { ok: true, contentLength: manuscriptText.length };
+      },
+      writeBackRefactoredFragment: async (anchor: FragmentAnchor, fragmentText: string) => {
+        manuscriptText = manuscriptText.slice(0, anchor.from) + fragmentText + manuscriptText.slice(anchor.to);
+        return { ok: true, newContentLength: manuscriptText.length };
+      },
+    };
+    const extractionText = JSON.stringify({ candidates: [{
+      kind: 'entity', suggestedAnchor: { id: chapterId, kind: 'chapter' }, confidence: 0.95,
+      payload: { canonicalName: '林默', entityType: 'person', quote: '林默忽然丢下同伴独自离开' },
+    }] });
+    const issueText = JSON.stringify([{
+      type: 'behavior-ooc', severity: 'warning', anchors: [{ id: chapterId, kind: 'chapter' }],
+      description: '林默抛下同伴的行为与人物设定冲突。', requiresHumanDecision: false,
+      evidence: { quote: '林默忽然丢下同伴独自离开。' },
+    }]);
+    const runtime = (reviewerText: string, writerText = problematicDraft) => new OrchestrationRuntime({
+      getModelResolver: () => new FakeModelResolver(writerText, reviewerText, extractionText).asResolver(),
+      getCheckpointer: () => checkpointer,
+      getFactStore: () => factStore,
+      workflows, workflowIssues, creativeAssets, stageRunEvidence, manuscript,
+    });
+
+    const draftStage = await currentStage();
+    if (draftStage.stage.templateStageId !== 'draft-writing') throw new Error('task 6.7 draft stage missing');
+    const writerRunId = 'task-67-writer' as RunId;
+    const writerWc = new FakeWebContents();
+    await runtime(issueText).summon(writerWc.asWebContents(), {
+      runId: writerRunId, mode: 'mutate', agent: 'writer', anchorNodeId: chapterId,
+      instruction: '写作本章并完成自动抽取与审校',
+      workflowRef: { workflowId, stageId: draftStage.stage.stageId }, autoExtractFacts: true,
+    });
+    const reviewEvent = writerWc.control.find((event) => event.type === 'review-completed');
+    const issueId = reviewEvent?.type === 'review-completed' ? reviewEvent.issues[0]?.issueId : undefined;
+    if (issueId === undefined) throw new Error('task 6.7 writer issue missing');
+    const extractionEvent = writerWc.control.find((event) => event.type === 'fact-extraction-completed');
+    check('task 6.7：同一 writer run 完成章节写作、事实抽取并建立稳定 issue',
+      extractionEvent?.type === 'fact-extraction-completed'
+      && (await workflowIssues.get(issueId))?.sourceAuditRunId === writerRunId
+      && manuscriptText === problematicDraft);
+    const draftAwaiting = await currentStage();
+    await service.command({
+      type: 'workflow-confirm-stage', workflowId, stageId: draftAwaiting.stage.stageId,
+      expectedVersion: draftAwaiting.workflow.version, requestId: 'draft-confirm', operationId: 'draft-confirm-op',
+    });
+
+    const extractionStage = await currentStage();
+    if (extractionStage.stage.templateStageId !== 'fact-extraction') throw new Error('task 6.7 extraction stage missing');
+    const extractionWc = new FakeWebContents();
+    await runtime('[]').backfillFacts(extractionWc.asWebContents(), {
+      runId: 'task-67-extraction-stage' as RunId,
+      chapters: [{ location: { id: asNodeId(chapterId), kind: 'chapter' }, text: problematicDraft }],
+      workflowRef: { workflowId, stageId: extractionStage.stage.stageId },
+    });
+    check('task 6.7：事实抽取 stage 真实完成并推进自动审校',
+      extractionWc.control.some((event) => event.type === 'fact-extraction-completed')
+      && (await currentStage()).stage.templateStageId === 'automatic-review');
+
+    const automaticReview = await currentStage();
+    const reviewWc = new FakeWebContents();
+    await runtime('[]').summon(reviewWc.asWebContents(), {
+      runId: 'task-67-automatic-review' as RunId, mode: 'diagnose', agent: 'reviewer',
+      initialDraft: problematicDraft, anchorNodeId: chapterId, instruction: '执行自动审校',
+      workflowRef: { workflowId, stageId: automaticReview.stage.stageId },
+    });
+    check('task 6.7：自动审校质量门完成并进入人工验收',
+      (await currentStage()).stage.templateStageId === 'author-review');
+
+    const authorReview = await currentStage();
+    await service.command({
+      type: 'workflow-start-stage', workflowId, stageId: authorReview.stage.stageId,
+      expectedVersion: authorReview.workflow.version, runId: 'task-67-author-review',
+      requestId: 'author-review-start', operationId: 'author-review-start-op',
+    });
+    const applyFix = async (runId: RunId, rewritten: string): Promise<string> => {
+      const latest = await currentStage();
+      await service.command({
+        type: 'workflow-select-issue', workflowId, stageId: latest.stage.stageId,
+        workflowRef: { workflowId, stageId: latest.stage.stageId, issueId },
+        issueId, expectedVersion: latest.workflow.version, runId,
+        requestId: `${runId}:select`, operationId: `${runId}:select-op`,
+      });
+      const anchor: FragmentAnchor = {
+        node: { id: asNodeId(chapterId), kind: 'chapter' }, from: 0, to: manuscriptText.length,
+      };
+      const ref = { workflowId, stageId: latest.stage.stageId, issueId };
+      const refactorWc = new FakeWebContents();
+      const refactorRuntime = runtime('[]');
+      await refactorRuntime.computeRefactorDiff(refactorWc.asWebContents(), runId, anchor, rewritten, ref);
+      const diff = refactorWc.control.find((event) => event.type === 'refactor-diff-computed');
+      if (diff?.type !== 'refactor-diff-computed') throw new Error('task 6.7 refactor diff missing');
+      await refactorRuntime.applyHunkDecisions(
+        refactorWc.asWebContents(), runId, anchor, rewritten,
+        diff.hunks.map((hunk) => ({ hunkId: hunk.id, decision: 'accept' as const })), ref,
+      );
+      const applied = refactorWc.control.find((event) => event.type === 'refactor-applied');
+      if (applied?.type !== 'refactor-applied' || applied.checkpointId === undefined) {
+        throw new Error(`task 6.7 refactor apply missing checkpoint: ${JSON.stringify(refactorWc.control)}`);
+      }
+      return applied.checkpointId;
+    };
+
+    const firstFixRunId = 'task-67-fix-1' as RunId;
+    const firstCheckpointId = await applyFix(firstFixRunId, '林默先护送同伴撤离。随后，他回头解释自己的决定。');
+    const firstVerificationRunId = 'task-67-verify-fail' as RunId;
+    const firstVerificationWc = new FakeWebContents();
+    await runtime(issueText).runTargetedVerification(firstVerificationWc.asWebContents(), firstVerificationRunId, {
+      workflowId, stageId: authorReview.stage.stageId, issueId,
+    });
+    const afterFailedVerification = await workflowIssues.get(issueId);
+    check('task 6.7：第一轮 diff/hunk/checkpoint 后 verifying，复检失败回到 fixing',
+      afterFailedVerification?.status === 'fixing'
+      && afterFailedVerification.checkpointIds.includes(firstCheckpointId)
+      && afterFailedVerification.verificationRunIds.includes(firstVerificationRunId));
+
+    const secondFixRunId = 'task-67-fix-2' as RunId;
+    const secondCheckpointId = await applyFix(secondFixRunId, '林默先护送同伴安全撤离，再独自返回追查姐姐的线索。');
+    const secondVerificationRunId = 'task-67-verify-pass' as RunId;
+    const secondVerificationWc = new FakeWebContents();
+    await runtime('[]').runTargetedVerification(secondVerificationWc.asWebContents(), secondVerificationRunId, {
+      workflowId, stageId: authorReview.stage.stageId, issueId,
+    });
+    const resolved = await new WorkflowIssueRepository(db).get(issueId);
+    const applies = await new WorkflowIssueRepository(db).listRefactorApplies(issueId);
+    check('task 6.7：第二轮复检成功关闭同一 issue，并保留两轮修复证据',
+      resolved?.status === 'resolved'
+      && resolved.checkpointIds.includes(secondCheckpointId)
+      && resolved.verificationRunIds.includes(secondVerificationRunId)
+      && applies.length === 2);
+
+    const authorRunning = await currentStage();
+    await service.command({
+      type: 'workflow-confirm-stage', workflowId, stageId: authorRunning.stage.stageId,
+      expectedVersion: authorRunning.workflow.version, requestId: 'author-review-confirm', operationId: 'author-review-confirm-op',
+    });
+    const finalization = await currentStage();
+    if (finalization.stage.templateStageId !== 'chapter-finalization') throw new Error('task 6.7 finalization stage missing');
+    await service.command({
+      type: 'workflow-start-stage', workflowId, stageId: finalization.stage.stageId,
+      expectedVersion: finalization.workflow.version, runId: 'task-67-finalization',
+      requestId: 'finalization-start', operationId: 'finalization-start-op',
+    });
+    const finalizationRunning = await currentStage();
+    await service.command({
+      type: 'workflow-confirm-stage', workflowId, stageId: finalizationRunning.stage.stageId,
+      expectedVersion: finalizationRunning.workflow.version, result: 'continue-loop', chapterId: chapter2Id,
+      requestId: 'finalization-confirm', operationId: 'finalization-confirm-op',
+    });
+    const nextChapter = await currentStage();
+    const firstChapterHistory = nextChapter.workflow.stages.filter((stage) =>
+      stage.templateStageId === 'chapter-finalization' && stage.stageId !== nextChapter.stage.stageId);
+    const nextScope = nextChapter.stage.scope as { kind?: string; chapterId?: string };
+    check('task 6.7：issue resolved 后章节定稿并创建隔离的下一章循环',
+      await workflowIssues.countFinalizationBlocking(workflowId) === 0
+      && nextChapter.stage.templateStageId === 'chapter-plan'
+      && nextScope.kind === 'chapter'
+      && nextScope.chapterId === chapter2Id
+      && (nextChapter.stage.runIds?.length ?? 0) === 0
+      && (nextChapter.stage.artifactRefs?.length ?? 0) === 0
+      && (nextChapter.stage.completionEvidence?.length ?? 0) === 0
+      && firstChapterHistory.some((stage) => stage.status === 'completed')
+      && (await workflowIssues.get(issueId))?.status === 'resolved');
+  } finally {
+    await db.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+}
+
 /**
  * 视觉设计契约冒烟 (I8 visual-design)：验证 core 侧可测契约——
  * 每个 agent 目录条目都有图标名；主题解析真值表正确；三态循环遍历全部偏好。
@@ -4115,6 +4465,7 @@ async function main(): Promise<void> {
   await smokeInstructionConflictOverride();
   await smokeNoFactStoreHappyPath();
   await smokeWorkflowReviewerIssuePersistence();
+  await smokeTask67GuidedMainPaths();
   await smokeWorkflowContinuationResume();
   await smokeLocateSourceTask();
   await smokeLocateSourceEndToEnd();
