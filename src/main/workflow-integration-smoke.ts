@@ -148,8 +148,74 @@ try {
   await evidence.record({ runId: nextFinalRun, workflowRef: { workflowId: 'new-book-next-chapter', stageId: nextFinalization.currentStageId }, status: 'completed' });
   const nextAwaiting = await workflows.get('new-book-next-chapter');
   assert.ok(nextAwaiting !== null && nextAwaiting.currentStageId !== null);
-  const continued = await service.command({ type: 'workflow-confirm-stage', workflowId: 'new-book-next-chapter', stageId: nextAwaiting.currentStageId, expectedVersion: nextAwaiting.version, result: 'continue-loop', requestId: 'req-next-final-confirm', operationId: 'op-next-final-confirm' });
-  assert.equal(continued?.stages.find((stage) => stage['stageId'] === continued.currentStageId)?.['templateStageId'], 'chapter-plan');
+  const firstChapterStages = nextAwaiting.stages.filter((stage) => ['chapter-plan', 'scene-outline', 'draft-writing', 'fact-extraction', 'automatic-review', 'author-review', 'chapter-finalization'].includes(stage.templateStageId));
+  const firstChapterStageIds = new Set(firstChapterStages.map((stage) => stage.stageId));
+  await assert.rejects(service.command({
+    type: 'workflow-confirm-stage', workflowId: 'new-book-next-chapter', stageId: nextAwaiting.currentStageId,
+    expectedVersion: nextAwaiting.version, result: 'continue-loop', requestId: 'req-next-final-missing-scope', operationId: 'op-next-final-missing-scope',
+  }), /chapterId is required/);
+  const continued = await service.command({
+    type: 'workflow-confirm-stage', workflowId: 'new-book-next-chapter', stageId: nextAwaiting.currentStageId,
+    expectedVersion: nextAwaiting.version, result: 'continue-loop', chapterId: 'chapter-2',
+    requestId: 'req-next-final-confirm', operationId: 'op-next-final-confirm',
+  });
+  assert.ok(continued !== null && continued.currentStageId !== null);
+  assert.equal(continued.stages.find((stage) => stage['stageId'] === continued.currentStageId)?.['templateStageId'], 'chapter-plan');
+  const continuedRecord = await workflows.get('new-book-next-chapter');
+  assert.ok(continuedRecord !== null && continuedRecord.currentStageId !== null);
+  const secondChapterStages = continuedRecord.stages.filter((stage) => !firstChapterStageIds.has(stage.stageId) && stage.scope !== null && typeof stage.scope === 'object' && 'kind' in stage.scope && stage.scope.kind === 'chapter');
+  assert.deepEqual(secondChapterStages.map((stage) => stage.templateStageId), ['chapter-plan', 'scene-outline', 'draft-writing', 'fact-extraction', 'automatic-review', 'author-review', 'chapter-finalization']);
+  assert.ok(secondChapterStages.every((stage) => !firstChapterStageIds.has(stage.stageId)));
+  assert.ok(secondChapterStages.every((stage) => JSON.stringify(stage.scope) === JSON.stringify({ kind: 'chapter', projectId: 'project-next', chapterId: 'chapter-2' })));
+  assert.ok(secondChapterStages.every((stage) => (stage.runIds ?? []).length === 0 && (stage.artifactRefs ?? []).length === 0 && (stage.completionEvidence ?? []).length === 0));
+  assert.equal(secondChapterStages[0]?.status, 'ready');
+  assert.ok(secondChapterStages.slice(1).every((stage) => stage.status === 'pending'));
+  assert.equal(firstChapterStages.find((stage) => stage.templateStageId === 'chapter-plan')?.status, 'completed');
+  assert.equal(firstChapterStages.find((stage) => stage.templateStageId === 'chapter-finalization')?.status, 'awaiting-confirmation');
+
+  const replayedContinuation = await service.command({
+    type: 'workflow-confirm-stage', workflowId: 'new-book-next-chapter', stageId: nextAwaiting.currentStageId,
+    expectedVersion: nextAwaiting.version, result: 'continue-loop', chapterId: 'chapter-2',
+    requestId: 'req-next-final-confirm-replay', operationId: 'op-next-final-confirm',
+  });
+  assert.equal(replayedContinuation?.version, continuedRecord.version);
+  assert.equal(replayedContinuation?.stages.length, continuedRecord.stages.length);
+
+  const secondPlan = secondChapterStages[0];
+  assert.ok(secondPlan !== undefined);
+  await service.command({
+    type: 'workflow-start-stage', workflowId: 'new-book-next-chapter', stageId: secondPlan.stageId,
+    expectedVersion: continuedRecord.version, runId: 'new-book-next:chapter-2:plan', requestId: 'req-chapter-2-plan-start', operationId: 'op-chapter-2-plan-start',
+  });
+  const afterSecondPlanStart = await workflows.get('new-book-next-chapter');
+  assert.ok(afterSecondPlanStart !== null);
+  assert.equal(afterSecondPlanStart.stages.find((stage) => stage.stageId === secondPlan.stageId)?.status, 'running');
+  assert.equal(afterSecondPlanStart.stages.find((stage) => stage.stageId === firstChapterStages[0]?.stageId)?.status, 'completed');
+
+  await workflows.create({
+    workflowId: 'new-book-finish-loop', projectId: 'project-finish', kind: 'new-book-creation', templateVersion: '1',
+    objective: 'finish chapter loop', status: 'active', currentStageId: 'finish:chapter-finalization',
+    stages: [
+      { stageId: 'finish:chapter-finalization', templateStageId: 'chapter-finalization', status: 'ready', actor: 'author', scope: { kind: 'chapter', projectId: 'project-finish', chapterId: 'chapter-last' }, runIds: [], artifactRefs: [], impactStatus: 'none', completionEvidence: [] },
+      { stageId: 'finish:whole-book-audit', templateStageId: 'whole-book-audit', status: 'pending', actor: 'quality-gate', scope: { kind: 'project', projectId: 'project-finish' }, runIds: [], artifactRefs: [], impactStatus: 'none', completionEvidence: [] },
+    ],
+  }, 'op-finish-create');
+  const finishReady = await workflows.get('new-book-finish-loop');
+  assert.ok(finishReady !== null && finishReady.currentStageId !== null);
+  const finishRunning = await service.command({
+    type: 'workflow-start-stage', workflowId: finishReady.workflowId, stageId: finishReady.currentStageId,
+    expectedVersion: finishReady.version, requestId: 'req-finish-start', operationId: 'op-finish-start',
+  });
+  assert.ok(finishRunning !== null && finishRunning.currentStageId !== null);
+  const finishedLoop = await service.command({
+    type: 'workflow-confirm-stage', workflowId: finishRunning.workflowId, stageId: finishRunning.currentStageId,
+    expectedVersion: finishRunning.version, result: 'finish-loop', requestId: 'req-finish-confirm', operationId: 'op-finish-confirm',
+  });
+  assert.ok(finishedLoop !== null && finishedLoop.currentStageId !== null);
+  const finishAudit = finishedLoop.stages.find((stage) => stage['stageId'] === finishedLoop.currentStageId);
+  assert.equal(finishAudit?.['templateStageId'], 'whole-book-audit');
+  assert.deepEqual(finishAudit?.['scope'], { kind: 'project', projectId: 'project-finish' });
+  assert.equal(finishedLoop.stages.filter((stage) => stage['templateStageId'] === 'chapter-plan').length, 0);
 
   const legacy = await service.command({
     type: 'start-workflow', workflowId: 'legacy', projectId: 'project-legacy',

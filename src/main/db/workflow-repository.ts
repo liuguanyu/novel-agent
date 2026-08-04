@@ -95,6 +95,15 @@ export class WorkflowRepository {
     return this.toRecord(row, stages.map(rowToStage));
   }
 
+  async replay(workflowId: string, operationId: string): Promise<WorkflowRecord | null> {
+    const row = await this.db.get(
+      'SELECT result_json FROM operation_ids WHERE operation_id=? AND scope=?',
+      operationId,
+      `workflow:${workflowId}`,
+    );
+    return row === null ? null : JSON.parse(String(row['result_json'])) as WorkflowRecord;
+  }
+
   async getActive(projectId: string): Promise<WorkflowRecord | null> {
     const row = await this.db.get("SELECT * FROM workflow_instances WHERE project_id = ? AND status = 'active'", projectId);
     return row === null ? null : this.get(String(row['workflow_id']));
@@ -141,7 +150,15 @@ export class WorkflowRepository {
       const now = Date.now();
       const workflowUpdate = await tx.run('UPDATE workflow_instances SET status=?,current_stage_id=?,stages_json=?,version=?,updated_at=? WHERE workflow_id=? AND version=?', next.status, next.currentStageId, json(next.stages), next.version, now, workflowId, envelope.expectedVersion);
       if (workflowUpdate.changes !== 1) throw new OptimisticVersionConflictError(`workflow:${workflowId}`, envelope.expectedVersion);
-      for (const stage of next.stages) await this.updateStage(tx, stage, now);
+      const existingStageIds = new Set(stageRows.map((stageRow) => String(stageRow['stage_id'])));
+      let insertedStageOffset = 0;
+      for (const stage of next.stages) {
+        if (existingStageIds.has(stage.stageId)) await this.updateStage(tx, stage, now);
+        else {
+          await this.insertStage(tx, workflowId, stage, now + insertedStageOffset);
+          insertedStageOffset += 1;
+        }
+      }
       const fresh = await tx.get('SELECT * FROM workflow_instances WHERE workflow_id=?', workflowId);
       if (fresh === null) throw new Error('workflow disappeared');
       const record = this.toRecord(fresh, (await tx.all('SELECT * FROM workflow_stages WHERE workflow_id=? ORDER BY created_at, stage_id', workflowId)).map(rowToStage));

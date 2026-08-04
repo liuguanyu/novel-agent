@@ -82,6 +82,10 @@ export class WorkflowApplicationService {
       }, command.operationId));
     }
 
+    if (command.type === 'workflow-confirm-stage') {
+      const replayed = await this.workflows.replay(command.workflowId, command.operationId);
+      if (replayed !== null) return this.snapshot(replayed);
+    }
     const record = await this.workflows.get(command.workflowId);
     if (record === null) throw new Error('workflow not found');
     if (command.workflowRef !== undefined) {
@@ -204,10 +208,20 @@ export class WorkflowApplicationService {
       if (transition !== 'completed' && transition !== 'continue-loop' && transition !== 'finish-loop') {
         throw new Error(`invalid confirmation transition: ${transition}`);
       }
+      if ((transition === 'continue-loop' || transition === 'finish-loop') && stage.templateStageId !== 'chapter-finalization') {
+        throw new Error(`${transition} is only allowed at chapter-finalization`);
+      }
+      const chapterId = command.chapterId?.trim();
+      if (transition === 'continue-loop' && (chapterId === undefined || chapterId.length === 0)) {
+        throw new Error('chapterId is required to continue chapter loop');
+      }
       coreCommand = {
         kind: 'confirm-stage',
         confirmationId: command.operationId ?? `confirmation:${Date.now()}`,
         transition,
+        ...(transition === 'continue-loop' && chapterId !== undefined
+          ? { nextScope: { kind: 'chapter', projectId: record.projectId, chapterId } }
+          : {}),
       };
     } else if (![ 
       'select-issue', 'dismiss-issue', 'verify-issue',

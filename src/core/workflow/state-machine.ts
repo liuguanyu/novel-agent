@@ -1,4 +1,4 @@
-import type { StageImpactStatus, WorkflowArtifactRef, WorkflowBlockingReason, WorkflowInstance, WorkflowStageInstance, WorkflowTemplate } from './types.js';
+import type { StageImpactStatus, WorkflowArtifactRef, WorkflowBlockingReason, WorkflowInstance, WorkflowScope, WorkflowStageInstance, WorkflowTemplate } from './types.js';
 
 export type WorkflowCommand =
   | { readonly kind: 'start-stage'; readonly runId?: string }
@@ -7,7 +7,7 @@ export type WorkflowCommand =
   | { readonly kind: 'run-failed'; readonly runId: string; readonly message?: string }
   | { readonly kind: 'run-interrupted'; readonly runId: string; readonly message?: string }
   | { readonly kind: 'resume-interrupted-run'; readonly runId: string }
-  | { readonly kind: 'confirm-stage'; readonly confirmationId: string; readonly transition?: 'completed' | 'continue-loop' | 'finish-loop' }
+  | { readonly kind: 'confirm-stage'; readonly confirmationId: string; readonly transition?: 'completed' | 'continue-loop' | 'finish-loop'; readonly nextScope?: WorkflowScope }
   | { readonly kind: 'quality-gate-result'; readonly runId: string; readonly passed: boolean; readonly issueIds?: ReadonlyArray<string>; readonly transition?: 'quality-failed' | 'issues-found' }
   | { readonly kind: 'retry-stage'; readonly runId: string }
   | { readonly kind: 'skip-stage' }
@@ -130,7 +130,14 @@ export function transitionWorkflow(workflow: WorkflowInstance, template: Workflo
       definition.completionGate.kind === 'author-confirmation';
     if (!authorCompletingOwnStep && !confirmingExpertOutput) return fail('confirmation-required');
     const completed = { ...current, status: 'completed' as const, completedAt: envelope.at, completionEvidence: [...current.completionEvidence, { kind: 'author-confirmation' as const, confirmationId: command.confirmationId }] };
-    next = advance(replaceCurrent(workflow, completed), template, envelope.at, command.transition ?? 'completed');
+    next = advance(
+      replaceCurrent(workflow, completed),
+      template,
+      envelope.at,
+      command.transition ?? 'completed',
+      command.nextScope,
+      envelope.operationId,
+    );
   }
   return { ok: true, idempotent: false, workflow: { ...next, version: next.version + 1, updatedAt: envelope.at, appliedOperationIds: [...next.appliedOperationIds, envelope.operationId] } };
 }
@@ -140,12 +147,47 @@ function advance(
   template: WorkflowTemplate,
   at: string,
   condition: 'completed' | 'continue-loop' | 'finish-loop' | 'quality-failed' | 'issues-found' = 'completed',
+  nextScope?: WorkflowScope,
+  operationId?: string,
 ): WorkflowInstance {
   const current = workflow.stages.find((item) => item.stageId === workflow.currentStageId);
   const definition = template.stages.find((item) => item.id === current?.templateStageId);
   const targetId = definition?.transitions.find((item) => item.when === condition)?.to;
   if (targetId === undefined) return { ...workflow, status: 'completed' };
+  if (condition === 'continue-loop' && nextScope?.kind === 'chapter' && operationId !== undefined) {
+    return instantiateChapterLoop(workflow, targetId, template, nextScope, at, operationId);
+  }
   return moveToTarget(workflow, targetId, template, at);
+}
+
+function instantiateChapterLoop(
+  workflow: WorkflowInstance,
+  targetId: string,
+  template: WorkflowTemplate,
+  scope: Extract<WorkflowScope, { readonly kind: 'chapter' }>,
+  at: string,
+  operationId: string,
+): WorkflowInstance {
+  const targetIndex = template.stages.findIndex((definition) => definition.id === targetId);
+  if (targetIndex < 0) return { ...workflow, status: 'completed' };
+  const loopDefinitions = template.stages.slice(targetIndex).filter((definition) => definition.scope === 'chapter');
+  if (loopDefinitions.length === 0) return { ...workflow, status: 'completed' };
+  const instanceKey = encodeURIComponent(operationId);
+  const loopStages = loopDefinitions.map((definition, index): WorkflowStageInstance => ({
+    stageId: `${workflow.workflowId}:${definition.id}:${scope.chapterId}:${instanceKey}`,
+    templateStageId: definition.id,
+    status: index === 0 ? 'ready' : 'pending',
+    impactStatus: 'none',
+    actor: definition.actor,
+    scope,
+    runIds: [],
+    artifactRefs: [],
+    completionEvidence: [],
+    ...(index === 0 ? { enteredAt: at } : {}),
+  }));
+  const first = loopStages[0];
+  if (first === undefined) return { ...workflow, status: 'completed' };
+  return { ...workflow, stages: [...workflow.stages, ...loopStages], currentStageId: first.stageId };
 }
 
 function moveToTarget(workflow: WorkflowInstance, targetId: string, template: WorkflowTemplate, at: string): WorkflowInstance {

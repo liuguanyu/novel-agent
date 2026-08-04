@@ -48,7 +48,10 @@ export const NEW_BOOK_CREATION_TEMPLATE: WorkflowTemplate = {
       'whole-book-audit',
       [],
       false,
-      [{ to: 'chapter-plan', when: 'continue-loop' }],
+      [
+        { to: 'chapter-plan', when: 'continue-loop' },
+        { to: 'whole-book-audit', when: 'finish-loop' },
+      ],
     ),
     stage('whole-book-audit', '全书总检', 'quality-gate', 'project', quality),
   ],
