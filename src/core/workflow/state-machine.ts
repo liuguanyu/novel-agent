@@ -12,6 +12,7 @@ export type WorkflowCommand =
   | { readonly kind: 'retry-stage'; readonly runId: string }
   | { readonly kind: 'skip-stage' }
   | { readonly kind: 'set-impact'; readonly impactStatus: StageImpactStatus; readonly blockingReason?: WorkflowBlockingReason }
+  | { readonly kind: 'block-missing-anchor'; readonly issueId: string }
   | { readonly kind: 'pause' }
   | { readonly kind: 'resume' }
   | { readonly kind: 'cancel' }
@@ -97,6 +98,13 @@ export function transitionWorkflow(workflow: WorkflowInstance, template: Workflo
     next = advance(replaceCurrent(workflow, { ...current, status: 'skipped', completedAt: envelope.at }), template, envelope.at);
   } else if (command.kind === 'set-impact') {
     next = replaceCurrent(workflow, { ...current, impactStatus: command.impactStatus, ...(command.blockingReason === undefined ? {} : { blockingReason: command.blockingReason }) });
+  } else if (command.kind === 'block-missing-anchor') {
+    if (!['running', 'failed'].includes(current.status) || current.scope.kind !== 'issue') return fail('invalid-transition');
+    next = replaceCurrent(workflow, {
+      ...current,
+      status: 'blocked',
+      blockingReason: { kind: 'missing-anchor', issueId: command.issueId },
+    });
   } else if (command.kind === 'run-succeeded') {
     if (current.status !== 'running' || !current.runIds.includes(command.runId)) return fail('run-not-attached');
     const succeeded = { ...current, artifactRefs: [...current.artifactRefs, ...(command.artifactRefs ?? [])], completionEvidence: [...current.completionEvidence, { kind: 'run-succeeded' as const, runId: command.runId }] };

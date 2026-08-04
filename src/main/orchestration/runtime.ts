@@ -127,6 +127,13 @@ import {
 } from './graph.js';
 import { parseReviewerIssuesWithDiagnostics } from './consistency-schema.js';
 
+class MissingIssueAnchorError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'MissingIssueAnchorError';
+  }
+}
+
 function planningCandidateContent(kind: string, draft: string): Record<string, unknown> {
   if (kind !== 'character' && kind !== 'worldbuilding') return { draft };
   try {
@@ -1993,8 +2000,8 @@ export class OrchestrationRuntime {
       const payload = await repository.getPayload(workflowRef.issueId);
       if (issue === null || payload === null) throw new Error('诊断问题或证据已失效，请重新运行诊断');
       const chapterAnchor = payload.anchors.find((anchor) => anchor.kind === 'chapter');
-      if (chapterAnchor === undefined) throw new Error('诊断问题缺少章节锚点，无法定位原文');
-      if (payload.evidence === undefined) throw new Error('诊断问题缺少原文证据，请重新运行诊断');
+      if (chapterAnchor === undefined) throw new MissingIssueAnchorError('诊断问题缺少章节锚点，无法定位原文');
+      if (payload.evidence === undefined) throw new MissingIssueAnchorError('诊断问题缺少原文证据，请重新运行诊断');
       const chapterId = chapterAnchor.id as string;
       ref = this.#taskRef(runId, workflowRef, taskRunId, chapterId);
       // 4.1「相关人物或事实底稿」：定位前先从事实库召回证据中提及的已知实体，作为只读输入。
@@ -2043,6 +2050,20 @@ export class OrchestrationRuntime {
         awaitingAuthor = await this.#pauseTaskSession(session, run);
       } else {
         await this.#failLocateSource(wc, ref, session, run, error, controlIntent === 'cancel');
+        if (error instanceof MissingIssueAnchorError) {
+          const latest = await this.#deps.workflows?.get(workflowRef.workflowId);
+          const template = latest === null || latest === undefined
+            ? undefined
+            : getBuiltinWorkflowTemplate(latest.kind as WorkflowKind, Number(latest.templateVersion));
+          if (latest !== null && latest !== undefined && template !== undefined) {
+            await this.#deps.workflows?.transition(workflowRef.workflowId, template, {
+              operationId: `missing-anchor:${runId}`,
+              expectedVersion: latest.version,
+              at: new Date().toISOString(),
+              command: { kind: 'block-missing-anchor', issueId: workflowRef.issueId },
+            });
+          }
+        }
       }
     } finally {
       if (!awaitingAuthor) this.#runs.delete(runId);
@@ -2064,7 +2085,7 @@ export class OrchestrationRuntime {
   ): Promise<boolean> {
     const taskRunId = session.run.id;
     const located = locateSourceEvidence(content, evidence);
-    if (located.status === 'not-found') throw new Error(located.reason);
+    if (located.status === 'not-found') throw new MissingIssueAnchorError(located.reason);
     if (located.status === 'ambiguous') {
       if (located.matchMethod === 'approximate') {
         // 忠实§15.4：精确匹配未命中时显式告知正在近似匹配，避免作者误以为任务卡住。

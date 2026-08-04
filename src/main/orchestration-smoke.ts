@@ -3151,7 +3151,15 @@ async function smokeLocateSourceTask(): Promise<void> {
     const failedEvents = failed?.type === 'task-run-failed' ? await taskRuns.listEvents(failed.taskRunId) : [];
     check('locate-source 零命中发布可恢复失败', failed?.type === 'task-run-failed' && failed.error.category === 'validation' && (failed.error.recovery?.length ?? 0) > 0);
     check('locate-source 失败状态与原因持久化', failedTask?.status === 'failed' && failedTask.failure?.code === 'source-location-failed' && failedEvents.some((event) => event.type === 'task-run-failed' && event.error.recovery !== undefined));
-    check('locate-source 零命中不推进阶段', missingWorkflow?.currentStageId === missing.stageId);
+    const missingStage = missingWorkflow?.stages.find((stage) => stage.stageId === missing.stageId);
+    const missingReason = missingStage?.blockingReason as { kind?: string; issueId?: string } | undefined;
+    check('task 7.3：锚点失效阻塞原问题修复阶段且不猜测写入',
+      missingWorkflow?.currentStageId === missing.stageId
+      && missingStage?.status === 'blocked'
+      && missingReason?.kind === 'missing-anchor'
+      && missingReason.issueId === missing.issueId
+      && missingStage.artifactRefs?.length === 0
+      && !missingWc.control.some((event) => event.type === 'refactor-diff-computed' || event.type === 'refactor-applied'));
 
     // 暂停/恢复：运行中在安全边界收敛为 paused，恢复复用同一 taskRunId 完成。
     const pauseCase = await prepare('locate-pause', `开场。${quote}随后他回头解释。`, 400);
