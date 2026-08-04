@@ -318,4 +318,17 @@ export const MIGRATIONS: ReadonlyArray<Migration> = [
       CREATE INDEX idx_research_artifacts_project ON research_artifacts(project_id, created_at DESC);
     `,
   },
+  {
+    version: 11,
+    up: `
+      CREATE TABLE workflow_issue_refactor_applies (
+        issue_id TEXT NOT NULL, refactor_run_id TEXT NOT NULL, checkpoint_id TEXT NOT NULL,
+        anchor_json TEXT NOT NULL, decisions_json TEXT NOT NULL, accepted_hunk_ids_json TEXT NOT NULL,
+        base_hash TEXT NOT NULL, result_hash TEXT NOT NULL, created_at INTEGER NOT NULL,
+        PRIMARY KEY(issue_id, refactor_run_id),
+        FOREIGN KEY(issue_id) REFERENCES workflow_issues(issue_id) ON DELETE CASCADE
+      );
+      CREATE INDEX idx_issue_refactor_applies_checkpoint ON workflow_issue_refactor_applies(checkpoint_id);
+    `,
+  },
 ];

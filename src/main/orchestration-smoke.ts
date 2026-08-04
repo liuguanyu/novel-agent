@@ -1561,31 +1561,79 @@ async function smokeWorkflowReviewerIssuePersistence(): Promise<void> {
       afterClarify?.currentStageId === workflow.currentStageId);
 
     if (dto?.issueId === undefined) throw new Error('reviewer did not persist issue');
-    await workflowIssues.select(dto.issueId, 'author', 'targeted-fix-pass');
-    await workflowIssues.linkCheckpointAndMarkVerifying(dto.issueId, 'checkpoint-targeted-pass');
+    const issueId = dto.issueId;
+    const applyIssueFix = async (refactorRunId: RunId, rewritten: string): Promise<string> => {
+      const latest = await workflows.get(workflow.workflowId);
+      if (latest === null || latest.currentStageId === null) throw new Error('new-book issue workflow disappeared');
+      await service.command({
+        type: 'workflow-select-issue', workflowId: workflow.workflowId, stageId: latest.currentStageId,
+        workflowRef: { workflowId: workflow.workflowId, stageId: latest.currentStageId, issueId },
+        issueId, expectedVersion: latest.version, runId: refactorRunId,
+        requestId: `${refactorRunId}:select`, operationId: `${refactorRunId}:select-op`,
+      });
+      const anchor: FragmentAnchor = { node: { id: asNodeId(chapterId), kind: 'chapter' }, from: 0, to: manuscriptText.length };
+      const refactorWc = new FakeWebContents();
+      const refactorRuntime = runtime(new FakeModelResolver('unused', '[]').asResolver());
+      const issueRef = { workflowId: workflow.workflowId, stageId: latest.currentStageId, issueId };
+      await refactorRuntime.computeRefactorDiff(refactorWc.asWebContents(), refactorRunId, anchor, rewritten, issueRef);
+      const diff = refactorWc.control.find((item) => item.type === 'refactor-diff-computed');
+      if (diff?.type !== 'refactor-diff-computed') throw new Error(`new-book issue diff failed: ${JSON.stringify(refactorWc.control)}`);
+      await refactorRuntime.applyHunkDecisions(
+        refactorWc.asWebContents(), refactorRunId, anchor, rewritten,
+        diff.hunks.map((hunk, index) => ({ hunkId: hunk.id, decision: index === 0 ? 'accept' as const : 'reject' as const })),
+        issueRef,
+      );
+      const applied = refactorWc.control.find((item) => item.type === 'refactor-applied');
+      if (applied?.type !== 'refactor-applied' || applied.checkpointId === undefined) {
+        throw new Error(`new-book issue apply failed: ${JSON.stringify(refactorWc.control)}`);
+      }
+      return applied.checkpointId;
+    };
+
+    const firstRefactorRunId = 'targeted-fix-pass' as RunId;
+    const firstCheckpointId = await applyIssueFix(firstRefactorRunId, '他先安排同伴安全撤离。随后，他回头解释自己的决定。');
+    const verifyingIssue = await workflowIssues.get(issueId);
+    const firstApplies = await workflowIssues.listRefactorApplies(issueId);
+    check('task 6.5：新书实际 diff/hunk 写回后仅转 verifying', verifyingIssue?.status === 'verifying');
+    check('task 6.5：实际 hunk 裁决与 checkpoint 形成持久 apply evidence',
+      firstApplies.length === 1 && firstApplies[0]?.refactorRunId === firstRefactorRunId
+      && firstApplies[0]?.checkpointId === firstCheckpointId
+      && firstApplies[0].decisions.some((decision) => decision.decision === 'accept'));
+    check('task 6.5：checkpoint 为真实可读取快照', await new SqliteCheckpointer(db).get(asCheckpointId(firstCheckpointId)) !== null);
+
     const passRunId = randomUUID() as RunId;
     const passWc = new FakeWebContents();
     await runtime(new FakeModelResolver('unused', '[]').asResolver()).runTargetedVerification(
-      passWc.asWebContents(), passRunId, { ...workflowRef, issueId: dto.issueId },
+      passWc.asWebContents(), passRunId, { ...workflowRef, issueId },
     );
     const passEvent = passWc.control.find((item) => item.type === 'targeted-verification-completed');
-    const passIssue = await workflowIssues.get(dto.issueId);
+    const passIssue = await workflowIssues.get(issueId);
     check('targeted verification 通过由 Main 判定', passEvent?.type === 'targeted-verification-completed' && passEvent.passed);
     check('targeted verification 通过后 issue resolved', passIssue?.status === 'resolved');
     check('targeted verification 持久化 verification run', passIssue !== null && passIssue.verificationRunIds.includes(passRunId));
+    check('task 6.5：resolved history 保留真实复检 run 与 checkpoint evidence',
+      passIssue?.resolutionHistory.at(-1)?.sourceRunId === passRunId
+      && passIssue.resolutionHistory.at(-1)?.evidenceRefs.includes(`checkpoint:${firstCheckpointId}`) === true);
 
     await workflowIssues.upsertFromAudit(workflow.workflowId, 'final-audit-recurrence', [JSON.parse(issueText)[0] as ConsistencyIssueDto]);
-    await workflowIssues.select(dto.issueId, 'author', 'targeted-fix-fail');
-    await workflowIssues.linkCheckpointAndMarkVerifying(dto.issueId, 'checkpoint-targeted-fail');
+    const secondRefactorRunId = 'targeted-fix-fail' as RunId;
+    const secondCheckpointId = await applyIssueFix(secondRefactorRunId, '他先护送同伴离开险地。随后，他回头解释自己的决定。');
     const failRunId = randomUUID() as RunId;
     const failWc = new FakeWebContents();
     await runtime(new FakeModelResolver('unused', issueText).asResolver()).runTargetedVerification(
-      failWc.asWebContents(), failRunId, { ...workflowRef, issueId: dto.issueId },
+      failWc.asWebContents(), failRunId, { ...workflowRef, issueId },
     );
     const failEvent = failWc.control.find((item) => item.type === 'targeted-verification-completed');
-    const failIssue = await workflowIssues.get(dto.issueId);
+    const reloadedIssues = new WorkflowIssueRepository(db);
+    const failIssue = await reloadedIssues.get(issueId);
+    const allApplies = await reloadedIssues.listRefactorApplies(issueId);
     check('targeted verification 复发判定失败', failEvent?.type === 'targeted-verification-completed' && !failEvent.passed);
     check('targeted verification 失败后 issue 回 fixing', failIssue?.status === 'fixing');
+    check('task 6.5：Repository 重载后仍保留两轮 apply/checkpoint/verification 全部证据',
+      allApplies.length === 2 && failIssue !== null
+      && failIssue.checkpointIds.includes(firstCheckpointId) && failIssue.checkpointIds.includes(secondCheckpointId)
+      && failIssue.verificationRunIds.includes(passRunId) && failIssue.verificationRunIds.includes(failRunId));
+    manuscriptText = originalManuscript;
 
     // task 6.2：新书前六个规划阶段完成后，writer 在 draft-writing 的无 finding 完成边界落盘 chapter 草稿。
     const draftWorkflowId = 'new-book-chapter-writeback';

@@ -330,6 +330,21 @@ function parseStrings(value: unknown): ReadonlyArray<string> {
   return JSON.parse(String(value)) as string[];
 }
 
+export interface WorkflowIssueRefactorApplyInput {
+  readonly issueId: string;
+  readonly refactorRunId: string;
+  readonly checkpointId: string;
+  readonly anchor: unknown;
+  readonly decisions: ReadonlyArray<{ readonly hunkId: string; readonly decision: 'accept' | 'reject' }>;
+  readonly acceptedHunkIds: ReadonlyArray<string>;
+  readonly baseHash: string;
+  readonly resultHash: string;
+}
+
+export interface WorkflowIssueRefactorApplyRecord extends WorkflowIssueRefactorApplyInput {
+  readonly createdAt: number;
+}
+
 export class WorkflowIssueRepository {
   constructor(private readonly db: SqliteDatabase) {}
 
@@ -431,6 +446,66 @@ export class WorkflowIssueRepository {
     });
   }
 
+  async recordRefactorApplyAndMarkVerifying(input: WorkflowIssueRefactorApplyInput): Promise<WorkflowIssueRecord> {
+    return this.db.transaction(async (tx) => {
+      const applied = await tx.get(
+        'SELECT 1 FROM workflow_issue_refactor_applies WHERE issue_id=? AND refactor_run_id=?',
+        input.issueId,
+        input.refactorRunId,
+      );
+      if (applied !== null) {
+        const existing = await this.getWith(tx, input.issueId);
+        if (existing === null) throw new Error('workflow issue not found');
+        return existing;
+      }
+      const issue = await this.transitionWith(tx, input.issueId, {
+        kind: 'record-checkpoint',
+        checkpointId: input.checkpointId,
+        actor: 'system',
+      });
+      const createdAt = Date.now();
+      await tx.run(
+        'INSERT INTO workflow_issue_checkpoints VALUES(?,?,?)',
+        input.issueId,
+        input.checkpointId,
+        createdAt,
+      );
+      await tx.run(
+        `INSERT INTO workflow_issue_refactor_applies
+          (issue_id,refactor_run_id,checkpoint_id,anchor_json,decisions_json,accepted_hunk_ids_json,base_hash,result_hash,created_at)
+          VALUES(?,?,?,?,?,?,?,?,?)`,
+        input.issueId,
+        input.refactorRunId,
+        input.checkpointId,
+        JSON.stringify(input.anchor),
+        JSON.stringify(input.decisions),
+        JSON.stringify(input.acceptedHunkIds),
+        input.baseHash,
+        input.resultHash,
+        createdAt,
+      );
+      return issue;
+    });
+  }
+
+  async listRefactorApplies(issueId: string): Promise<ReadonlyArray<WorkflowIssueRefactorApplyRecord>> {
+    const rows = await this.db.all(
+      'SELECT * FROM workflow_issue_refactor_applies WHERE issue_id=? ORDER BY created_at,refactor_run_id',
+      issueId,
+    );
+    return rows.map((row) => ({
+      issueId: String(row['issue_id']),
+      refactorRunId: String(row['refactor_run_id']),
+      checkpointId: String(row['checkpoint_id']),
+      anchor: JSON.parse(String(row['anchor_json'])) as unknown,
+      decisions: JSON.parse(String(row['decisions_json'])) as WorkflowIssueRefactorApplyRecord['decisions'],
+      acceptedHunkIds: parseStrings(row['accepted_hunk_ids_json']),
+      baseHash: String(row['base_hash']),
+      resultHash: String(row['result_hash']),
+      createdAt: Number(row['created_at']),
+    }));
+  }
+
   async recordVerificationAndTransition(issueId: string, runId: string, passed: boolean, equivalentConflict: boolean, evidenceRefs: ReadonlyArray<string>): Promise<WorkflowIssueRecord> {
     return this.db.transaction(async (tx) => {
       if (await tx.get('SELECT 1 FROM workflow_issue_verifications WHERE issue_id=? AND verification_run_id=?', issueId, runId) !== null) {
@@ -474,8 +549,18 @@ export class WorkflowIssueRepository {
     if (last !== undefined && last !== current.transitionHistory.at(-1)) {
       await this.appendHistory(db, issueId, 'transition', next.status, last.sourceRunId, last.actor, last.evidenceRefs, `${last.from}->${last.to}`);
     }
-    if (next.status === 'resolved' || next.status === 'dismissed') {
-      await this.appendHistory(db, issueId, 'resolution', next.status, undefined, 'system', [], next.resolutionReason);
+    const resolution = next.resolutionHistory.at(-1);
+    if (resolution !== undefined && resolution !== current.resolutionHistory.at(-1)) {
+      await this.appendHistory(
+        db,
+        issueId,
+        'resolution',
+        next.status,
+        resolution.sourceRunId,
+        resolution.actor,
+        resolution.evidenceRefs,
+        resolution.note,
+      );
     }
     return next;
   }

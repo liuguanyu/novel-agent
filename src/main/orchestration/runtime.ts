@@ -3113,7 +3113,11 @@ export class OrchestrationRuntime {
       const validity: Record<string, HunkValidity> = {};
       for (const h of diff.hunks) validity[h.id] = 'valid';
 
-      const splice = spliceAcceptedHunks(diff, decisions, validity);
+      const normalizedDecisions = diff.hunks.map((hunk): HunkDecision => ({
+        hunkId: hunk.id,
+        decision: decisions.find((decision) => decision.hunkId === hunk.id)?.decision ?? 'reject',
+      }));
+      const splice = spliceAcceptedHunks(diff, normalizedDecisions, validity);
       if (!splice.ok) {
         this.#sendControl(wc, {
           type: 'refactor-apply-failed',
@@ -3128,7 +3132,7 @@ export class OrchestrationRuntime {
         return;
       }
 
-      const acceptedHunkIds = decisions.filter((decision) => decision.decision === 'accept').map((decision) => decision.hunkId);
+      const acceptedHunkIds = normalizedDecisions.filter((decision) => decision.decision === 'accept').map((decision) => decision.hunkId);
       if (workflowRef?.issueId !== undefined && acceptedHunkIds.length === 0) {
         this.#sendControl(wc, {
           type: 'refactor-apply-failed',
@@ -3154,21 +3158,38 @@ export class OrchestrationRuntime {
       }
 
       // 变更作为可回滚步提交 checkpointer（与事实版本共用标识空间）。
+      // checkpoint/issue evidence 失败时补偿写回原片段，避免正文已改但问题仍停在 fixing。
       const checkpointer = this.#deps.getCheckpointer();
       let checkpointId: string | undefined;
-      if (checkpointer !== undefined) {
-        const state = this.#refactorCheckpointState(anchor.node.id, chapter.content, splice.fragmentText, anchor);
-        const cp = await checkpointer.commit(`refactor:${anchor.node.id}`, state, null);
-        checkpointId = cp.id as string;
-      }
-      if (workflowRef?.issueId !== undefined) {
-        if (checkpointId === undefined) throw new Error('issue refactor requires a durable checkpoint');
-        if (this.#deps.workflowIssues === undefined) throw new Error('workflow issue repository is unavailable');
-        const issue = await this.#deps.workflowIssues.get(workflowRef.issueId);
-        if (issue === null || issue.workflowId !== workflowRef.workflowId) {
-          throw new Error('issue does not belong to workflow');
+      try {
+        if (checkpointer !== undefined) {
+          const state = this.#refactorCheckpointState(anchor.node.id, chapter.content, splice.fragmentText, anchor);
+          const cp = await checkpointer.commit(`refactor:${anchor.node.id}`, state, null);
+          checkpointId = cp.id as string;
         }
-        await this.#deps.workflowIssues.linkCheckpointAndMarkVerifying(workflowRef.issueId, checkpointId);
+        if (workflowRef?.issueId !== undefined) {
+          if (checkpointId === undefined) throw new Error('issue refactor requires a durable checkpoint');
+          if (this.#deps.workflowIssues === undefined) throw new Error('workflow issue repository is unavailable');
+          const issue = await this.#deps.workflowIssues.get(workflowRef.issueId);
+          if (issue === null || issue.workflowId !== workflowRef.workflowId) {
+            throw new Error('issue does not belong to workflow');
+          }
+          await this.#deps.workflowIssues.recordRefactorApplyAndMarkVerifying({
+            issueId: workflowRef.issueId,
+            refactorRunId: runId,
+            checkpointId,
+            anchor: { nodeId: anchor.node.id as string, nodeKind: anchor.node.kind, from: anchor.from, to: anchor.to },
+            decisions: normalizedDecisions,
+            acceptedHunkIds,
+            baseHash: currentHash,
+            resultHash: createHash('sha256').update(splice.fragmentText).digest('hex'),
+          });
+        }
+      } catch (err) {
+        const rollbackAnchor = { ...anchor, to: anchor.from + splice.fragmentText.length };
+        const rollback = await (this.#deps.manuscript?.writeBackRefactoredFragment ?? writeBackRefactoredFragment)(rollbackAnchor, fragment.text);
+        if (!rollback.ok) throw new Error(`refactor evidence failed and manuscript rollback failed: ${rollback.reason ?? 'unknown'}`, { cause: err });
+        throw err;
       }
 
       this.#fragmentBases.delete(runId);
