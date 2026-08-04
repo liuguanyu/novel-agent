@@ -9,6 +9,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { toControlCommand } from '../../core/shell/handbrake.js';
 import { resolveAgentEntry } from '../../core/shell/agent-catalog.js';
+import { buildAssetClarificationSelectionCommand } from '../lib/workflow-ui-contracts.js';
 import type {
   BackendControlEvent,
   BackendStreamMessage,
@@ -181,18 +182,30 @@ export function useDialogue(workflowRef?: WorkflowRefDto): UseDialogueResult {
     activeRunIdRef.current = runId;
     setActiveRunId(runId);
 
-    const command: SummonRunCommand = {
-      type: 'summon-run',
-      runId,
-      agent: request.agent,
-      mode: request.mode,
-      scope: request.scope,
-      ...(request.anchorNodeId !== undefined ? { anchorNodeId: request.anchorNodeId } : {}),
-      ...(request.instruction !== undefined ? { instruction: request.instruction } : {}),
-      ...(request.autoExtractFacts !== undefined ? { autoExtractFacts: request.autoExtractFacts } : {}),
-      ...(request.targetAssetId !== undefined ? { targetAssetId: request.targetAssetId } : {}),
-      ...(request.workflowRef === undefined ? (workflowRef === undefined ? {} : { workflowRef }) : { workflowRef: request.workflowRef }),
-    };
+    const resolvedWorkflowRef = request.workflowRef ?? workflowRef;
+    const command: SummonRunCommand = request.targetAssetId === undefined
+      ? {
+          type: 'summon-run',
+          runId,
+          agent: request.agent,
+          mode: request.mode,
+          scope: request.scope,
+          ...(request.anchorNodeId !== undefined ? { anchorNodeId: request.anchorNodeId } : {}),
+          ...(request.instruction !== undefined ? { instruction: request.instruction } : {}),
+          ...(request.autoExtractFacts !== undefined ? { autoExtractFacts: request.autoExtractFacts } : {}),
+          ...(resolvedWorkflowRef === undefined ? {} : { workflowRef: resolvedWorkflowRef }),
+        }
+      : buildAssetClarificationSelectionCommand({
+          runId,
+          agent: request.agent,
+          mode: request.mode,
+          scope: request.scope,
+          targetAssetId: request.targetAssetId,
+          ...(request.anchorNodeId === undefined ? {} : { anchorNodeId: request.anchorNodeId }),
+          ...(request.instruction === undefined ? {} : { instruction: request.instruction }),
+          ...(request.autoExtractFacts === undefined ? {} : { autoExtractFacts: request.autoExtractFacts }),
+          ...(resolvedWorkflowRef === undefined ? {} : { workflowRef: resolvedWorkflowRef }),
+        });
     if (command.workflowRef !== undefined) runRefsRef.current.set(runId, command.workflowRef);
     window.novelAgent.sendCommand(command);
     return runId;

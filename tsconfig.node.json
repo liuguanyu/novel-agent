@@ -12,6 +12,7 @@
     "src/workers/**/*",
     "src/core/**/*",
     "src/shared/**/*",
+    "src/renderer/lib/workflow-ui-contracts.ts",
     "electron.vite.config.ts"
   ]
 }

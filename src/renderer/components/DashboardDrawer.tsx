@@ -15,6 +15,7 @@ import {
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { useDashboard, type UseDashboardResult } from '../hooks/useDashboard.js';
 import type { ConsistencyIssueDto, LegacyRevisionDiagnosisItemDto, WorkflowRefDto, WorkflowSnapshotDto } from '../../shared/ipc/index.js';
+import { presentIssueLifecycle, resolveIssueChapterTarget, type IssueLifecycleStatus } from '../lib/workflow-ui-contracts.js';
 
 interface DashboardDrawerProps {
   readonly onSelectChapter?: (nodeId: string) => void;
@@ -38,16 +39,7 @@ function severityLabel(severity: ConsistencyIssueDto['severity']): string {
   }
 }
 
-function nextActionLabel(issue: ConsistencyIssueDto): string {
-  switch (issue.workflowStatus) {
-    case 'open': return '下一步：选择问题并定位原文';
-    case 'fixing': return '下一步：完成改写并提交 hunk 裁决';
-    case 'verifying': return '下一步：运行针对性复检';
-    case 'resolved': return '已完成：问题已解决';
-    case 'dismissed': return `已忽略${issue.resolutionReason === undefined ? '' : `：${issue.resolutionReason}`}`;
-    default: return '下一步：等待 Main 建立工作流问题记录';
-  }
-}
+
 
 function phaseLabel(phase: string | undefined): string {
   switch (phase) {
@@ -67,10 +59,14 @@ interface IssueGroup {
   readonly issues: ReadonlyArray<ConsistencyIssueDto>;
 }
 
-type WorkflowStatusFilter = 'all' | NonNullable<ConsistencyIssueDto['workflowStatus']>;
+type WorkflowStatusFilter = 'all' | IssueLifecycleStatus;
 
-const WORKFLOW_STATUS_LABEL: Record<Exclude<WorkflowStatusFilter, 'all'>, string> = {
-  open: '待处理', fixing: '修复中', verifying: '复检中', resolved: '已解决', dismissed: '已忽略',
+const WORKFLOW_STATUS_LABEL: Record<IssueLifecycleStatus, string> = {
+  open: presentIssueLifecycle('open').label,
+  fixing: presentIssueLifecycle('fixing').label,
+  verifying: presentIssueLifecycle('verifying').label,
+  resolved: presentIssueLifecycle('resolved').label,
+  dismissed: presentIssueLifecycle('dismissed').label,
 };
 
 function issueGroups(issues: ReadonlyArray<ConsistencyIssueDto>): ReadonlyArray<IssueGroup> {
@@ -95,8 +91,10 @@ function IssueCard({
   readonly onSelectChapter?: (nodeId: string) => void;
   readonly onRunVerification?: (issue: ConsistencyIssueDto) => void;
 }): JSX.Element {
-  const chapterAnchor = issue.anchors.find((anchor) => anchor.kind === 'chapter');
-  const hasAnchor = issue.anchors.length > 0;
+  const chapterTarget = resolveIssueChapterTarget(issue);
+  const lifecycle = issue.workflowStatus === undefined
+    ? undefined
+    : presentIssueLifecycle(issue.workflowStatus, issue.resolutionReason);
   return (
     <div className="rounded-md border border-border p-3 text-sm">
       <div className="mb-1 flex items-center justify-between gap-2">
@@ -108,16 +106,16 @@ function IssueCard({
             </span>
           )}
         </span>
-        {chapterAnchor !== undefined && onSelectChapter !== undefined ? (
-          <Button variant="outline" size="sm" onClick={() => onSelectChapter(chapterAnchor.id)}>
+        {chapterTarget.enabled && onSelectChapter !== undefined ? (
+          <Button variant="outline" size="sm" onClick={() => onSelectChapter(chapterTarget.targetChapterId)}>
             跳章
           </Button>
         ) : (
-          <span className="rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">{hasAnchor ? '暂无章节锚点' : '无正文锚点，禁止写入'}</span>
+          <span className="rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">无章节锚点，禁止写入</span>
         )}
       </div>
       <p className="text-foreground">{issue.description}</p>
-      <p className="mt-1 text-xs text-primary">{nextActionLabel(issue)}</p>
+      <p className="mt-1 text-xs text-primary">{lifecycle?.nextAction ?? '下一步：等待 Main 建立工作流问题记录'}</p>
       {issue.suggestedFix !== undefined && (
         <p className="mt-1 text-muted-foreground">建议：{issue.suggestedFix}</p>
       )}
@@ -130,10 +128,10 @@ function IssueCard({
       {(issue.checkpointIds?.length ?? 0) > 0 && issue.workflowStatus === 'verifying' && <p className="text-xs text-amber-600">正文已落盘，当前等待针对性复检。</p>}
       {(issue.verificationRunIds?.length ?? 0) > 0 && <p className="text-xs text-muted-foreground">复检运行：{issue.verificationRunIds?.join('、')}</p>}
       {issue.resolutionReason !== undefined && <p className="text-xs text-muted-foreground">处理理由：{issue.resolutionReason}</p>}
-      {issue.workflowStatus === 'verifying' && onRunVerification !== undefined && hasAnchor && (
+      {lifecycle?.outcome === 'verifying' && onRunVerification !== undefined && chapterTarget.enabled && (
         <Button className="mt-2" size="sm" onClick={() => onRunVerification(issue)}>运行复检</Button>
       )}
-      {issue.workflowStatus === 'verifying' && !hasAnchor && <p className="mt-2 text-xs text-destructive">缺少稳定锚点，不能启动正文复检或写入。</p>}
+      {lifecycle?.outcome === 'verifying' && !chapterTarget.enabled && <p className="mt-2 text-xs text-destructive">缺少稳定章节锚点，不能启动正文复检或写入。</p>}
       <div className="mt-2 flex flex-wrap gap-1 text-xs text-muted-foreground">
         {issue.anchors.map((anchor) => (
           <span key={`${anchor.kind}:${anchor.id}`} className="rounded bg-muted px-1.5 py-0.5">

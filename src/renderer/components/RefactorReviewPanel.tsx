@@ -22,6 +22,7 @@ import {
 import { ScrollArea } from '@/components/ui/scroll-area';
 import type { DiffHunkDto, FragmentAnchorDto } from '../../shared/ipc/index.js';
 import type { RefactorState, UseRefactorResult } from '../hooks/useRefactor.js';
+import { resolveIssueChapterTarget } from '../lib/workflow-ui-contracts.js';
 
 interface RefactorReviewPanelProps {
   readonly selectedNodeId: string | undefined;
@@ -39,6 +40,7 @@ interface RefactorReviewPanelProps {
     readonly nodeId: string;
     readonly original: string;
     readonly suggestion: string;
+    readonly rewritten: '';
   } | undefined;
 }
 
@@ -146,7 +148,7 @@ export function RefactorReviewPanel({
     if (prefill === undefined || prefill === appliedPrefillRef.current) return;
     appliedPrefillRef.current = prefill;
     setOriginal(prefill.original);
-    setRewritten('');
+    setRewritten(prefill.rewritten);
     setLocalError(undefined);
   }, [prefill]);
 
@@ -155,7 +157,11 @@ export function RefactorReviewPanel({
     [state.hunks, state.decisions],
   );
 
-  const anchoredNodeId = prefill?.nodeId ?? selectedNodeId;
+  const chapterTarget = resolveIssueChapterTarget(
+    { anchors: prefill === undefined ? [] : [{ kind: 'chapter', id: prefill.nodeId }] },
+    selectedNodeId,
+  );
+  const anchoredNodeId = chapterTarget.enabled ? chapterTarget.targetChapterId : selectedNodeId;
   const anchorReady =
     anchoredNodeId !== undefined &&
     selectedNodeId === anchoredNodeId &&

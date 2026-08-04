@@ -55,6 +55,7 @@ import { useWorkflowSnapshot } from './hooks/useWorkflowSnapshot.js';
 import { useAssetReview } from './hooks/useAssetReview.js';
 import { useTaskActivityStream } from './hooks/useTaskActivityStream.js';
 import { useTaskUiEffects } from './hooks/useTaskUiEffects.js';
+import { buildIssueRefactorIntent, resolveIssueChapterTarget } from './lib/workflow-ui-contracts.js';
 
 function findChapterPath(
   nodes: ReadonlyArray<ChapterTreeNodeDto>,
@@ -190,7 +191,7 @@ export function App(): JSX.Element {
       ? undefined
       : turns.find((turn) => turn.runId === workbenchRunId && turn.role === 'assistant')?.agent;
   const [refactorPrefill, setRefactorPrefill] = useState<
-    { readonly nodeId: string; readonly original: string; readonly suggestion: string } | undefined
+    { readonly nodeId: string; readonly original: string; readonly suggestion: string; readonly rewritten: '' } | undefined
   >(undefined);
   const [refactorIssueId, setRefactorIssueId] = useState<string | undefined>(undefined);
   const [pendingIssueLocation, setPendingIssueLocation] = useState<
@@ -271,15 +272,15 @@ export function App(): JSX.Element {
 
   // 问题定位按稳定章节锚点跳转；有证据引文时，等待正文加载后再精确高亮。
   const handleLocateIssue = useCallback((issue: ConsistencyIssueDto): void => {
-    const chapterAnchor = issue.anchors.find((anchor) => anchor.kind === 'chapter');
-    if (chapterAnchor === undefined) return;
+    const target = resolveIssueChapterTarget(issue, selectedNodeId);
+    if (!target.enabled) return;
     const quote = issue.evidence?.quote;
     setPendingIssueLocation({
-      nodeId: chapterAnchor.id,
+      nodeId: target.targetChapterId,
       ...(quote !== undefined && quote.length > 0 ? { quote } : { quote: undefined }),
     });
-    selectChapter(chapterAnchor.id);
-  }, [selectChapter]);
+    selectChapter(target.targetChapterId);
+  }, [selectChapter, selectedNodeId]);
 
   // 采纳问题：仅预填证据引文；suggestedFix 作为只读建议，实际改写正文保持为空。
   const handleRefactorOpenChange = useCallback((open: boolean): void => {
@@ -291,26 +292,21 @@ export function App(): JSX.Element {
   }, []);
 
   const handleAdoptIssue = useCallback((issue: ConsistencyIssueDto): void => {
-    const original = issue.evidence?.quote ?? '';
-    const chapterAnchor = issue.anchors.find((anchor) => anchor.kind === 'chapter');
-    if (original.length === 0 || chapterAnchor === undefined) return;
-    setRefactorPrefill({
-      nodeId: chapterAnchor.id,
-      original,
-      suggestion: issue.suggestedFix ?? '',
-    });
-    setRefactorIssueId(issue.issueId);
+    const intent = buildIssueRefactorIntent(issue, selectedNodeId);
+    if (!intent.enabled) return;
+    setRefactorPrefill(intent.prefill);
+    setRefactorIssueId(intent.issueId);
 
-    setPendingIssueLocation({ nodeId: chapterAnchor.id, quote: original });
-    selectChapter(chapterAnchor.id);
+    setPendingIssueLocation({ nodeId: intent.targetChapterId, quote: intent.prefill.original });
+    selectChapter(intent.targetChapterId);
     setRefactorOpen(true);
-  }, [selectChapter]);
+  }, [selectChapter, selectedNodeId]);
 
   /** 4.3 定位完成后的「进入局部改写」下一步入口：用已定位的章节/原文/问题预填改写面板。 */
   const enterRefactorFromLocatedSource = useCallback(
     (params: { readonly chapterId: string; readonly quote: string; readonly issueId?: string }): void => {
       if (params.quote.length === 0) return;
-      setRefactorPrefill({ nodeId: params.chapterId, original: params.quote, suggestion: '' });
+      setRefactorPrefill({ nodeId: params.chapterId, original: params.quote, suggestion: '', rewritten: '' });
       setRefactorIssueId(params.issueId);
       setPendingIssueLocation({ nodeId: params.chapterId, quote: params.quote });
       selectChapter(params.chapterId);

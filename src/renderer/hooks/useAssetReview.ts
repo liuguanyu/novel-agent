@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import type { AssetImpactDto, BackendControlEvent, CreativeAssetCandidateDto, WorkflowSnapshotDto } from '../../shared/ipc/index.js';
+import { buildAssetCandidateDecisionCommand } from '../lib/workflow-ui-contracts.js';
 
 export interface UseAssetReviewResult {
   readonly candidates: ReadonlyArray<CreativeAssetCandidateDto>;
@@ -56,10 +57,16 @@ export function useAssetReview(workflow: WorkflowSnapshotDto | null): UseAssetRe
   });
   const sendCandidate = (candidate: CreativeAssetCandidateDto, action: 'confirm-asset-change' | 'reject-asset-change'): void => {
     if (workflow === null || pendingIds.has(candidate.candidateId)) return;
-    const stageId = candidate.workflowRef?.stageId ?? workflow.currentStageId;
     setError(undefined);
     setPendingIds((old) => new Set(old).add(candidate.candidateId));
-    void window.novelAgent.sendWorkflowCommand({ type: `workflow-${action}`, workflowId: workflow.workflowId, ...(stageId !== null && stageId !== undefined ? { stageId } : {}), candidateId: candidate.candidateId, requestId: crypto.randomUUID(), operationId: crypto.randomUUID(), expectedVersion: workflow.version }).then((response) => {
+    const command = buildAssetCandidateDecisionCommand({
+      workflow,
+      candidate,
+      decision: action === 'confirm-asset-change' ? 'confirm' : 'reject',
+      requestId: crypto.randomUUID(),
+      operationId: crypto.randomUUID(),
+    });
+    void window.novelAgent.sendWorkflowCommand(command).then((response) => {
       if (response.failure !== undefined) { setError(response.failure.error.message); return; }
       if (response.snapshot !== null) setCandidates((old) => old.filter((item) => item.candidateId !== candidate.candidateId));
     }).catch((reason: unknown) => setError(reason instanceof Error ? reason.message : String(reason))).finally(() => finishPending(candidate.candidateId));

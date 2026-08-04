@@ -76,6 +76,13 @@ import type { NovelState } from '../core/orchestration/index.js';
 import { locateSourceEvidence } from '../core/workflow/index.js';
 import { NEW_BOOK_CREATION_TEMPLATE } from '../core/workflow/templates.js';
 import {
+  buildAssetCandidateDecisionCommand,
+  buildAssetClarificationSelectionCommand,
+  buildIssueRefactorIntent,
+  presentIssueLifecycle,
+  resolveIssueChapterTarget,
+} from '../renderer/lib/workflow-ui-contracts.js';
+import {
   NEW_BOOK_PLANNING_PLAYBOOKS,
   NEW_BOOK_STAGE_PLAYBOOKS,
   NEW_BOOK_WRITING_PLAYBOOKS,
@@ -4713,6 +4720,68 @@ async function smokeModelAuditNoCoT(): Promise<void> {
   }
 }
 
+function smokeTask87RendererContracts(): void {
+  const issue: ConsistencyIssueDto = {
+    issueId: 'issue-87',
+    type: 'timeline-break',
+    severity: 'critical',
+    anchors: [{ kind: 'chapter', id: 'chapter-target' }],
+    description: '时间线冲突',
+    evidence: { quote: '原始证据正文' },
+    suggestedFix: '只读修改建议',
+    requiresHumanDecision: false,
+  };
+  const adopted = buildIssueRefactorIntent(issue, 'chapter-current');
+  check('task 8.7：adopt 将 evidence/suggestedFix/rewritten 严格分离',
+    adopted.enabled
+    && adopted.prefill.original === '原始证据正文'
+    && adopted.prefill.suggestion === '只读修改建议'
+    && adopted.prefill.rewritten === '');
+  check('task 8.7：跨章节修复返回稳定目标 chapter',
+    adopted.enabled && adopted.crossesChapter && adopted.targetChapterId === 'chapter-target');
+  check('task 8.7：缺失 chapter anchor 禁用正文入口',
+    !resolveIssueChapterTarget({ anchors: [{ kind: 'scene', id: 'scene-only' }] }, 'chapter-current').enabled);
+
+  const open = presentIssueLifecycle('open');
+  const fixing = presentIssueLifecycle('fixing');
+  const verifying = presentIssueLifecycle('verifying');
+  const resolved = presentIssueLifecycle('resolved');
+  const dismissed = presentIssueLifecycle('dismissed', '作者确认无需处理');
+  check('task 8.7：五态 lifecycle 文案完整且 dismissed 携理由',
+    [open.label, fixing.label, verifying.label, resolved.label, dismissed.label].join(',') === '待处理,修复中,复检中,已解决,已忽略'
+    && dismissed.nextAction.includes('作者确认无需处理'));
+  check('task 8.7：待复检/已解决/已忽略结果可区分',
+    verifying.outcome === 'verifying'
+    && resolved.outcome === 'resolved'
+    && dismissed.outcome === 'dismissed');
+
+  const selection = buildAssetClarificationSelectionCommand({
+    runId: 'run-selection',
+    agent: 'character-generator',
+    mode: 'mutate',
+    scope: 'project',
+    targetAssetId: 'asset-lin-lan',
+    workflowRef: { workflowId: 'workflow-87', stageId: 'draft-writing' },
+  });
+  const confirmation = buildAssetCandidateDecisionCommand({
+    workflow: { workflowId: 'workflow-87', currentStageId: 'draft-writing', version: 7 },
+    candidate: { candidateId: 'candidate-87', workflowRef: { workflowId: 'workflow-87', stageId: 'draft-writing' } },
+    decision: 'confirm',
+    requestId: 'request-87',
+    operationId: 'operation-87',
+  });
+  check('task 8.7：资产澄清选择只构造含 targetAssetId 的召唤意图',
+    selection.targetAssetId === 'asset-lin-lan'
+    && !('content' in selection)
+    && !('version' in selection));
+  check('task 8.7：资产确认只构造含 candidateId 的命令意图',
+    confirmation.type === 'workflow-confirm-asset-change'
+    && confirmation.candidateId === 'candidate-87'
+    && confirmation.expectedVersion === 7
+    && confirmation.content === undefined
+    && confirmation.assetId === undefined);
+}
+
 /**
  * 3.6 冲烟（静态守卫）：Renderer 不得直接访问 DB/LLM/fs 或主进程模块。
  * 递归扫描 src/renderer 下所有 .ts/.tsx 源文件，断言无任何 import 命中禁用模块白名单以外的副作用源：
@@ -4721,17 +4790,18 @@ async function smokeModelAuditNoCoT(): Promise<void> {
  */
 async function smokeRendererIsolation(): Promise<void> {
   const rendererRoot = join(process.cwd(), 'src', 'renderer');
-  // import 语句的模块说明符（import ... from 'X' / export ... from 'X' / import 'X'）。
-  const importSpecifierPattern = /(?:from|import)\s+['"]([^'"]+)['"]/g;
-  // 禁用模块判定：node 内置、electron、sqlite 驱动、模型/db 与任何相对 main/ 路径。
+  // 静态 import/export、side-effect import 与动态 import() 的模块说明符。
+  const importSpecifierPattern = /(?:from\s+|import\s*(?:\(\s*)?)['"]([^'"]+)['"]/g;
+  const isMainImport = (spec: string): boolean => /(^|\/)main(\/|$)/.test(spec);
+  const isDatabaseImport = (spec: string): boolean =>
+    /better-sqlite3|(^|\/)(sqlite|db|database)(\/|$)/.test(spec)
+    || /core\/(model|db)(\/|$)/.test(spec);
+  // 禁用模块判定：node 内置、electron、数据库/模型实现与任何 main 路径。
   const isForbidden = (spec: string): boolean => {
     if (spec.startsWith('node:')) return true;
     if (/^(fs|path|os|crypto|child_process|worker_threads|net|http|https)(\/|$)/.test(spec)) return true;
     if (spec === 'electron' || spec.startsWith('electron/') || spec.startsWith('electron-')) return true;
-    if (/better-sqlite3|(^|\/)sqlite(\/|$)/.test(spec)) return true;
-    // 相对路径指向 main/ 或 core 的 db/model 实现（Renderer 不得跨层引用副作用层）。
-    if (/(^|\/)main\//.test(spec)) return true;
-    if (/core\/(model|db)(\/|$)/.test(spec)) return true;
+    if (isMainImport(spec) || isDatabaseImport(spec)) return true;
     return false;
   };
   const files: string[] = [];
@@ -4751,19 +4821,26 @@ async function smokeRendererIsolation(): Promise<void> {
   check('3.6 Renderer 隔离：扫描到源文件', files.length > 0, `files=${files.length}`);
 
   const violations: string[] = [];
+  const mainViolations: string[] = [];
+  const databaseViolations: string[] = [];
   for (const file of files) {
     const source = await readFile(file, 'utf8');
     let match: RegExpExecArray | null;
     importSpecifierPattern.lastIndex = 0;
     while ((match = importSpecifierPattern.exec(source)) !== null) {
       const spec = match[1];
-      if (spec !== undefined && isForbidden(spec)) {
-        violations.push(`${file.replace(rendererRoot, 'src/renderer')} → ${spec}`);
+      if (spec !== undefined) {
+        const detail = `${file.replace(rendererRoot, 'src/renderer')} → ${spec}`;
+        if (isForbidden(spec)) violations.push(detail);
+        if (isMainImport(spec)) mainViolations.push(detail);
+        if (isDatabaseImport(spec)) databaseViolations.push(detail);
       }
     }
   }
   check('3.6 Renderer 不直接 import DB/LLM/fs/electron/main 模块',
     violations.length === 0, violations.join('; '));
+  check('task 8.7：Renderer 无 Main import', mainViolations.length === 0, mainViolations.join('; '));
+  check('task 8.7：Renderer 无 DB import', databaseViolations.length === 0, databaseViolations.join('; '));
 
   // 正面性：Renderer 确实经 window.novelAgent 桥与 Main 交互（而非本地副作用）。
   let usesBridge = false;
@@ -4987,6 +5064,7 @@ async function main(): Promise<void> {
   await smokeGenericPlaybookTask();
   await smokeSupplementTaskInput();
   await smokeModelAuditNoCoT();
+  smokeTask87RendererContracts();
   await smokeRendererIsolation();
   await smokeNewBookWritingPlaybooks();
   await smokeNewBookMainPathEndToEnd();

@@ -7,5 +7,5 @@
     "outDir": "./out-smoke",
     "noEmit": false
   },
-  "include": ["src/main/**/*", "src/core/**/*", "src/shared/**/*"]
+  "include": ["src/main/**/*", "src/core/**/*", "src/shared/**/*", "src/renderer/lib/workflow-ui-contracts.ts"]
 }

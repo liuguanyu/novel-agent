@@ -73,7 +73,7 @@
 - [x] 8.4 [Renderer] 在 hunk 落盘后按后端快照显示 checkpoint 与 verifying，全部拒绝时不伪造修复状态
 - [x] 8.5 [Renderer] 扩展质量仪表盘的 lifecycle/status 筛选、来源审计、checkpoint/复检追溯与最终复检新问题/复发提示
 - [x] 8.6 [Renderer] 新增资产目标选择、字段级 change set 确认/拒绝、版本冲突和影响清单 UI；只上报意图，不在本地提交资产或判定影响
-- [ ] 8.7 [Renderer Test] 覆盖建议与正文分离、跨章节修复、资产澄清消歧/确认、锚点缺失、待复检、已解决/已忽略区分及 Renderer 不本地关闭问题/写资产
+- [x] 8.7 [Renderer Test] 覆盖建议与正文分离、跨章节修复、资产澄清消歧/确认、锚点缺失、待复检、已解决/已忽略区分及 Renderer 不本地关闭问题/写资产（已实现无新测试依赖的纯 Renderer 契约 smoke：新增 `workflow-ui-contracts.ts` 并由 App/Dashboard/Refactor/useDialogue/useAssetReview 真实复用，而非测试平行逻辑。`buildIssueRefactorIntent` 强制 original=evidence.quote、suggestion=suggestedFix、rewritten=''，返回稳定目标 chapter 与跨章标记；缺 chapter anchor/evidence 时禁用正文入口。`presentIssueLifecycle` 统一 open/fixing/verifying/resolved/dismissed 五态文案、结果分类及 dismissed reason。资产目标选择只构造含 targetAssetId 的 summon 意图，candidate 确认/拒绝只构造含 candidateId、workflow version 的 Main command，不携 content/本地版本变更。orchestration smoke 覆盖上述契约并强化 Renderer 静态 import 扫描（含动态 import），单独断言无 Main/DB import；所有资产写入与问题关闭仍只能经 `window.novelAgent` IPC。typecheck、相关 ESLint、workflow/orchestration smoke 全绿。）
 - [ ] 8.8 [Renderer Polish] 恢复问题卡片到正文的连线 hero 动效；不改变定位、高亮和局部改写语义
 
 ## 9. 专家工作台双层视图
