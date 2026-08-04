@@ -11,6 +11,8 @@ export { MIGRATIONS } from './migrations.js';
 export type { Migration } from './migrations.js';
 export { SqliteCheckpointer } from './checkpoint-store.js';
 export { SqliteFactStore } from './fact-store.js';
+export { ResearchArtifactRepository } from './research-artifact-repository.js';
+export type { ResearchArtifactRecord } from './research-artifact-repository.js';
 export type { AppendVersionOptions } from './fact-store.js';
 export { WorkflowRepository, OptimisticVersionConflictError } from './workflow-repository.js';
 export type { WorkflowRecord, WorkflowStageRecord, CreateWorkflowInput } from './workflow-repository.js';

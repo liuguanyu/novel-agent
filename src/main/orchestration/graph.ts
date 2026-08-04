@@ -131,6 +131,10 @@ export interface GraphRunDeps {
   readonly signal: AbortSignal;
   /** writer 产出新草稿后的可选后置步骤（如自动事实抽取）；由运行层决定是否接线。 */
   readonly afterWriterDraft?: (state: NovelState) => Promise<void>;
+  /** 规划专家只提出资产变更候选，作者确认前不得更新 CreativeAsset 或 Story Bible。 */
+  readonly proposePlanningOutput?: (agentId: string, state: NovelState) => Promise<void>;
+  /** researcher 专用持久化边界：研究 artifact 不进入 CreativeAsset/Story Bible。 */
+  readonly persistResearchArtifact?: (state: NovelState) => Promise<void>;
   /**
    * 按 agent + 当前状态装配上下文（正文范围 + 事实结构化召回引用 + 近期对话）。
    * 由 Main 运行层绑定事实库实现（图不 import db）；未接事实库时返回 null（happy path 仍可跑）。
@@ -709,8 +713,8 @@ async function researcherNode(state: GraphState, config: GraphConfig): Promise<G
 /**
  * 策划类节点共用实现（I9 子阶段 E）：architect/character-generator/worldbuilding。
  * 写作类——产中文自然语言策划文本，写入 currentDraft + 作为对话呈现；
- * 调 afterWriterDraft 钩子让策划产物经既有「抽取→ingest→写 story-bible」管线落库
- * （锚点缺失时管线内部早退降级为仅对话）；currentAction→idle + 直达 END
+ * 规划资产只经 proposePlanningOutput 生成待作者确认的 change-set candidate，researcher 走独立 artifact 持久化；
+ * currentAction→idle + 直达 END
  * （策划产物为蓝图，MUST NOT 进写-审-改环）。
  */
 async function runPlanningNode(
@@ -747,10 +751,14 @@ async function runPlanningNode(
     currentAction: 'idle',
     ...(contextRefs !== undefined ? { contextRefs } : {}),
   };
-  // 复用既有抽取入库管线（afterWriterDraft）落地 story-bible；锚点缺失时管线内部早退降级为仅对话。
+  // 规划专家只能提交待作者确认的候选；researcher 使用独立 artifact 边界，不写 CreativeAsset/Story Bible。
   const nextState = mergeState(state, coreUpdate);
   await deps.recordMilestone(agentId, nextState);
-  await deps.afterWriterDraft?.(nextState);
+  if (agentId === 'researcher') {
+    await deps.persistResearchArtifact?.(nextState);
+  } else {
+    await deps.proposePlanningOutput?.(agentId, nextState);
+  }
   return coreUpdate;
 }
 

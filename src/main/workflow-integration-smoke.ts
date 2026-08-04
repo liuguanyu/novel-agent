@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
   CreativeAssetRepository,
+  ResearchArtifactRepository,
   openDatabase,
   SqliteStageRunEvidenceRecorder,
   WorkflowIssueRepository,
@@ -11,6 +12,7 @@ import {
 } from './db/index.js';
 import { WorkflowApplicationService } from './workflow-application-service.js';
 import { resolveContinuation, type ContinuationScope, type InterruptContinuationRecord } from '../core/workflow/continuation.js';
+import { planningAssetKindFor, planningAssetScopeKind } from '../core/workflow/planning-assets.js';
 
 const directory = await mkdtemp(join(tmpdir(), 'novel-agent-workflow-'));
 const opened = await openDatabase(join(directory, 'integration.sqlite'));
@@ -264,6 +266,50 @@ try {
   assert.equal(confirmedCharacter.version, 2);
   assert.equal(Number((await db.get('SELECT COUNT(*) AS count FROM entities WHERE id=?', 'asset:character:林默'))?.['count']), 1);
   assert.equal(Number((await db.get('SELECT COUNT(*) AS count FROM entities WHERE id=?', 'asset:book-outline:new'))?.['count'] ?? 0), 0);
+
+  // task 6.1：规划专家只生成待确认候选；确认后仅人物/世界观同步 Story Bible。
+  assert.equal(planningAssetKindFor('concept-generator', 'concept'), 'concept');
+  assert.equal(planningAssetKindFor('worldbuilding', 'worldbuilding'), 'worldbuilding');
+  assert.equal(planningAssetKindFor('character-generator', 'character-design'), 'character');
+  assert.equal(planningAssetKindFor('scene-outliner', 'scene-outline'), 'scene-outline');
+  assert.equal(planningAssetKindFor('architect', 'book-outline'), 'book-outline');
+  assert.equal(planningAssetKindFor('architect', 'chapter-plan'), 'chapter-plan');
+  assert.equal(planningAssetScopeKind('chapter-plan'), 'chapter');
+  assert.equal(planningAssetScopeKind('concept'), 'project');
+  const planningKinds = ['concept', 'worldbuilding', 'book-outline', 'chapter-plan', 'scene-outline'] as const;
+  for (const [index, kind] of planningKinds.entries()) {
+    const assetId = `planning-${kind}`;
+    await assets.create({
+      assetId, projectId: 'project-new', kind,
+      scope: kind === 'chapter-plan' || kind === 'scene-outline'
+        ? { kind: 'project', projectId: 'project-new' }
+        : { kind: 'project', projectId: 'project-new' },
+      content: {}, status: 'draft', provenance: { runId: 'planning-seed' },
+    });
+    const proposal = await assets.createCandidate(assetId, { draft: `规划产出-${index}` }, {
+      runId: `planning-${kind}-run`, authorClarification: '待作者确认',
+    });
+    assert.equal(proposal.status, 'pending');
+    assert.deepEqual((await assets.get(assetId))?.content, {});
+  }
+  const worldbuilding = await assets.create({
+    assetId: 'worldbuilding-asset', projectId: 'project-new', kind: 'worldbuilding',
+    scope: { kind: 'project', projectId: 'project-new' }, content: {}, status: 'draft', provenance: { runId: 'seed' },
+  });
+  const worldbuildingCandidate = await assets.createCandidate(worldbuilding.assetId, {
+    canonicalName: '霜原', attributes: { climate: '寒冷' },
+  }, { runId: 'worldbuilding-proposal', sources: [{ location: { id: 'project-new', kind: 'project' }, quote: '研究来源', confidence: 1 }] });
+  await assets.confirmCandidate(worldbuildingCandidate.candidateId, 'confirm-worldbuilding');
+  assert.equal(Number((await db.get('SELECT COUNT(*) AS count FROM entities WHERE id=?', 'asset:worldbuilding:霜原'))?.['count']), 1);
+  const researchArtifacts = new ResearchArtifactRepository(db);
+  const artifact = await researchArtifacts.create({
+    artifactId: 'research-artifact-6-1', projectId: 'project-new', content: '带来源的研究结论',
+    source: 'researcher', sourceVersion: 'research-run-v1', runId: 'research-run-v1',
+    workflowId: 'new-book', stageId: String(newBook?.currentStageId),
+  });
+  assert.equal(artifact.source, 'researcher');
+  assert.equal(artifact.sourceVersion, 'research-run-v1');
+  assert.equal(Number((await db.get('SELECT COUNT(*) AS count FROM creative_assets WHERE asset_id=?', artifact.artifactId))?.['count'] ?? 0), 0);
 
   const atomic = await assets.createCandidate('outline', { title: 'atomic' }, { runId: 'atomic' });
   await db.exec(`CREATE TRIGGER fail_candidate_confirm BEFORE UPDATE OF status ON creative_asset_candidates

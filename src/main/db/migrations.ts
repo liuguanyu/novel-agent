@@ -307,4 +307,15 @@ export const MIGRATIONS: ReadonlyArray<Migration> = [
       CREATE INDEX idx_task_candidates_run ON task_author_candidates(task_run_id, status, created_at);
     `,
   },
+  {
+    version: 10,
+    up: `
+      CREATE TABLE research_artifacts (
+        artifact_id TEXT PRIMARY KEY, project_id TEXT NOT NULL, content TEXT NOT NULL,
+        source TEXT NOT NULL, source_version TEXT NOT NULL, run_id TEXT NOT NULL,
+        workflow_id TEXT, stage_id TEXT, created_at INTEGER NOT NULL
+      );
+      CREATE INDEX idx_research_artifacts_project ON research_artifacts(project_id, created_at DESC);
+    `,
+  },
 ];

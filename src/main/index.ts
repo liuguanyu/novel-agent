@@ -21,7 +21,7 @@ import {
   SqliteDatabase,
   SqliteCheckpointer,
   SqliteFactStore,
-  WorkflowRepository, CreativeAssetRepository, WorkflowIssueRepository,
+  WorkflowRepository, CreativeAssetRepository, ResearchArtifactRepository, WorkflowIssueRepository,
   SqliteStageRunEvidenceRecorder, SqliteContinuationRecordService, TaskRunRepository,
 } from './db/index.js';
 import { WorkflowApplicationService } from './workflow-application-service.js';
@@ -103,6 +103,7 @@ app.whenReady().then(
     const issueRepository = persistence === undefined ? undefined : new WorkflowIssueRepository(persistence.db);
     const workflowRepository = persistence === undefined ? undefined : new WorkflowRepository(persistence.db);
     const creativeAssetRepository = persistence === undefined ? undefined : new CreativeAssetRepository(persistence.db);
+    const researchArtifactRepository = persistence === undefined ? undefined : new ResearchArtifactRepository(persistence.db);
     orchestration = new OrchestrationRuntime({
       getModelResolver: () => modelResolver,
       getCheckpointer: () => persistence?.checkpointer,
@@ -114,6 +115,7 @@ app.whenReady().then(
       ...(issueRepository === undefined ? {} : { workflowIssues: issueRepository }),
       ...(persistence === undefined ? {} : { taskRuns: new TaskRunRepository(persistence.db) }),
       ...(creativeAssetRepository === undefined ? {} : { creativeAssets: creativeAssetRepository }),
+      ...(researchArtifactRepository === undefined ? {} : { researchArtifacts: researchArtifactRepository }),
       ...(workflowRepository === undefined || persistence === undefined ? {} : {
         workflows: workflowRepository,
         stageRunEvidence: new SqliteStageRunEvidenceRecorder(persistence.db),

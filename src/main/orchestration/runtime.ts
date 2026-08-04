@@ -60,6 +60,8 @@ import {
   type WorkflowKind,
   classifySummonRoute,
   type SummonRoute,
+  planningAssetKindFor,
+  planningAssetScopeKind,
 } from '../../core/workflow/index.js';
 import type { CandidateFact, ConsistencyIssue, ExtractionInput, FactView } from '../../core/story-bible/index.js';
 import {
@@ -75,7 +77,7 @@ import { asCheckpointId, asFactVersionId } from '../../core/story-bible/index.js
 import { asNodeId } from '../../core/manuscript/node-id.js';
 import type { ModelResolver } from '../model-resolver.js';
 import { appendOrchestrationLog } from '../local-log.js';
-import type { CreativeAssetRepository, SqliteCheckpointer, SqliteFactStore, TaskRunRepository, WorkflowIssueRepository, WorkflowRepository } from '../db/index.js';
+import type { CreativeAssetRepository, ResearchArtifactRepository, SqliteCheckpointer, SqliteFactStore, TaskRunRepository, WorkflowIssueRepository, WorkflowRepository } from '../db/index.js';
 import {
   assembleContext,
   type AssemblyRequest,
@@ -223,6 +225,7 @@ export interface RuntimeDeps {
   workflowIssues?: WorkflowIssueRepository;
   workflows?: WorkflowRepository;
   creativeAssets?: CreativeAssetRepository;
+  researchArtifacts?: ResearchArtifactRepository;
   taskRuns?: TaskRunRepository;
   /** 可注入正文 I/O，供隔离 E2E 使用；未注入时使用默认小说工作区。 */
   manuscript?: {
@@ -754,6 +757,70 @@ export class OrchestrationRuntime {
     };
   }
 
+  /** 规划专家产出只创建待确认候选；作者确认后由既有 workflow asset command 提交 Main。 */
+  async #proposePlanningAsset(run: ActiveRun, agentId: string, state: NovelState): Promise<void> {
+    const workflowRef = run.workflowRef;
+    const assets = this.#deps.creativeAssets;
+    const workflows = this.#deps.workflows;
+    if (workflowRef === undefined || assets === undefined || workflows === undefined) return;
+
+    const workflow = await workflows.get(workflowRef.workflowId);
+    if (workflow === null) return;
+    const stage = workflow.stages.find((item) => item.stageId === workflowRef.stageId);
+    const kind = planningAssetKindFor(agentId, stage?.templateStageId);
+    if (kind === undefined) return;
+
+    const projectId = workflow.projectId;
+    const chapterId = state.currentChapterId?.id as string | undefined;
+    const scope = chapterId !== undefined && planningAssetScopeKind(kind) === 'chapter'
+      ? { kind: 'chapter', projectId, chapterId }
+      : { kind: 'project', projectId };
+    const assetId = chapterId !== undefined && planningAssetScopeKind(kind) === 'chapter'
+      ? `asset:${projectId}:${kind}:${chapterId}`
+      : `asset:${projectId}:${kind}`;
+    let asset = await assets.get(assetId);
+    if (asset === null) {
+      asset = await assets.create({
+        assetId,
+        projectId,
+        kind,
+        scope,
+        content: {},
+        status: 'draft',
+        provenance: { runId: run.threadId, workflowRef },
+      });
+    }
+    const candidate = await assets.createCandidate(asset.assetId, { draft: state.currentDraft }, {
+      runId: run.threadId,
+      workflowRef,
+      authorClarification: `规划专家 ${agentId} 产出，待作者确认`,
+    });
+    this.#sendControl(run.wc, this.#withWorkflow(run, {
+      type: 'creative-asset-change-proposed',
+      runId: run.threadId,
+      candidate: { ...candidate, workflowRef },
+    }));
+  }
+
+  /** researcher 的输出是带来源/版本的研究证据，不进入创作资产或 Story Bible。 */
+  async #persistResearchArtifact(run: ActiveRun, state: NovelState): Promise<void> {
+    const repository = this.#deps.researchArtifacts;
+    const workflowRef = run.workflowRef;
+    if (repository === undefined || workflowRef === undefined) return;
+    const workflow = this.#deps.workflows === undefined ? null : await this.#deps.workflows.get(workflowRef.workflowId);
+    if (workflow === null) return;
+    await repository.create({
+      artifactId: `research:${run.threadId}`,
+      projectId: workflow.projectId,
+      content: state.currentDraft,
+      source: 'researcher',
+      sourceVersion: run.threadId,
+      runId: run.threadId,
+      workflowId: workflowRef.workflowId,
+      stageId: workflowRef.stageId,
+    });
+  }
+
   /** 组装本次运行注入图的抽象回调（把图与具体 IPC/DB 解耦）。 */
   #buildRunDeps(run: ActiveRun, resolver: ModelResolver): GraphRunDeps {
     const checkpointer = this.#deps.getCheckpointer();
@@ -797,6 +864,12 @@ export class OrchestrationRuntime {
         : {}),
       ...(run.continuationTarget !== undefined
         ? { continuationTarget: () => run.continuationTarget }
+        : {}),
+      ...(this.#deps.creativeAssets !== undefined
+        ? { proposePlanningOutput: (agentId: string, state: NovelState) => this.#proposePlanningAsset(run, agentId, state) }
+        : {}),
+      ...(this.#deps.researchArtifacts !== undefined
+        ? { persistResearchArtifact: (state: NovelState) => this.#persistResearchArtifact(run, state) }
         : {}),
       recordMilestone: async (atNode: string, state: NovelState): Promise<void> => {
         // 里程碑态 checkpoint（design D3.5）：持久化进 SqliteCheckpointer，沿 parent 链成史。
