@@ -267,6 +267,13 @@ interface FactTaskRecord {
   supplement?: ModelTaskSupplementDto;
 }
 
+interface FactExtractionEvidence {
+  readonly factVersion: string;
+  readonly autoIngested: number;
+  readonly conflicts: number;
+  readonly skipped: number;
+}
+
 interface PendingExtractionConflictRun {
   readonly wc: WebContents;
   readonly chapterId: string;
@@ -310,6 +317,8 @@ interface ActiveRun {
   seq: number;
   /** 里程碑链游标：下一次 commit 的 parent（初始 null，提交后前移）。 */
   parent: CheckpointId | null;
+  /** 最近一次事实抽取的质量证据，随 stage-run interrupted/completed 一并持久化。 */
+  factEvidence?: FactExtractionEvidence;
 }
 
 /** restart/无参场景的默认组装基座：writer + 全局范围 + 空关键词 → assembleContext 返回空、checkFacts 返回空。 */
@@ -732,11 +741,18 @@ export class OrchestrationRuntime {
     },
   ): Promise<void> {
     if (run.workflowRef === undefined || run.assetClarification === true || this.#deps.stageRunEvidence === undefined) return;
+    const factEvidence = run.factEvidence === undefined ? {} : {
+      factVersion: run.factEvidence.factVersion,
+      autoIngested: String(run.factEvidence.autoIngested),
+      conflicts: String(run.factEvidence.conflicts),
+      skipped: String(run.factEvidence.skipped),
+    };
+    const mergedEvidence = { ...factEvidence, ...(evidence ?? {}) };
     await this.#deps.stageRunEvidence.record({
       runId: run.threadId,
       workflowRef: run.workflowRef,
       status,
-      ...(evidence !== undefined ? { evidence } : {}),
+      ...(Object.keys(mergedEvidence).length > 0 ? { evidence: mergedEvidence } : {}),
       ...(completion !== undefined ? { completion } : {}),
     });
   }
@@ -921,7 +937,7 @@ export class OrchestrationRuntime {
     progress?: { index: number; total: number },
     modelTask?: ModelTaskAttemptContext,
     supplement?: string,
-  ): Promise<void> {
+  ): Promise<FactExtractionEvidence | null> {
     const chapterId = input.location.id as string;
     if (modelTask !== undefined) {
       this.#sendModelTaskActivity(wc, modelTask, 'reading', `已读取${chapterId}，共 ${input.text.length.toLocaleString()} 字`, chapterId, {
@@ -952,7 +968,7 @@ export class OrchestrationRuntime {
           chapterId,
           error: { category: 'aborted', message: '事实抽取已中断' },
         });
-        return;
+        return null;
       }
       if (modelTask !== undefined) this.#sendModelTaskActivity(wc, modelTask, 'model', '正在识别人物、事件、关系与时间线', chapterId, {
         chunkIndex: extractedChunks.length + 1,
@@ -975,7 +991,7 @@ export class OrchestrationRuntime {
         chapterId,
         error: { category: 'aborted', message: '事实抽取已中断' },
       });
-      return;
+      return null;
     }
 
     if (modelTask !== undefined) this.#sendModelTaskActivity(wc, modelTask, 'validation', '正在校验并归一化候选事实', chapterId, {
@@ -1069,6 +1085,12 @@ export class OrchestrationRuntime {
         }, chapterId);
       }
     }
+    return {
+      factVersion: applied.version as string,
+      autoIngested: plan.diagnostics.autoIngest,
+      conflicts: plan.diagnostics.conflicts,
+      skipped: plan.diagnostics.skipped,
+    };
   }
 
   async #autoExtractAfterWriter(
@@ -1085,7 +1107,7 @@ export class OrchestrationRuntime {
       chapterId: location.id as string,
       textChars: state.currentDraft.length,
     });
-    await this.#runFactExtractionPipeline(
+    const evidence = await this.#runFactExtractionPipeline(
       run.wc,
       run.threadId,
       { location, text: state.currentDraft },
@@ -1095,6 +1117,7 @@ export class OrchestrationRuntime {
       undefined,
       this.#createFactModelTask(run.threadId, run.workflowRef),
     );
+    if (evidence !== null) run.factEvidence = evidence;
   }
 
   /**
@@ -1643,7 +1666,11 @@ export class OrchestrationRuntime {
           ...(diagnosis === undefined ? {} : { legacyDiagnosis: diagnosis }),
         },
       });
-      await this.#recordStageRun(run, 'completed', diagnosisAssetId === undefined ? undefined : { diagnosisAssetId }, {
+      await this.#recordStageRun(run, 'completed', {
+        auditRunId: runId,
+        factVersion: result.factVersion as string,
+        ...(diagnosisAssetId === undefined ? {} : { diagnosisAssetId }),
+      }, {
         passed: result.issues.length === 0,
         issueIds: persistedIssues.map((issue) => issue.issueId),
       });
@@ -3208,7 +3235,7 @@ export class OrchestrationRuntime {
         index: offset + 1,
         total: chapters.length,
       });
-      await this.#runFactExtractionPipeline(
+      const evidence = await this.#runFactExtractionPipeline(
         run.wc,
         run.threadId,
         chapter,
@@ -3219,6 +3246,7 @@ export class OrchestrationRuntime {
         modelTask,
         supplement,
       );
+      if (evidence !== null) run.factEvidence = evidence;
       const task = Array.from(this.#factTasks.values()).find((item) => item.currentAttempt.runId === run.threadId);
       if (task !== undefined) task.currentOffset = offset;
       const pending = this.#pendingExtractionConflicts.get(run.threadId);
@@ -3335,6 +3363,7 @@ export class OrchestrationRuntime {
      }
 
      const optionId = decision.kind === 'correct' ? decision.optionId : decision.kind;
+     let decisionEvidence: FactExtractionEvidence | undefined;
      if (optionId === 'accept-new') {
        const latestVersion = await factStore.getLatestVersion();
        const view: FactView = latestVersion === null
@@ -3361,6 +3390,12 @@ export class OrchestrationRuntime {
          },
        };
        const applied = await applyIngestPlan(factStore, conflictPlan, view);
+       decisionEvidence = {
+         factVersion: applied.version as string,
+         autoIngested: pending.conflicts.length,
+         conflicts: 0,
+         skipped: 0,
+       };
        this.#sendControl(wc, {
          type: 'fact-extraction-completed',
          runId,
@@ -3376,6 +3411,13 @@ export class OrchestrationRuntime {
          factVersion: applied.version as string,
        });
      } else if (optionId === 'keep-existing' || optionId === 'ignore-candidate' || decision.kind === 'reject') {
+       const latestVersion = await factStore.getLatestVersion();
+       decisionEvidence = {
+         factVersion: latestVersion === null ? 'none' : latestVersion as string,
+         autoIngested: 0,
+         conflicts: 0,
+         skipped: pending.conflicts.length,
+       };
        this.#sendControl(wc, {
          type: 'fact-extraction-completed',
          runId,
@@ -3399,6 +3441,7 @@ export class OrchestrationRuntime {
        return true;
      }
 
+     if (run !== undefined && decisionEvidence !== undefined) run.factEvidence = decisionEvidence;
      this.#pendingExtractionConflicts.delete(runId);
      if (pending.backfill === undefined || run === undefined) {
        if (pending.modelTask !== undefined) {

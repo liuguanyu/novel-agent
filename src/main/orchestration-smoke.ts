@@ -910,18 +910,29 @@ async function smokeBackfillFacts(): Promise<void> {
   });
   const advanced = await workflows.get(workflowId);
   const currentStage = advanced?.stages.find((stage) => stage.stageId === advanced.currentStageId);
-  const stageRuns = await db.all('SELECT status FROM workflow_stage_runs WHERE stage_id=? AND run_id=?', importConfirmed.currentStageId, workflowRunId);
+  const stageRuns = await db.all('SELECT status,evidence_json FROM workflow_stage_runs WHERE stage_id=? AND run_id=?', importConfirmed.currentStageId, workflowRunId);
   check('老书重建：事实底稿完成后自动进入全书诊断', currentStage?.templateStageId === 'initial-audit' && currentStage.status === 'ready');
   check(
     '老书重建：整批事实回填只记录一条 stage run',
     stageRuns.length === 1 && String(stageRuns[0]?.['status']) === 'completed',
     `rows=${stageRuns.length} status=${String(stageRuns[0]?.['status'] ?? 'missing')}`,
   );
+  const factEvidence = stageRuns[0]?.['evidence_json'] === undefined
+    ? undefined
+    : JSON.parse(String(stageRuns[0]['evidence_json'])) as { factVersion?: string; conflicts?: string };
+  check('task 6.3：事实抽取结果映射 stage-run 质量证据',
+    typeof factEvidence?.factVersion === 'string' && factEvidence.factVersion.length > 0 && factEvidence.conflicts === '0');
   if (advanced?.currentStageId === null || advanced?.currentStageId === undefined) throw new Error('老书全书诊断阶段缺失');
   const auditWc = new FakeWebContents();
   const auditRunId = randomUUID() as RunId;
   await workflowRuntime.runGlobalAudit(auditWc.asWebContents(), auditRunId, { workflowId, stageId: advanced.currentStageId });
   const auditCompleted = auditWc.control.find((event) => event.type === 'global-audit-completed');
+  const auditStageRun = await db.get('SELECT evidence_json FROM workflow_stage_runs WHERE stage_id=? AND run_id=?', advanced.currentStageId, auditRunId);
+  const auditEvidence = auditStageRun === null
+    ? undefined
+    : JSON.parse(String(auditStageRun['evidence_json'])) as { auditRunId?: string; factVersion?: string; completion?: { passed?: boolean } };
+  check('task 6.3：审校结果映射 audit run/factVersion/质量门证据',
+    auditEvidence?.auditRunId === auditRunId && typeof auditEvidence.factVersion === 'string' && typeof auditEvidence.completion?.passed === 'boolean');
   const diagnosisAsset = await creativeAssets.get(`${workflowId}:legacy-revision-diagnosis`);
   check(
     '老书重建：全书诊断消费作者意图并返回结构化结果',
