@@ -4773,11 +4773,201 @@ async function smokeRendererIsolation(): Promise<void> {
   check('3.6 Renderer 经 window.novelAgent 桥发命令/查询（不本地写正文）', usesBridge);
 }
 
+async function smokeTask77LegacyMainPath(): Promise<void> {
+  const dir = await mkdtemp(join(tmpdir(), 'na-task77-legacy-'));
+  const opened = await openDatabase(join(dir, 'task77.db'));
+  if (!opened.ok) {
+    check('task 77 SQLite 可用', false, opened.message);
+    await rm(dir, { recursive: true, force: true });
+    return;
+  }
+  const db = opened.db;
+  try {
+    const workflows = new WorkflowRepository(db);
+    const workflowIssues = new WorkflowIssueRepository(db);
+    const assets = new CreativeAssetRepository(db);
+    const evidence = new SqliteStageRunEvidenceRecorder(db);
+    const factStore = new SqliteFactStore(db);
+    const checkpointer = new SqliteCheckpointer(db);
+    const service = new WorkflowApplicationService(workflows, assets, workflowIssues);
+    const workflowId = 'task77-legacy-book-revision';
+    const projectId = 'task77-project';
+    const chapterId = (await readManifestChapterIds())[0];
+    if (chapterId === undefined) throw new Error('task 77 manifest has no chapter');
+    const quote = '林默在雨夜独自离开了山村。';
+    const original = `${quote} 随后，天亮了。`;
+    let manuscriptText = original;
+    const manuscript = {
+      readChapterContent: async (nodeId: string) => ({ nodeId, content: manuscriptText }),
+      writeBackRefactoredFragment: async (anchor: FragmentAnchor, fragmentText: string) => {
+        manuscriptText = manuscriptText.slice(0, anchor.from) + fragmentText + manuscriptText.slice(anchor.to);
+        return { ok: true, newContentLength: manuscriptText.length };
+      },
+    };
+    const runtime = (resolver: ModelResolver, runner: AuditRunner = new InlineAuditRunner()) => new OrchestrationRuntime({
+      getModelResolver: () => resolver,
+      getCheckpointer: () => checkpointer,
+      getFactStore: () => factStore,
+      getAuditRunner: () => runner,
+      workflows, workflowIssues, creativeAssets: assets, stageRunEvidence: evidence, manuscript,
+    });
+    const workflow = await service.command({
+      type: 'start-workflow', workflowId, projectId, kind: 'legacy-book-revision',
+      objective: 'task 77 legacy main path', authorIntents: [{ kind: 'preserve', text: '保留林默的离开动机' }],
+      requestId: 'task77-start', operationId: 'task77-start-op',
+    });
+    if (workflow === null || workflow.currentStageId === null) throw new Error('task 77 workflow failed to start');
+
+    const completeStage = async (templateStageId: string, label: string, actor: 'author' | 'automatic'): Promise<void> => {
+      const current = await workflows.get(workflowId);
+      if (current === null || current.currentStageId === null) throw new Error(`task 77 missing ${templateStageId}`);
+      const stage = current.stages.find((candidate) => candidate.stageId === current.currentStageId);
+      if (stage?.templateStageId !== templateStageId) throw new Error(`task 77 expected ${templateStageId}, got ${stage?.templateStageId}`);
+      const runId = `${workflowId}:${label}` as RunId;
+      const started = await service.command({
+        type: 'workflow-start-stage', workflowId, stageId: current.currentStageId,
+        expectedVersion: current.version, runId, requestId: `${label}-start`, operationId: `${label}-start-op`,
+      });
+      if (started === null) throw new Error(`task 77 failed to start ${templateStageId}`);
+      await evidence.record({ runId, workflowRef: { workflowId, stageId: current.currentStageId }, status: 'started' });
+      await evidence.record({
+        runId, workflowRef: { workflowId, stageId: current.currentStageId }, status: 'completed',
+        ...(stage.actor === 'quality-gate' ? { completion: { passed: true, issueIds: [] } } : {}),
+      });
+      if (actor === 'author') {
+        const awaiting = await workflows.get(workflowId);
+        if (awaiting === null || awaiting.currentStageId === null) throw new Error(`task 77 ${templateStageId} did not await author`);
+        await service.command({
+          type: 'workflow-confirm-stage', workflowId, stageId: awaiting.currentStageId,
+          expectedVersion: awaiting.version, requestId: `${label}-confirm`, operationId: `${label}-confirm-op`,
+        });
+      }
+    };
+
+    await completeStage('import-book', 'task77-import-book', 'author');
+    const factVersion = await factStore.appendVersion();
+    const provenance: Provenance = { sources: [{ location: { id: asNodeId(chapterId), kind: 'chapter' }, quote, confidence: 0.3 }] };
+    const lowConfidenceEntity: Entity = {
+      id: asEntityId('task77-lin-mo'), type: 'person', canonicalName: '林默',
+      aliasSet: { aliases: ['林默'], status: 'confirmed', provenance }, attributes: [], status: 'inferred', provenance,
+    };
+    await factStore.putEntity(factVersion, lowConfidenceEntity);
+    await completeStage('fact-backfill', 'task77-fact-backfill', 'automatic');
+
+    const initialRunId = 'task77-initial-audit' as RunId;
+    const initialWc = new FakeWebContents();
+    await runtime(new FakeModelResolver('unused', '[]').asResolver()).runGlobalAudit(
+      initialWc.asWebContents(), initialRunId, { workflowId, stageId: `${workflowId}:initial-audit` },
+    );
+    const initialEvent = initialWc.control.find((event) => event.type === 'global-audit-completed');
+    const initialFinding = initialEvent?.type === 'global-audit-completed' ? initialEvent.dashboard.issues[0] : undefined;
+    const initialIssueId = initialFinding?.issueId;
+    check('task 77：真实 InlineAuditRunner 从低置信度事实发现 finding', initialFinding?.evidence?.quote === quote && initialIssueId !== undefined);
+    if (initialIssueId === undefined) throw new Error('task 77 initial audit did not create issue');
+    const initialIssue = await workflowIssues.get(initialIssueId);
+    check('task 77：initial finding 带 evidence.quote 且写入 discovery/audit history', initialIssue?.discoveryHistory.length === 1 && initialIssue.auditHistory.length === 0 && initialIssue.sourceAuditRunId === initialRunId);
+
+    await completeStage('issue-triage', 'task77-issue-triage', 'author');
+    const selected = await workflows.get(workflowId);
+    if (selected === null || selected.currentStageId === null) throw new Error('task 77 selection stage missing');
+    await service.command({
+      type: 'workflow-select-issue', workflowId, stageId: selected.currentStageId,
+      workflowRef: { workflowId, stageId: selected.currentStageId, issueId: initialIssueId }, issueId: initialIssueId,
+      expectedVersion: selected.version, runId: 'task77-refactor-1' as RunId,
+      requestId: 'task77-select', operationId: 'task77-select-op',
+    });
+    const selectedAfter = await workflows.get(workflowId);
+    if (selectedAfter === null || selectedAfter.currentStageId === null) throw new Error('task 77 selected workflow missing');
+    const locateRunId = 'task77-locate-source' as RunId;
+    const locateWc = new FakeWebContents();
+    await runtime(new FakeModelResolver('unused', '[]').asResolver()).locateSource(
+      locateWc.asWebContents(), locateRunId, { workflowId, stageId: selectedAfter.currentStageId, issueId: initialIssueId },
+    );
+    check('task 77：runtime.locateSource 唯一命中并继续 workflow', locateWc.taskActivity.some((event) => event.status === 'completed'));
+
+    const runFixRound = async (round: number, rewritten: string, reviewerText: string): Promise<{ checkpointId: string; verificationRunId: RunId }> => {
+      await completeStage('generate-rewrite', `task77-r${round}-generate`, 'author');
+      await completeStage('hunk-review', `task77-r${round}-hunk`, 'author');
+      const current = await workflows.get(workflowId);
+      if (current === null || current.currentStageId === null) throw new Error(`task 77 round ${round} apply stage missing`);
+      const ref = { workflowId, stageId: current.currentStageId, issueId: initialIssueId };
+      const anchor: FragmentAnchor = { node: { id: asNodeId(chapterId), kind: 'chapter' }, from: 0, to: manuscriptText.length };
+      const refactorRunId = `task77-refactor-${round}` as RunId;
+      const wc = new FakeWebContents();
+      const refactorRuntime = runtime(new FakeModelResolver('unused', reviewerText).asResolver());
+      await refactorRuntime.computeRefactorDiff(wc.asWebContents(), refactorRunId, anchor, rewritten, ref);
+      const diff = wc.control.find((event) => event.type === 'refactor-diff-computed');
+      if (diff?.type !== 'refactor-diff-computed' || diff.hunks.length === 0) throw new Error(`task 77 round ${round} did not produce diff: ${JSON.stringify(wc.control)}`);
+      await refactorRuntime.applyHunkDecisions(
+        wc.asWebContents(), refactorRunId, anchor, rewritten,
+        diff.hunks.map((hunk) => ({ hunkId: hunk.id, decision: 'accept' as const })), ref,
+      );
+      const applied = wc.control.find((event) => event.type === 'refactor-applied');
+      if (applied?.type !== 'refactor-applied' || applied.checkpointId === undefined) throw new Error(`task 77 round ${round} apply failed`);
+      await completeStage('apply-checkpoint', `task77-r${round}-apply`, 'author');
+      const afterApply = await workflows.get(workflowId);
+      if (afterApply === null || afterApply.currentStageId === null) throw new Error(`task 77 round ${round} verification stage missing`);
+      const verificationRunId = `task77-verification-${round}` as RunId;
+      const verificationWc = new FakeWebContents();
+      await runtime(new FakeModelResolver('unused', reviewerText).asResolver()).runTargetedVerification(
+        verificationWc.asWebContents(), verificationRunId, { workflowId, stageId: afterApply.currentStageId, issueId: initialIssueId },
+      );
+      const result = verificationWc.control.find((event) => event.type === 'targeted-verification-completed');
+      check(`task 77：第 ${round} 轮 targeted verification ${reviewerText === '[]' ? '成功' : '失败'}`, result?.type === 'targeted-verification-completed' && result.passed === (reviewerText === '[]'));
+      return { checkpointId: applied.checkpointId, verificationRunId };
+    };
+
+    const sameFinding = JSON.stringify([{
+      type: 'other', severity: 'info', anchors: [{ id: asNodeId(chapterId), kind: 'chapter' }],
+      description: `实体「林默」的来源置信度较低（0.30），建议人工核对。`,
+      evidence: { quote }, requiresHumanDecision: false,
+    }]);
+    const first = await runFixRound(1, `${quote} 他先确认同伴已经安全。`, sameFinding);
+    const afterFirst = await workflowIssues.get(initialIssueId);
+    const afterFirstWorkflow = await workflows.get(workflowId);
+    const afterFirstStage = afterFirstWorkflow?.stages.find((stage) => stage.stageId === afterFirstWorkflow.currentStageId);
+    check('task 77：第一轮失败回 generate-rewrite/fixing', afterFirst?.status === 'fixing' && afterFirstStage?.templateStageId === 'generate-rewrite');
+    const fixingWorkflow = await workflows.get(workflowId);
+    if (fixingWorkflow === null || fixingWorkflow.currentStageId === null) throw new Error('task 77 second selection stage missing');
+    await service.command({
+      type: 'workflow-select-issue', workflowId, stageId: fixingWorkflow.currentStageId,
+      workflowRef: { workflowId, stageId: fixingWorkflow.currentStageId, issueId: initialIssueId }, issueId: initialIssueId,
+      expectedVersion: fixingWorkflow.version, runId: 'task77-refactor-2' as RunId,
+      requestId: 'task77-select-2', operationId: 'task77-select-2-op',
+    });
+    const second = await runFixRound(2, `${quote} 他等到天亮才独自离开。`, '[]');
+    const resolved = await workflowIssues.get(initialIssueId);
+    const applies = await workflowIssues.listRefactorApplies(initialIssueId);
+    const resolvedWorkflow = await workflows.get(workflowId);
+    const resolvedStage = resolvedWorkflow?.stages.find((stage) => stage.stageId === resolvedWorkflow.currentStageId);
+    check('task 77：第二轮 [] 成功 resolved/close-issue', resolved?.status === 'resolved' && resolvedStage?.templateStageId === 'close-issue');
+    check('task 77：两轮 refactor apply/checkpoint/verification 全保留', applies.length === 2 && resolved?.checkpointIds.includes(first.checkpointId) === true && resolved.checkpointIds.includes(second.checkpointId) && resolved.verificationRunIds.includes(first.verificationRunId) && resolved.verificationRunIds.includes(second.verificationRunId));
+
+    await completeStage('close-issue', 'task77-close-issue', 'automatic');
+    const beforeFinal = await workflows.get(workflowId);
+    if (beforeFinal === null || beforeFinal.currentStageId === null) throw new Error('task 77 final audit stage missing');
+    const finalRunId = 'task77-final-audit' as RunId;
+    const finalWc = new FakeWebContents();
+    await runtime(new FakeModelResolver('unused', '[]').asResolver()).runGlobalAudit(
+      finalWc.asWebContents(), finalRunId, { workflowId, stageId: beforeFinal.currentStageId },
+    );
+    const reopened = await workflowIssues.get(initialIssueId);
+    const afterFinal = await workflows.get(workflowId);
+    check('task 77：final-audit 真实 InlineAuditRunner 以同指纹 reopen 原 issue 并回 issue-triage', reopened?.status === 'open' && reopened.auditHistory.length >= 1 && reopened.transitionHistory.some((item) => item.to === 'open') && afterFinal?.stages.find((stage) => stage.stageId === afterFinal.currentStageId)?.templateStageId === 'issue-triage');
+    check('task 77：完整 discovery/audit/transition/resolution history', reopened !== null && reopened.discoveryHistory.length >= 1 && reopened.auditHistory.length >= 1 && reopened.transitionHistory.some((item) => item.to === 'fixing') && reopened.transitionHistory.some((item) => item.to === 'verifying') && reopened.transitionHistory.some((item) => item.to === 'resolved') && reopened.resolutionHistory.length >= 1);
+    check('task 77：两轮 apply/checkpoint/verification 在 reopen 后仍保留', reopened?.refactorRunIds.length === 2 && reopened.checkpointIds.length === 2 && reopened.verificationRunIds.length === 2);
+  } finally {
+    await db.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+}
+
 async function main(): Promise<void> {
   console.log('=== orchestration-runtime 冲烟 ===');
   smokeReviewerJsonDefence();
   smokeTargetedVerificationRouting();
   await smokeTask75TargetedVerificationScope();
+  await smokeTask77LegacyMainPath();
   smokeVisualDesignContracts();
   smokeToolboxCatalogContracts();
   smokeTaskPlaybookFixtures();
