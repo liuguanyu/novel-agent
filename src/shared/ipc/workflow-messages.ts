@@ -12,9 +12,11 @@ export interface WorkflowActionCommand extends WorkflowRequestMeta { type: `work
 export type WorkflowCommand = StartWorkflowCommand|WorkflowActionCommand;
 export interface WorkflowFailureEvent { type:'workflow-failure'; runId: string; requestId?:string; operationId?:string; workflowRef?:WorkflowRefDto; error:{code:string;message:string}; snapshot?:WorkflowSnapshotDto|null }
 export interface WorkflowSnapshotEvent { type:'workflow-snapshot'; runId: string; requestId?:string; operationId?:string; snapshot:WorkflowSnapshotDto }
-export interface WorkflowIssueDto { issueId:string; workflowId:string; status:string; [key:string]:unknown }
+export interface WorkflowIssueDto { issueId:string; workflowId:string; status:string; severity?:'critical'|'warning'|'info'; type?:string; description?:string; anchors?:ReadonlyArray<{id:string;kind:string}>; sourceAuditRunId?:string; [key:string]:unknown }
+export interface WorkflowIssuesQuery { workflowId:string; projectId:string; severity?:'critical'|'warning'|'info'; status?:'open'|'fixing'|'verifying'|'resolved'|'dismissed' }
+export interface WorkflowIssuesResponse { issues:ReadonlyArray<WorkflowIssueDto> }
 export interface WorkflowAssetQuery { assetId:string; projectId?:string }
 export interface WorkflowAssetResponse { asset:Record<string,unknown>|null }
-export const WORKFLOW_QUERY_CHANNELS={ snapshot:'query:workflow-snapshot', active:'query:workflow-active', asset:'query:workflow-asset' } as const;
+export const WORKFLOW_QUERY_CHANNELS={ snapshot:'query:workflow-snapshot', active:'query:workflow-active', asset:'query:workflow-asset', issues:'query:workflow-issues' } as const;
 export type WorkflowQueryChannel=(typeof WORKFLOW_QUERY_CHANNELS)[keyof typeof WORKFLOW_QUERY_CHANNELS];
 export const WORKFLOW_COMMAND_CHANNEL='command:workflow';

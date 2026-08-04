@@ -355,8 +355,36 @@ export interface WorkflowIssueRefactorApplyRecord extends WorkflowIssueRefactorA
   readonly createdAt: number;
 }
 
+export interface WorkflowIssueListFilter {
+  readonly severity?: 'critical' | 'warning' | 'info';
+  readonly status?: WorkflowIssueStatus;
+}
+
+export interface WorkflowIssueListItem {
+  readonly record: WorkflowIssueRecord;
+  readonly payload: ConsistencyIssue;
+}
+
 export class WorkflowIssueRepository {
   constructor(private readonly db: SqliteDatabase) {}
+
+  async list(workflowId: string, filter: WorkflowIssueListFilter = {}): Promise<ReadonlyArray<WorkflowIssueListItem>> {
+    const rows = await this.db.all(
+      'SELECT issue_id,issue_payload_json FROM workflow_issues WHERE workflow_id=? ORDER BY created_at,issue_id',
+      workflowId,
+    );
+    const items: WorkflowIssueListItem[] = [];
+    for (const row of rows) {
+      if (row['issue_payload_json'] === null) continue;
+      const payload = JSON.parse(String(row['issue_payload_json'])) as ConsistencyIssue;
+      const record = await this.getWith(this.db, String(row['issue_id']));
+      if (record === null) continue;
+      if (filter.status !== undefined && record.status !== filter.status) continue;
+      if (filter.severity !== undefined && payload.severity !== filter.severity) continue;
+      items.push({ record, payload });
+    }
+    return items;
+  }
 
   async get(issueId: string): Promise<WorkflowIssueRecord | null> {
     return this.getWith(this.db, issueId);

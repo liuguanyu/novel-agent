@@ -320,6 +320,43 @@ try {
   assert.equal(recurrent?.issueId, legacyIssue.issueId);
   assert.equal(recurrent?.status, 'open');
 
+  const criticalFinding = {
+    type: 'timeline-break', severity: 'critical' as const,
+    description: '第二章事件发生在第一章原因之前。',
+    anchors: [{ kind: 'chapter' as const, id: 'chapter-2' }], requiresHumanDecision: false,
+  };
+  const warningFinding = {
+    type: 'behavior-ooc', severity: 'warning' as const,
+    description: '配角态度变化缺少铺垫。',
+    anchors: [{ kind: 'chapter' as const, id: 'chapter-3' }], requiresHumanDecision: false,
+  };
+  const [criticalCreated, warningCreated] = await issues.upsertFromAudit(
+    'legacy', 'legacy-ranked-audit-1', [criticalFinding, warningFinding],
+  );
+  const [criticalDuplicate] = await issues.upsertFromAudit('legacy', 'legacy-ranked-audit-2', [criticalFinding]);
+  assert.ok(criticalCreated !== undefined && warningCreated !== undefined && criticalDuplicate !== undefined);
+  assert.equal(criticalDuplicate.issueId, criticalCreated.issueId);
+  assert.equal((await issues.get(criticalCreated.issueId))?.auditHistory.at(-1)?.sourceRunId, 'legacy-ranked-audit-2');
+  const criticalOpen = await service.issuesList({
+    workflowId: 'legacy', projectId: 'project-legacy', severity: 'critical', status: 'open',
+  });
+  const warningOpen = await service.issuesList({
+    workflowId: 'legacy', projectId: 'project-legacy', severity: 'warning', status: 'open',
+  });
+  assert.deepEqual(criticalOpen.map((issue) => issue.issueId), [criticalCreated.issueId]);
+  assert.deepEqual(warningOpen.map((issue) => issue.issueId), [warningCreated.issueId]);
+  const legacyForSelection = await workflows.get('legacy');
+  assert.ok(legacyForSelection !== null && legacyForSelection.currentStageId !== null);
+  await service.command({
+    type: 'workflow-select-issue', workflowId: 'legacy', stageId: legacyForSelection.currentStageId,
+    workflowRef: { workflowId: 'legacy', stageId: legacyForSelection.currentStageId, issueId: warningCreated.issueId },
+    issueId: warningCreated.issueId, expectedVersion: legacyForSelection.version, runId: 'legacy-warning-fix',
+    requestId: 'legacy-warning-select', operationId: 'legacy-warning-select-op',
+  });
+  assert.equal((await service.issuesList({
+    workflowId: 'legacy', projectId: 'project-legacy', severity: 'warning', status: 'fixing',
+  }))[0]?.issueId, warningCreated.issueId);
+
   await assets.create({
     assetId: 'outline', projectId: 'project-new', kind: 'book-outline',
     scope: { kind: 'project', projectId: 'project-new' }, content: { title: 'old' },

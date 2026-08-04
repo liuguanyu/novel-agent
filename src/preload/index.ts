@@ -29,7 +29,7 @@ import {
   type Unsubscribe,
   WORKFLOW_QUERY_CHANNELS,
   WORKFLOW_COMMAND_CHANNEL,
-  type WorkflowSnapshotResponse, type GetWorkflowSnapshotRequest, type WorkflowCommand, type WorkflowAssetQuery, type WorkflowAssetResponse,
+  type WorkflowSnapshotResponse, type GetWorkflowSnapshotRequest, type WorkflowCommand, type WorkflowAssetQuery, type WorkflowAssetResponse, type WorkflowIssuesQuery, type WorkflowIssuesResponse,
 } from '../shared/ipc/index.js';
 
 /** 暴露给 Renderer 的受限桥 API。 */
@@ -63,6 +63,7 @@ const api: NovelAgentBridge = {
   getWorkflowSnapshot(request: GetWorkflowSnapshotRequest): Promise<WorkflowSnapshotResponse> { return ipcRenderer.invoke(WORKFLOW_QUERY_CHANNELS.snapshot, request) as Promise<WorkflowSnapshotResponse>; },
   getActiveWorkflow(projectId: string): Promise<WorkflowSnapshotResponse> { return ipcRenderer.invoke(WORKFLOW_QUERY_CHANNELS.active, projectId) as Promise<WorkflowSnapshotResponse>; },
   getWorkflowAsset(request: WorkflowAssetQuery): Promise<WorkflowAssetResponse> { return ipcRenderer.invoke(WORKFLOW_QUERY_CHANNELS.asset, request) as Promise<WorkflowAssetResponse>; },
+  getWorkflowIssues(request: WorkflowIssuesQuery): Promise<WorkflowIssuesResponse> { return ipcRenderer.invoke(WORKFLOW_QUERY_CHANNELS.issues, request) as Promise<WorkflowIssuesResponse>; },
   sendWorkflowCommand(command: WorkflowCommand): Promise<WorkflowSnapshotResponse> { return ipcRenderer.invoke(WORKFLOW_COMMAND_CHANNEL, command) as Promise<WorkflowSnapshotResponse>; },
   /** 发送前端命令（召唤/中断等），经 control-event 通道上行。 */
   sendCommand(command: FrontendCommandMessage): void {

@@ -54,6 +54,12 @@ const workflowRefSchema = z.object({ workflowId: idSchema, stageId: idSchema, is
 const metaShape = { requestId: idSchema.optional(), operationId: idSchema.optional(), expectedVersion: z.number().int().nonnegative().optional(), workflowRef: workflowRefSchema.optional() };
 const workflowSnapshotQuerySchema = z.object({ ...metaShape, workflowId: idSchema.optional(), projectId: idSchema }).strict();
 const assetQuerySchema = z.object({ assetId: idSchema, projectId: idSchema }).strict();
+const workflowIssuesQuerySchema = z.object({
+  workflowId: idSchema,
+  projectId: idSchema,
+  severity: z.enum(['critical', 'warning', 'info']).optional(),
+  status: z.enum(['open', 'fixing', 'verifying', 'resolved', 'dismissed']).optional(),
+}).strict();
 const taskCenterQuerySchema = z.object({
   projectId: idSchema.optional(),
   workflowId: idSchema.optional(),
@@ -112,6 +118,15 @@ export function registerIpcHandlers(runtime: OrchestrationRuntime, workflowServi
     ipcMain.handle(WORKFLOW_QUERY_CHANNELS.snapshot, async (_e, raw: unknown) => ({ snapshot: await workflowService.get(workflowSnapshotQuerySchema.parse(raw) as unknown as Parameters<WorkflowApplicationService['get']>[0]) }));
     ipcMain.handle(WORKFLOW_QUERY_CHANNELS.active, async (_e, raw: unknown) => ({ snapshot: await workflowService.active(idSchema.parse(raw)) }));
     ipcMain.handle(WORKFLOW_QUERY_CHANNELS.asset, async (_e, raw: unknown) => ({ asset: await workflowService.asset(assetQuerySchema.parse(raw)) }));
+    ipcMain.handle(WORKFLOW_QUERY_CHANNELS.issues, async (_e, raw: unknown) => {
+      const parsed = workflowIssuesQuerySchema.parse(raw);
+      return { issues: await workflowService.issuesList({
+        workflowId: parsed.workflowId,
+        projectId: parsed.projectId,
+        ...(parsed.severity === undefined ? {} : { severity: parsed.severity }),
+        ...(parsed.status === undefined ? {} : { status: parsed.status }),
+      }) };
+    });
     ipcMain.handle(WORKFLOW_COMMAND_CHANNEL, async (event, raw: unknown) => {
       const command = workflowCommandSchema.parse(raw) as WorkflowCommand;
       const runId = command.type === 'start-workflow' ? command.operationId : (command.runId ?? command.operationId);

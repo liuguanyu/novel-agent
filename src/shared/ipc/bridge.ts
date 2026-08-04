@@ -22,7 +22,7 @@ import type {
   GetTaskCenterRequest,
   TaskCenterSnapshotDto,
 } from './query-messages.js';
-import type { WorkflowSnapshotResponse, GetWorkflowSnapshotRequest, WorkflowCommand, WorkflowAssetQuery, WorkflowAssetResponse } from './workflow-messages.js';
+import type { WorkflowSnapshotResponse, GetWorkflowSnapshotRequest, WorkflowCommand, WorkflowAssetQuery, WorkflowAssetResponse, WorkflowIssuesQuery, WorkflowIssuesResponse } from './workflow-messages.js';
 
 /** 订阅解除函数。 */
 export type Unsubscribe = () => void;
@@ -58,5 +58,6 @@ export interface NovelAgentBridge {
   getWorkflowSnapshot(request: GetWorkflowSnapshotRequest): Promise<WorkflowSnapshotResponse>;
   getActiveWorkflow(projectId: string): Promise<WorkflowSnapshotResponse>;
   getWorkflowAsset(request: WorkflowAssetQuery): Promise<WorkflowAssetResponse>;
+  getWorkflowIssues(request: WorkflowIssuesQuery): Promise<WorkflowIssuesResponse>;
   sendWorkflowCommand(command: WorkflowCommand): Promise<WorkflowSnapshotResponse>;
 }

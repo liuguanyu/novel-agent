@@ -4,6 +4,8 @@ import type {
   GetWorkflowSnapshotRequest,
   WorkflowAssetQuery,
   WorkflowCommand,
+  WorkflowIssuesQuery,
+  WorkflowIssueDto,
   WorkflowSnapshotDto,
 } from '../shared/ipc/workflow-messages.js';
 import { CreativeAssetRepository, WorkflowIssueRepository, WorkflowRepository } from './db/index.js';
@@ -51,6 +53,25 @@ export class WorkflowApplicationService {
 
   async latest(workflowId: string): Promise<WorkflowSnapshotDto | null> {
     return this.snapshotOrNull(await this.workflows.get(workflowId));
+  }
+
+  async issuesList(query: WorkflowIssuesQuery): Promise<ReadonlyArray<WorkflowIssueDto>> {
+    const workflow = await this.workflows.get(query.workflowId);
+    if (workflow === null || workflow.projectId !== query.projectId) throw new Error('workflow does not belong to project');
+    const items = await this.issues.list(query.workflowId, {
+      ...(query.severity === undefined ? {} : { severity: query.severity }),
+      ...(query.status === undefined ? {} : { status: query.status }),
+    });
+    return items.map(({ record, payload }) => ({
+      issueId: record.issueId,
+      workflowId: record.workflowId,
+      status: record.status,
+      severity: payload.severity,
+      type: payload.type,
+      description: payload.description,
+      anchors: payload.anchors.map((anchor) => ({ id: String(anchor.id), kind: anchor.kind })),
+      sourceAuditRunId: record.sourceAuditRunId,
+    }));
   }
 
   async asset(query: WorkflowAssetQuery): Promise<Record<string, unknown> | null> {
