@@ -118,6 +118,7 @@ import {
   type CorpusHit,
 } from '../../core/corpus/index.js';
 import { readChapterContent } from '../novel-reader.js';
+import { writeChapterDraft } from '../manuscript-writeback.js';
 import type { ChapterContentDto } from '../../shared/ipc/index.js';
 import {
   createOrchestrationGraph,
@@ -230,6 +231,7 @@ export interface RuntimeDeps {
   /** 可注入正文 I/O，供隔离 E2E 使用；未注入时使用默认小说工作区。 */
   manuscript?: {
     readonly readChapterContent: (nodeId: string) => Promise<ChapterContentDto>;
+    readonly writeChapterDraft?: (nodeId: string, content: string) => Promise<{ ok: boolean; reason?: 'node-not-found' | 'io-error'; contentLength?: number }>;
     readonly writeBackRefactoredFragment: (anchor: FragmentAnchor, fragmentText: string) => Promise<{ ok: boolean; reason?: 'node-not-found' | 'anchor-out-of-range' | 'io-error'; newContentLength?: number }>;
   };
 }
@@ -819,6 +821,21 @@ export class OrchestrationRuntime {
       workflowId: workflowRef.workflowId,
       stageId: workflowRef.stageId,
     });
+  }
+
+  /** 新书 writer/scene-generator 仅在自动审校无未决 finding、图正常完成后写入稳定 chapter node。 */
+  async #persistAcceptedChapterDraft(run: ActiveRun, state: unknown): Promise<void> {
+    if (run.workflowRef === undefined || run.assembly.agent !== 'writer') return;
+    const workflow = await this.#deps.workflows?.get(run.workflowRef.workflowId);
+    const stage = workflow?.stages.find((item) => item.stageId === run.workflowRef?.stageId);
+    if (workflow === null || workflow === undefined || stage === undefined || workflow.kind !== 'new-book-creation') return;
+    if (stage.templateStageId !== 'draft-writing') return;
+    const novelState = state as Partial<NovelState> | undefined;
+    const chapterId = novelState?.currentChapterId?.id as string | undefined;
+    const draft = novelState?.currentDraft;
+    if (chapterId === undefined || typeof draft !== 'string' || draft.trim().length === 0) return;
+    const result = await (this.#deps.manuscript?.writeChapterDraft ?? writeChapterDraft)(chapterId, draft);
+    if (!result.ok) throw new Error(`chapter draft writeback failed: ${result.reason ?? 'io-error'}`);
   }
 
   /** 组装本次运行注入图的抽象回调（把图与具体 IPC/DB 解耦）。 */
@@ -3491,7 +3508,10 @@ export class OrchestrationRuntime {
   ): Promise<void> {
     const { threadId: runId, wc } = run;
     const runDeps = this.#buildRunDeps(run, resolver);
-    const isReviewAgent = REVIEW_AGENTS.has(run.assembly.agent);
+    // writer/scene-generator 会在同一图运行内自动经过 reviewer；其 finding 也必须投影为稳定 WorkflowIssueRecord。
+    const isReviewAgent = REVIEW_AGENTS.has(run.assembly.agent)
+      || run.assembly.agent === 'writer'
+      || run.assembly.agent === 'scene-generator';
     try {
       const stream = await this.#graph.stream(input, {
         configurable: { thread_id: runId, deps: runDeps },
@@ -3565,6 +3585,7 @@ export class OrchestrationRuntime {
       }
       this.#send(wc, this.#withWorkflow(run, { type: 'stream-end', runId, kind: 'dialogue', reason: 'completed' }));
       const bugs = (latestState as { activeBugs?: ReadonlyArray<ConsistencyIssue> } | undefined)?.activeBugs ?? [];
+      if (bugs.length === 0) await this.#persistAcceptedChapterDraft(run, latestState);
       const projected = isReviewAgent
         ? await this.#projectReviewIssues(run, bugs)
         : { dtos: bugs.map((issue) => toIssueDto(issue)), issueIds: [] };

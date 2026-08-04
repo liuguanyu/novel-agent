@@ -1479,6 +1479,10 @@ async function smokeWorkflowReviewerIssuePersistence(): Promise<void> {
     let manuscriptText = originalManuscript;
     const manuscript = {
       readChapterContent: async (nodeId: string) => ({ nodeId, content: manuscriptText }),
+      writeChapterDraft: async (_nodeId: string, content: string) => {
+        manuscriptText = content;
+        return { ok: true, contentLength: manuscriptText.length };
+      },
       writeBackRefactoredFragment: async (anchor: FragmentAnchor, fragmentText: string) => {
         manuscriptText = manuscriptText.slice(0, anchor.from) + fragmentText + manuscriptText.slice(anchor.to);
         return { ok: true, newContentLength: manuscriptText.length };
@@ -1508,6 +1512,7 @@ async function smokeWorkflowReviewerIssuePersistence(): Promise<void> {
     check('workflow reviewer DTO 携 lifecycle 状态', dto?.workflowStatus === 'open');
     check('workflow reviewer 使用 manifest 章节锚点', dto?.anchors[0]?.id === chapterId);
     check('stage-run quality evidence 使用真实 issueId', evidence?.completion?.issueIds?.[0] === dto?.issueId);
+    check('审校 finding 挂起时不写正文', manuscriptText === originalManuscript);
 
     // task 5.2：mutate 模式下召唤不在 allowedExperts 内的专家，启动阶段运行前即被校验拒绝（不进 stage-run）。
     const disallowedWc = new FakeWebContents();
@@ -1570,6 +1575,85 @@ async function smokeWorkflowReviewerIssuePersistence(): Promise<void> {
     const failIssue = await workflowIssues.get(dto.issueId);
     check('targeted verification 复发判定失败', failEvent?.type === 'targeted-verification-completed' && !failEvent.passed);
     check('targeted verification 失败后 issue 回 fixing', failIssue?.status === 'fixing');
+
+    // task 6.2：新书前六个规划阶段完成后，writer 在 draft-writing 的无 finding 完成边界落盘 chapter 草稿。
+    const draftWorkflowId = 'new-book-chapter-writeback';
+    const draftStarted = await service.command({
+      type: 'start-workflow', workflowId: draftWorkflowId, projectId: 'draft-project',
+      kind: 'new-book-creation', objective: 'chapter writeback', requestId: 'draft-start', operationId: 'draft-start-op',
+    });
+    if (draftStarted === null) throw new Error('draft workflow fixture failed');
+    const draftEvidence = new SqliteStageRunEvidenceRecorder(db);
+    for (const [index, expectedStage] of ['concept', 'worldbuilding', 'character-design', 'book-outline', 'chapter-plan', 'scene-outline'].entries()) {
+      const current = await workflows.get(draftWorkflowId);
+      if (current === null || current.currentStageId === null) throw new Error(`draft stage missing: ${expectedStage}`);
+      const stage = current.stages.find((candidate) => candidate.stageId === current.currentStageId);
+      if (stage?.templateStageId !== expectedStage) throw new Error(`expected ${expectedStage}, got ${stage?.templateStageId}`);
+      const stageRunId = `${draftWorkflowId}:${index}` as RunId;
+      await service.command({
+        type: 'workflow-start-stage', workflowId: draftWorkflowId, stageId: current.currentStageId,
+        expectedVersion: current.version, runId: stageRunId, requestId: `draft-stage-${index}`, operationId: `draft-stage-${index}-op`,
+      });
+      await draftEvidence.record({ runId: stageRunId, workflowRef: { workflowId: draftWorkflowId, stageId: current.currentStageId }, status: 'started' });
+      await draftEvidence.record({ runId: stageRunId, workflowRef: { workflowId: draftWorkflowId, stageId: current.currentStageId }, status: 'completed' });
+      const awaiting = await workflows.get(draftWorkflowId);
+      if (awaiting === null || awaiting.currentStageId === null) throw new Error(`draft author stage missing: ${expectedStage}`);
+      await service.command({
+        type: 'workflow-confirm-stage', workflowId: draftWorkflowId, stageId: awaiting.currentStageId,
+        expectedVersion: awaiting.version, requestId: `draft-confirm-${index}`, operationId: `draft-confirm-${index}-op`,
+      });
+    }
+    const draftReady = await workflows.get(draftWorkflowId);
+    if (draftReady === null || draftReady.currentStageId === null) throw new Error('draft-writing stage missing');
+    const draftStage = draftReady.stages.find((stage) => stage.stageId === draftReady.currentStageId);
+    check('task 6.2：新书 chapter scope 推进到 draft-writing', draftStage?.templateStageId === 'draft-writing');
+    const draftRef = { workflowId: draftWorkflowId, stageId: draftReady.currentStageId };
+    const findingRunId = randomUUID() as RunId;
+    const findingWc = new FakeWebContents();
+    await runtime(new FakeModelResolver('待审章节草稿', issueText).asResolver()).summon(findingWc.asWebContents(), {
+      runId: findingRunId, mode: 'mutate', agent: 'writer', anchorNodeId: chapterId,
+      instruction: '生成本章正文', workflowRef: draftRef,
+    });
+    const writerReview = findingWc.control.find((event) => event.type === 'review-completed');
+    const writerIssueId = writerReview?.type === 'review-completed' ? writerReview.issues[0]?.issueId : undefined;
+    check('task 6.2：writer 内部自动审校 finding 建立稳定 WorkflowIssueRecord',
+      writerIssueId !== undefined && (await workflowIssues.get(writerIssueId))?.sourceAuditRunId === findingRunId);
+    check('task 6.2：writer 内部审校 finding 挂起时不写正文', manuscriptText === originalManuscript);
+
+    const cleanWorkflowId = 'new-book-chapter-writeback-clean';
+    await service.command({
+      type: 'start-workflow', workflowId: cleanWorkflowId, projectId: 'draft-project-clean',
+      kind: 'new-book-creation', objective: 'clean chapter writeback', requestId: 'clean-draft-start', operationId: 'clean-draft-start-op',
+    });
+    for (const [index, expectedStage] of ['concept', 'worldbuilding', 'character-design', 'book-outline', 'chapter-plan', 'scene-outline'].entries()) {
+      const current = await workflows.get(cleanWorkflowId);
+      if (current === null || current.currentStageId === null) throw new Error(`clean draft stage missing: ${expectedStage}`);
+      const stage = current.stages.find((candidate) => candidate.stageId === current.currentStageId);
+      if (stage?.templateStageId !== expectedStage) throw new Error(`clean draft expected ${expectedStage}`);
+      const stageRunId = `${cleanWorkflowId}:${index}` as RunId;
+      await service.command({
+        type: 'workflow-start-stage', workflowId: cleanWorkflowId, stageId: current.currentStageId,
+        expectedVersion: current.version, runId: stageRunId, requestId: `clean-draft-stage-${index}`, operationId: `clean-draft-stage-${index}-op`,
+      });
+      await draftEvidence.record({ runId: stageRunId, workflowRef: { workflowId: cleanWorkflowId, stageId: current.currentStageId }, status: 'started' });
+      await draftEvidence.record({ runId: stageRunId, workflowRef: { workflowId: cleanWorkflowId, stageId: current.currentStageId }, status: 'completed' });
+      const awaiting = await workflows.get(cleanWorkflowId);
+      if (awaiting === null || awaiting.currentStageId === null) throw new Error(`clean draft author stage missing: ${expectedStage}`);
+      await service.command({
+        type: 'workflow-confirm-stage', workflowId: cleanWorkflowId, stageId: awaiting.currentStageId,
+        expectedVersion: awaiting.version, requestId: `clean-draft-confirm-${index}`, operationId: `clean-draft-confirm-${index}-op`,
+      });
+    }
+    const cleanReady = await workflows.get(cleanWorkflowId);
+    if (cleanReady === null || cleanReady.currentStageId === null) throw new Error('clean draft-writing stage missing');
+    const finalDraft = '夜雨落在檐角，林默推门走进灯下。';
+    const draftWc = new FakeWebContents();
+    await runtime(new FakeModelResolver(finalDraft, '[]').asResolver()).summon(draftWc.asWebContents(), {
+      runId: randomUUID() as RunId, mode: 'mutate', agent: 'writer', anchorNodeId: chapterId,
+      instruction: '生成本章正文', workflowRef: { workflowId: cleanWorkflowId, stageId: cleanReady.currentStageId },
+    });
+    check('task 6.2：writer 无 finding 正常完成后写入稳定 chapter node', manuscriptText === finalDraft);
+    manuscriptText = originalManuscript;
 
     const prepareLegacyVerification = async (workflowId: string, refactorRunId?: RunId): Promise<{ workflowRef: { workflowId: string; stageId: string }; issueId: string }> => {
       const legacy = await service.command({

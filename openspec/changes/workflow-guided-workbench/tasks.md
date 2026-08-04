@@ -47,7 +47,7 @@
 ## 6. 新书创作工作流接入
 
 - [x] 6.1 [Main] 将 concept-generator、worldbuilding、character-generator、architect、scene-outliner 全部接入 change-set candidate → 作者确认 → Main 提交链路，禁止直接 ingest 或写 CreativeAsset/Story Bible；仅将确认后的适用约束同步 Story Bible；researcher 仅持久化带来源/版本的 research artifact；无章节锚点的项目资产仍必须持久化（已实现：graph 的规划专家回调不再复用正文抽取/ingest 管线；Main runtime 按专家与模板阶段创建稳定 CreativeAsset 基线并只生成 pending candidate，下发 `creative-asset-change-proposed`，确认仍复用既有 workflow asset command；character/worldbuilding 的确认才进入 Story Bible；researcher 写入独立 `research_artifacts` 表并保存 source/sourceVersion；无 workflow/章节锚点时安全降级，项目级资产仍可持久化。workflow integration smoke 已覆盖映射、候选隔离、Story Bible 条件同步和 research artifact 隔离。）
-- [ ] 6.2 [Main] 实现章节/分场规划、正文写作、事实抽取、自动审校和人工修改/验收的 chapter scope 推进；将审校 finding 建立/去重为 `WorkflowIssueRecord` 并关联来源 run 与稳定正文锚点
+- [x] 6.2 [Main] 实现章节/分场规划、正文写作、事实抽取、自动审校和人工修改/验收的 chapter scope 推进；将审校 finding 建立/去重为 `WorkflowIssueRecord` 并关联来源 run 与稳定正文锚点（已实现：章节/分场规划沿 chapter anchor 产候选资产，writer/scene-generator 的章节事实抽取沿既有 `afterWriterDraft` 管线执行；本次补齐新书 `writer + draft-writing + 稳定 chapter node` 的正文落盘，只在图正常完成且自动审校无 finding 时写入 Markdown，审校挂起绝不写盘，旧书/editor 仍严格走局部 diff/hunk 写回；writer 内部自动 reviewer 的 finding 现与直接审校一致，经 `upsertFromAudit(workflowId, runId, issues)` 建立/指纹去重 `WorkflowIssueRecord`，保留来源 run 与 canonical chapter/scene 锚点。orchestration smoke 覆盖规划阶段推进、finding 建 issue 且阻止写盘、无 finding 写入稳定 chapter node，以及既有事实抽取/人工 hunk 验收回归。）
 - [ ] 6.3 [Main/utilityProcess] 将事实抽取结果、冲突裁决和审校结果映射为质量门证据；CPU 密集处理继续在既有 worker 边界
 - [ ] 6.4 [Main] 实现章节定稿后的“下一章/结束创作”作者决策，创建新 chapter scope 循环或进入全书总检
 - [ ] 6.5 [Main] 实现新书章节问题修复证据链：问题选择后进入 fixing，实际改写经 diff/逐 hunk 裁决与 checkpoint 落盘后仅转 verifying；针对性复检成功才 resolved，失败返回 fixing 并保留全部证据
