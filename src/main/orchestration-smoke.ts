@@ -78,6 +78,7 @@ import { NEW_BOOK_CREATION_TEMPLATE } from '../core/workflow/templates.js';
 import {
   buildAssetCandidateDecisionCommand,
   buildAssetClarificationSelectionCommand,
+  buildFindingConnectorPath,
   buildIssueRefactorIntent,
   presentIssueLifecycle,
   resolveIssueChapterTarget,
@@ -4721,6 +4722,9 @@ async function smokeModelAuditNoCoT(): Promise<void> {
 }
 
 function smokeTask87RendererContracts(): void {
+  check('task 8.8：Hero 连线纯几何保持卡片到正文的稳定贝塞尔路径',
+    buildFindingConnectorPath({ x1: 300, y1: 120, x2: 100, y2: 260 })
+      === 'M 300 120 C 200 120, 200 260, 100 260');
   const issue: ConsistencyIssueDto = {
     issueId: 'issue-87',
     type: 'timeline-break',

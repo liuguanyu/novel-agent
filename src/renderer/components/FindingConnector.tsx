@@ -9,6 +9,7 @@
 import { useEffect, useState } from 'react';
 import type { ConsistencyIssueDto } from '../../shared/ipc/index.js';
 import { findingCardId } from './FindingsPanel.js';
+import { buildFindingConnectorPath, type FindingConnectorGeometry } from '../lib/workflow-ui-contracts.js';
 
 /** 严重度 → 连线颜色（取语义 token，明暗自适应）。 */
 const SEVERITY_STROKE: Record<ConsistencyIssueDto['severity'], string> = {
@@ -17,12 +18,7 @@ const SEVERITY_STROKE: Record<ConsistencyIssueDto['severity'], string> = {
   info: 'var(--muted-foreground)',
 };
 
-interface ConnectorGeometry {
-  readonly x1: number;
-  readonly y1: number;
-  readonly x2: number;
-  readonly y2: number;
-}
+
 
 export function FindingConnector({
   runId,
@@ -35,7 +31,7 @@ export function FindingConnector({
   /** 选中问题的严重度（决定连线颜色）。 */
   severity: ConsistencyIssueDto['severity'] | undefined;
 }): JSX.Element | null {
-  const [geo, setGeo] = useState<ConnectorGeometry | null>(null);
+  const [geo, setGeo] = useState<FindingConnectorGeometry | null>(null);
 
   useEffect(() => {
     if (runId === undefined || index === undefined) {
@@ -91,18 +87,16 @@ export function FindingConnector({
   if (geo === null || severity === undefined) return null;
 
   const stroke = SEVERITY_STROKE[severity];
-  // 二次贝塞尔控制点：取两端中点并向外拱，形成柔和横向连线。
-  const midX = (geo.x1 + geo.x2) / 2;
-  const path = `M ${geo.x1} ${geo.y1} C ${midX} ${geo.y1}, ${midX} ${geo.y2}, ${geo.x2} ${geo.y2}`;
+  const path = buildFindingConnectorPath(geo);
 
   return (
     <svg
-      className="pointer-events-none fixed inset-0 z-40 h-full w-full"
+      className="hero-connector pointer-events-none fixed inset-0 z-40 h-full w-full"
       aria-hidden
     >
-      <path d={path} fill="none" stroke={stroke} strokeWidth={2} strokeDasharray="5 4" opacity={0.85} />
-      <circle cx={geo.x1} cy={geo.y1} r={3.5} fill={stroke} />
-      <circle cx={geo.x2} cy={geo.y2} r={3.5} fill={stroke} />
+      <path className="hero-connector-path" d={path} fill="none" stroke={stroke} strokeWidth={2} strokeDasharray="7 5" opacity={0.85} />
+      <circle className="hero-connector-endpoint hero-connector-endpoint-source" cx={geo.x1} cy={geo.y1} r={3.5} fill={stroke} />
+      <circle className="hero-connector-endpoint hero-connector-endpoint-target" cx={geo.x2} cy={geo.y2} r={3.5} fill={stroke} />
     </svg>
   );
 }

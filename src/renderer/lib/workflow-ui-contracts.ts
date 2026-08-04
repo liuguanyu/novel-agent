@@ -6,6 +6,19 @@ import type {
   WorkflowSnapshotDto,
 } from '../../shared/ipc/index.js';
 
+export interface FindingConnectorGeometry {
+  readonly x1: number;
+  readonly y1: number;
+  readonly x2: number;
+  readonly y2: number;
+}
+
+/** Hero 连线纯几何契约；不参与问题定位、高亮或正文改写。 */
+export function buildFindingConnectorPath(geo: FindingConnectorGeometry): string {
+  const midX = (geo.x1 + geo.x2) / 2;
+  return `M ${geo.x1} ${geo.y1} C ${midX} ${geo.y1}, ${midX} ${geo.y2}, ${geo.x2} ${geo.y2}`;
+}
+
 export type IssueLifecycleStatus = NonNullable<ConsistencyIssueDto['workflowStatus']>;
 
 export interface IssueLifecyclePresentation {

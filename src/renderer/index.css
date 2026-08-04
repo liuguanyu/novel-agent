@@ -150,6 +150,35 @@
     box-shadow: 0 0 0 1px oklch(0.7 0.16 65 / 55%);
   }
 
+  /* 问题卡片 → 原文 Hero 连线：入场绘制、证据流向与端点呼吸仅作视觉提示。 */
+  .hero-connector {
+    animation: hero-connector-enter 240ms var(--motion-ease) both;
+  }
+  .hero-connector-path {
+    animation: hero-connector-flow 1.1s linear infinite;
+    filter: drop-shadow(0 1px 2px color-mix(in oklch, currentColor 30%, transparent));
+  }
+  .hero-connector-endpoint {
+    transform-box: fill-box;
+    transform-origin: center;
+    animation: hero-connector-pulse 1.4s var(--motion-ease) infinite;
+  }
+  .hero-connector-endpoint-target {
+    animation-delay: 160ms;
+  }
+
+  @keyframes hero-connector-enter {
+    from { opacity: 0; }
+    to { opacity: 1; }
+  }
+  @keyframes hero-connector-flow {
+    to { stroke-dashoffset: -24; }
+  }
+  @keyframes hero-connector-pulse {
+    0%, 100% { transform: scale(0.85); opacity: 0.65; }
+    50% { transform: scale(1.35); opacity: 1; }
+  }
+
   /*
    * 全局细滚动条：默认滑块透明（不可见），仅在容器悬停/滑动时淡入。
    * 轨道始终透明、不占额外视觉；墨色/宣纸白半透明，跟随明暗主题。
