@@ -84,6 +84,18 @@ import {
   resolveIssueChapterTarget,
 } from '../renderer/lib/workflow-ui-contracts.js';
 import {
+  activitySummary,
+  actorLabel,
+  buildWorkflowCollapsedSummary,
+  buildWorkflowView,
+  impactStatusLabel,
+  observationSummary,
+  stageStatusLabel,
+  workflowStageView,
+} from '../renderer/lib/workbench-view-contracts.js';
+import type { WorkflowSnapshotDto } from '../shared/ipc/index.js';
+import type { WorkbenchActivities } from '../core/shell/workbench-graph.js';
+import {
   NEW_BOOK_PLANNING_PLAYBOOKS,
   NEW_BOOK_STAGE_PLAYBOOKS,
   NEW_BOOK_WRITING_PLAYBOOKS,
@@ -4787,6 +4799,179 @@ function smokeTask87RendererContracts(): void {
 }
 
 /**
+ * 9.6 冲烟：专家工作台上层视图纯投影契约（与 ExpertWorkbench 同源复用 workbench-view-contracts）。
+ * 只验证快照→视图模型/折叠摘要的展示投影；工作流推进本身由 6.x/7.x 主路径冲烟覆盖。
+ */
+function smokeTask96WorkbenchViewContracts(): void {
+  const stageRec = (
+    workflowId: string,
+    templateStageId: string,
+    status: string,
+    overrides: Record<string, unknown> = {},
+  ): Record<string, unknown> => ({
+    stageId: `${workflowId}:${templateStageId}`,
+    templateStageId,
+    status,
+    actor: 'expert',
+    impactStatus: 'none',
+    runIds: [],
+    ...overrides,
+  });
+  const snapshot = (input: {
+    workflowId: string;
+    kind: string;
+    currentStageId: string | null;
+    stages: ReadonlyArray<Record<string, unknown>>;
+    status?: string;
+  }): WorkflowSnapshotDto => ({
+    workflowId: input.workflowId,
+    projectId: 'project-96',
+    kind: input.kind,
+    templateVersion: 1,
+    objective: '按模板推进创作',
+    authorIntents: [],
+    status: input.status ?? 'active',
+    currentStageId: input.currentStageId,
+    stages: input.stages,
+    version: 1,
+    createdAt: 0,
+    updatedAt: 0,
+  });
+
+  // 场景 1：人物设计多 run——上层阶段历史聚合全部 runIds，不因新 run 清空（§9.4）。
+  const wfA = 'workflow-96a';
+  const multiRun = snapshot({
+    workflowId: wfA,
+    kind: 'new-book-creation',
+    currentStageId: `${wfA}:character-design`,
+    stages: [
+      stageRec(wfA, 'concept', 'completed'),
+      stageRec(wfA, 'worldbuilding', 'completed'),
+      stageRec(wfA, 'character-design', 'running', { runIds: ['run-cd-1', 'run-cd-2'] }),
+      stageRec(wfA, 'book-outline', 'pending'),
+    ],
+  });
+  const multiRunView = buildWorkflowView(multiRun);
+  check('task 9.6：人物设计多 run 历史保留且阶段名/下一步中文化',
+    multiRunView.current?.name === '人物设计'
+    && multiRunView.current.runIds.join(',') === 'run-cd-1,run-cd-2'
+    && multiRunView.current.nextStep === '全书大纲'
+    && multiRunView.completedCount === 2);
+
+  // 场景 2：写作中资产澄清——主阶段保持正文写作，待审计数（候选+影响）只附加在折叠摘要。
+  const wfB = 'workflow-96b';
+  const clarifying = snapshot({
+    workflowId: wfB,
+    kind: 'new-book-creation',
+    currentStageId: `${wfB}:draft-writing`,
+    stages: [stageRec(wfB, 'draft-writing', 'running', { runIds: ['run-write'] })],
+  });
+  const clarifyingView = buildWorkflowView(clarifying);
+  check('task 9.6：写作中资产澄清主阶段不变且折叠摘要精确含待审计数',
+    clarifyingView.current?.name === '正文写作'
+    && buildWorkflowCollapsedSummary(clarifying, clarifyingView.current, 2) === '新书创作 · 正文写作 · 下一步：事实抽取 · 待审 2'
+    && buildWorkflowCollapsedSummary(clarifying, clarifyingView.current, 0) === '新书创作 · 正文写作 · 下一步：事实抽取');
+
+  // 场景 3：影响状态人话化；none 不展示，避免术语直出。
+  check('task 9.6：资产影响状态人话化且 none 不展示',
+    impactStatusLabel('conflicting') === '版本冲突'
+    && impactStatusLabel('needs-review') === '需复核'
+    && impactStatusLabel('stale') === '可能过时'
+    && impactStatusLabel('none') === undefined);
+
+  // 场景 4：资产影响阻塞——结构化 blockingReason 人话化并进入折叠摘要阻塞段。
+  const blocked = snapshot({
+    workflowId: wfB,
+    kind: 'new-book-creation',
+    currentStageId: `${wfB}:draft-writing`,
+    stages: [stageRec(wfB, 'draft-writing', 'blocked', {
+      impactStatus: 'conflicting',
+      blockingReason: { kind: 'asset-impact', impactSetId: 'impact-set-1' },
+    })],
+  });
+  const blockedView = buildWorkflowView(blocked);
+  check('task 9.6：资产影响阻塞人话化并进入折叠摘要',
+    blockedView.current?.blocking === '资产变更影响待处理'
+    && stageStatusLabel(blockedView.current.status) === '已阻塞'
+    && buildWorkflowCollapsedSummary(blocked, blockedView.current, 1) === '新书创作 · 正文写作 · 阻塞：资产变更影响待处理 · 待审 1');
+
+  // 场景 5：暂停/待确认/失败——状态文案可区分，失败 run 携带原因消息。
+  const paused = snapshot({
+    workflowId: wfB,
+    kind: 'new-book-creation',
+    status: 'paused',
+    currentStageId: `${wfB}:draft-writing`,
+    stages: [stageRec(wfB, 'draft-writing', 'running')],
+  });
+  check('task 9.6：暂停工作流折叠摘要明示已暂停',
+    buildWorkflowCollapsedSummary(paused, buildWorkflowView(paused).current, 0) === '新书创作 · 正文写作 · 已暂停');
+  check('task 9.6：待确认/失败/阻塞状态文案可区分且失败原因人话化',
+    stageStatusLabel('awaiting-confirmation') === '待确认'
+    && stageStatusLabel('failed') === '失败'
+    && workflowStageView(stageRec(wfB, 'draft-writing', 'failed', {
+      blockingReason: { kind: 'failed-run', runId: 'run-x', message: '模型超时' },
+    })).blocking === '任务运行失败：模型超时');
+
+  // 场景 6：章节循环——第二章循环实例（stageId 带 chapter/instance 后缀）仍按 templateStageId 中文化，进度计数含循环组。
+  const wfC = 'workflow-96c';
+  const loopStageIds = ['chapter-plan', 'scene-outline', 'draft-writing', 'fact-extraction', 'automatic-review', 'author-review', 'chapter-finalization'];
+  const chapterLoop = snapshot({
+    workflowId: wfC,
+    kind: 'new-book-creation',
+    currentStageId: `${wfC}:chapter-plan:chapter-2:2`,
+    stages: [
+      ...['concept', 'worldbuilding', 'character-design', 'book-outline'].map((id) => stageRec(wfC, id, 'completed')),
+      ...loopStageIds.map((id) => stageRec(wfC, id, 'completed')),
+      ...loopStageIds.map((id) => ({
+        ...stageRec(wfC, id, id === 'chapter-plan' ? 'ready' : 'pending'),
+        stageId: `${wfC}:${id}:chapter-2:2`,
+      })),
+    ],
+  });
+  const chapterLoopView = buildWorkflowView(chapterLoop);
+  check('task 9.6：第二章循环实例复用模板中文名且进度计数含循环组',
+    chapterLoopView.stages.length === 18
+    && chapterLoopView.current?.name === '章节规划'
+    && chapterLoopView.current.nextStep === '分场大纲'
+    && chapterLoopView.completedCount === 11);
+
+  // 场景 7：老书 issue 循环——第二个问题的 issue-scoped 实例组正确投影，质量门 actor 人话化。
+  const wfD = 'workflow-96d';
+  const issueLoop = snapshot({
+    workflowId: wfD,
+    kind: 'legacy-book-revision',
+    currentStageId: `${wfD}:generate-rewrite:issue-2:2`,
+    stages: [
+      ...['import-book', 'fact-backfill', 'initial-audit', 'issue-triage'].map((id) => stageRec(wfD, id, 'completed')),
+      ...['locate-source', 'generate-rewrite', 'hunk-review', 'apply-checkpoint', 'targeted-verification', 'close-issue'].map((id) => stageRec(wfD, id, 'completed')),
+      { ...stageRec(wfD, 'locate-source', 'completed'), stageId: `${wfD}:locate-source:issue-2:2` },
+      { ...stageRec(wfD, 'generate-rewrite', 'running', { runIds: ['run-rewrite-2'] }), stageId: `${wfD}:generate-rewrite:issue-2:2` },
+      { ...stageRec(wfD, 'hunk-review', 'pending'), stageId: `${wfD}:hunk-review:issue-2:2` },
+      stageRec(wfD, 'final-audit', 'pending', { actor: 'quality-gate' }),
+    ],
+  });
+  const issueLoopView = buildWorkflowView(issueLoop);
+  check('task 9.6：老书 issue 循环第二问题阶段视图与进度正确',
+    issueLoopView.stages.length === 14
+    && issueLoopView.current?.name === '生成局部改写方案'
+    && issueLoopView.current.nextStep === '逐 hunk 接受或拒绝'
+    && issueLoopView.completedCount === 11
+    && actorLabel('quality-gate') === '质量门');
+
+  // 场景 8：standalone（无 workflow）——折叠摘要回退活动态/轨迹观察，待裁决优先于运行中。
+  const standaloneActivities: WorkbenchActivities = new Map([
+    ['writer', { phase: 'running', runId: 'run-standalone' }],
+    ['reviewer', { phase: 'awaiting', runId: 'run-standalone' }],
+  ]);
+  const runningOnly: WorkbenchActivities = new Map([['writer', { phase: 'running', runId: 'run-1' }]]);
+  check('task 9.6：standalone 回退活动摘要且待裁决优先',
+    activitySummary(standaloneActivities) === '审校待裁决'
+    && activitySummary(runningOnly) === '写手运行中'
+    && observationSummary(undefined) === '等待工作任务'
+    && observationSummary({ count: 3, node: 'writer', phase: 'exit' }) === '轨迹 3 · 写手完成');
+}
+
+/**
  * 3.6 冲烟（静态守卫）：Renderer 不得直接访问 DB/LLM/fs 或主进程模块。
  * 递归扫描 src/renderer 下所有 .ts/.tsx 源文件，断言无任何 import 命中禁用模块白名单以外的副作用源：
  * node 内置（node: 前缀、fs/path/os 等）、electron、sqlite/better-sqlite3、模型适配层、main/ 与 core/ 的 db/model 模块。
@@ -5069,6 +5254,7 @@ async function main(): Promise<void> {
   await smokeSupplementTaskInput();
   await smokeModelAuditNoCoT();
   smokeTask87RendererContracts();
+  smokeTask96WorkbenchViewContracts();
   await smokeRendererIsolation();
   await smokeNewBookWritingPlaybooks();
   await smokeNewBookMainPathEndToEnd();

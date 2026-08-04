@@ -1,22 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import type { BackendControlEvent, WorkflowSnapshotDto } from '../../shared/ipc/index.js';
 
-export interface WorkflowStageView {
-  readonly id: string;
-  readonly name: string;
-  readonly actor: string | undefined;
-  readonly status: string | undefined;
-  readonly impactStatus: string | undefined;
-  readonly nextStep: string | undefined;
-  readonly blocking: string | undefined;
-  readonly allowedActions: ReadonlyArray<string>;
-}
-
-export function workflowStageView(stage: Record<string, unknown>): WorkflowStageView {
-  const text = (key: string): string | undefined => typeof stage[key] === 'string' ? stage[key] as string : undefined;
-  const actions = stage['allowedActions'];
-  return { id: text('stageId') ?? text('id') ?? 'stage', name: text('name') ?? text('label') ?? text('stageId') ?? '阶段', actor: text('actor'), status: text('status'), impactStatus: text('impactStatus'), nextStep: text('nextStep') ?? text('next'), blocking: text('blocking') ?? text('blockedBy'), allowedActions: Array.isArray(actions) ? actions.filter((x): x is string => typeof x === 'string') : [] };
-}
+// workflowStageView / WorkflowStageView 已迁往纯投影层 ../lib/workbench-view-contracts.ts（供组件与 node 冲烟复用）。
 
 export interface UseWorkflowSnapshotResult {
   readonly snapshot: WorkflowSnapshotDto | null;

@@ -1,16 +1,21 @@
 /** 常驻专家工作台：只呈现本轮目标、目标专家与真实有序执行路径。 */
 
 import { useState } from 'react';
-import { workflowStageView } from '../hooks/useWorkflowSnapshot.js';
-import { getBuiltinWorkflowTemplate } from '../../core/workflow/templates.js';
-import type { WorkflowKind } from '../../core/workflow/types.js';
+import {
+  activitySummary,
+  actorLabel,
+  buildWorkflowCollapsedSummary,
+  buildWorkflowView,
+  impactStatusLabel,
+  nodeLabel,
+  observationSummary,
+  stageStatusLabel,
+  workflowKindLabel,
+} from '../lib/workbench-view-contracts.js';
 import type { AssetImpactDto, CreativeAssetCandidateDto, WorkflowSnapshotDto } from '../../shared/ipc/index.js';
 import { Button } from '@/components/ui/button';
 import { ChevronDown, ChevronUp, CircleDot, Workflow } from 'lucide-react';
-import {
-  WORKBENCH_GRAPH,
-  type WorkbenchActivities,
-} from '../../core/shell/workbench-graph.js';
+import type { WorkbenchActivities } from '../../core/shell/workbench-graph.js';
 import { WorkbenchGraph } from './WorkbenchGraph.js';
 import type {
   WorkbenchTraceObservation,
@@ -34,68 +39,9 @@ interface ExpertWorkbenchProps {
   readonly onResolveImpact?: (impact: AssetImpactDto, intent: 'handle-now' | 'todo' | 'continue') => void;
 }
 
-function nodeLabel(id: string): string {
-  return WORKBENCH_GRAPH.nodes.find((node) => node.id === id)?.label ?? id;
-}
-
-// 工作流 kind 人话化：绝不把内部标识符当主文案（§7.2 红线 / §17）。
-function workflowKindLabel(kind: string): string {
-  switch (kind) {
-    case 'legacy-book-revision': return '老书重建';
-    case 'new-book-creation': return '新书创作';
-    default: return '创作任务';
-  }
-}
-
-// 资产影响状态人话化：none 不展示（避免「影响：none」这类术语）。
-function impactStatusLabel(status: string | undefined): string | undefined {
-  switch (status) {
-    case undefined:
-    case '':
-    case 'none': return undefined;
-    case 'pending': return '待评估';
-    case 'needs-review': return '需复核';
-    case 'conflicting': return '版本冲突';
-    case 'resolved': return '已处理';
-    default: return status;
-  }
-}
-
-function stageStatusLabel(status: string | undefined): string {
-  switch (status) {
-    case 'ready': return '待开始';
-    case 'running': return '进行中';
-    case 'awaiting-confirmation': return '待确认';
-    case 'completed': return '已完成';
-    case 'failed': return '失败';
-    case 'blocked': return '已阻塞';
-    case 'skipped': return '已跳过';
-    default: return status ?? '待开始';
-  }
-}
-
-function actorLabel(actor: string | undefined): string {
-  switch (actor) {
-    case 'author': return '作者';
-    case 'expert': return '专家';
-    case 'quality-gate': return '质量门';
-    case 'system': return '系统';
-    default: return actor ?? '未分配';
-  }
-}
-
 function assetContentRows(content: unknown): ReadonlyArray<readonly [string, string]> {
   if (content === null || typeof content !== 'object' || Array.isArray(content)) return [['拟议内容', JSON.stringify(content)]];
   return Object.entries(content as Record<string, unknown>).map(([key, value]) => [key, typeof value === 'string' ? value : JSON.stringify(value)] as const);
-}
-
-function activitySummary(activities: WorkbenchActivities): string | undefined {
-  let running: string | undefined;
-  for (const [node, activity] of activities) {
-    if (activity.phase === 'awaiting') return `${nodeLabel(node)}待裁决`;
-    if (activity.phase === 'running') running = `${nodeLabel(node)}运行中`;
-  }
-  return running;
 }
 
 export function ExpertWorkbench({
@@ -117,23 +63,13 @@ export function ExpertWorkbench({
   const [expanded, setExpanded] = useState(false);
   const summary = activitySummary(activities);
   const targetLabel = targetAgent === undefined ? undefined : nodeLabel(targetAgent);
-  const template = workflow === null || workflow === undefined
-    ? undefined
-    : getBuiltinWorkflowTemplate(workflow.kind as WorkflowKind, Number(workflow.templateVersion));
-  const stages = workflow?.stages.map((rawStage) => {
-    const stage = workflowStageView(rawStage);
-    const definition = template?.stages.find((item) => item.id === rawStage['templateStageId']);
-    if (definition === undefined) return stage;
-    // 下一步显示目标阶段的中文 label，而非阶段 ID。
-    const nextId = definition.transitions[0]?.to;
-    const nextStep = nextId === undefined ? undefined : (template?.stages.find((item) => item.id === nextId)?.label ?? nextId);
-    return { ...stage, name: definition.label, nextStep };
-  }) ?? [];
-  const current = stages.find((stage) => stage.id === workflow?.currentStageId);
-  const completedStages = stages.filter((stage) => stage.status === 'completed' || stage.status === 'skipped').length;
+  const workflowView = workflow === null || workflow === undefined ? undefined : buildWorkflowView(workflow);
+  const stages = workflowView?.stages ?? [];
+  const current = workflowView?.current;
+  const completedStages = workflowView?.completedCount ?? 0;
   const workflowSummary = workflow === null || workflow === undefined
     ? undefined
-    : `${workflowKindLabel(workflow.kind)} · ${current?.name ?? '等待阶段'} · ${current?.blocking !== undefined ? `阻塞：${current.blocking}` : `下一步：${current?.nextStep ?? '等待推进'}`}${assetCandidates.length + assetImpacts.length > 0 ? ` · 待审 ${assetCandidates.length + assetImpacts.length}` : ''}`;
+    : buildWorkflowCollapsedSummary(workflow, current, assetCandidates.length + assetImpacts.length);
   return (
     <section className="border-t border-border bg-card/45 px-3 py-2" aria-label="专家工作台">
       <button
@@ -149,10 +85,7 @@ export function ExpertWorkbench({
         </span>
         <span className="flex items-center gap-1.5 text-muted-foreground">
           {summary !== undefined && <CircleDot className="size-3 animate-pulse text-primary" aria-hidden />}
-          {workflowSummary ?? summary ??
-            (observation === undefined
-              ? '等待工作任务'
-              : `轨迹 ${observation.count} · ${nodeLabel(observation.node)}${observation.phase === 'enter' ? '进入' : '完成'}`)}
+          {workflowSummary ?? summary ?? observationSummary(observation)}
         </span>
       </button>
       {expanded && workflow !== null && workflow !== undefined ? (

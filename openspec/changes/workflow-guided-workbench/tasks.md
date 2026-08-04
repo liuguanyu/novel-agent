@@ -83,7 +83,7 @@
 - [x] 9.3 [Renderer] 保留并复用现有 `WorkbenchGraph` / `useWorkbenchActivities` 作为下层当前阶段真实 run 轨迹，不改写节点事件语义
 - [x] 9.4 [Renderer] 确保新 run 只重置下层轨迹，上层跨 run 历史不清空；standalone run 继续显示既有单次视图
 - [x] 9.5 [Renderer] 调整折叠摘要为“工作流 + 当前阶段 + 下一步/阻塞”，并保证工具抽屉与三轴布局职责不回退
-- [ ] 9.6 [Renderer Test] 覆盖人物设计多 run、写作中资产澄清但主阶段不变、资产影响阻塞/待办、暂停/等待确认/失败、章节循环、issue 循环、折叠摘要及 standalone 兼容
+- [x] 9.6 [Renderer Test] 覆盖人物设计多 run、写作中资产澄清但主阶段不变、资产影响阻塞/待办、暂停/等待确认/失败、章节循环、issue 循环、折叠摘要及 standalone 兼容（已实现纯 Renderer 视图契约 smoke：将 `ExpertWorkbench` 内联展示投影（kind/阶段状态/actor/影响状态 label、stage 视图组装、折叠摘要、activity/observation 回退）抽为 `src/renderer/lib/workbench-view-contracts.ts` 并由组件真实复用（同时从 hooks 删除平行的 `workflowStageView`）；新增 runIds 投影、结构化 blockingReason 人话化（asset-impact/failed-run/quality-gate 等）与 paused 工作流折叠摘要「已暂停」文案，补齐 9.2 承诺的阻塞原因展示。orchestration smoke 新增 `smokeTask96WorkbenchViewContracts` 9 项断言：人物设计多 run 历史聚合不清空、写作中资产澄清主阶段不变且折叠摘要精确含「待审 N」、conflicting/needs-review/stale 人话化且 none 不展示、资产影响阻塞进折叠摘要、暂停/待确认/失败文案可区分、第二章循环实例与老书第二 issue 循环的阶段名/下一步/进度计数、standalone 回退活动摘要且待裁决优先。多 run/循环的 Main 侧行为已由 6.x/7.x 主路径 smoke 覆盖，本项只验快照→视图投影。typecheck、相关 ESLint、workflow/orchestration smoke 全绿。）
 
 ## 10. 人性化产品外壳与专注模式
 
