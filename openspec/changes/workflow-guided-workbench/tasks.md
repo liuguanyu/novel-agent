@@ -108,8 +108,8 @@
 ## 11. 迁移、回归与验收
 
 - [x] 11.1 [All] 更新相关文档与 smoke fixture，记录 `workflowId`/`runId` 语义、两套模板、人工门和 standalone 兼容路径（已完成：新增 `docs/workflow-guided-workbench.md`，记录 workflowId/stageId/runId/WorkflowRef 语义与并发幂等、issue 侧 run 关联与指纹 reopen、两套模板全阶段与循环转移、六类人工门（含 7.6 final-audit 确认门、资产候选/影响分流、hunk 裁决）、standalone 兼容路径及各 smoke fixture 分工表；并给 `workflow-smoke.ts`/`workflow-integration-smoke.ts` 补文件头语义注释。typecheck、ESLint、smoke:workflow 全绿。）
-- [ ] 11.2 [Core/Main] 运行 node TypeScript、ESLint、领域/SQLite/IPC/LangGraph 单元与集成测试
-- [ ] 11.3 [Renderer] 运行 web TypeScript、ESLint、组件测试和 Electron build
+- [x] 11.2 [Core/Main] 运行 node TypeScript、ESLint、领域/SQLite/IPC/LangGraph 单元与集成测试（已完成：`npm run typecheck:node`、`npm run lint`（全仓 eslint，无 error）、`smoke:persistence`、`smoke:extraction`、`smoke:workflow`（纯状态机 + SQLite 集成）、`smoke:orchestration`（含 LangGraph 运行时、IPC 契约与两条主路径集成）全部通过，orchestration 末尾「=== 完成：全部通过 ===」。本仓无独立单测框架，领域/集成覆盖由上述 smoke 套件承担。）
+- [x] 11.3 [Renderer] 运行 web TypeScript、ESLint、组件测试和 Electron build（已完成：`npm run typecheck:web`、全仓 `npm run lint` 无 error、`npm run build`（electron-vite：main/preload/renderer 三包构建成功，仅上游 vite/rolldown 弃用提示与 chunk 体积提示）。本仓无组件测试框架，组件层契约由 8.7/9.6/10.11 的纯 Renderer 契约 smoke（组件真实复用同源 helper）与 Renderer 静态隔离扫描承担。）
 - [x] 11.4 [Smoke] 扩展并运行 orchestration smoke，验证阶段允许专家、跨 run 聚合、continuation 路由与既有单次召唤
 - [ ] 11.5 [E2E] 完整验收新书主路径、任意阶段资产澄清链路和老书修订主路径，确认策划信息落入对应版本化资产、约束事实可追溯、所有正文写入均经过局部 diff + 逐 hunk，Renderer 无 DB/LLM/fs 访问
 - [x] 11.6 [OpenSpec] 运行 `npx openspec validate workflow-guided-workbench --strict`，并在所有实现与验证完成前保持 change 未归档
