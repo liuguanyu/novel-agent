@@ -1468,6 +1468,87 @@ function smokeTargetedVerificationRouting(): void {
   check('针对性复检：行为与未知问题回退 reviewer', targetedVerificationAgentFor('behavior-ooc') === 'reviewer' && targetedVerificationAgentFor('custom-editorial') === 'reviewer');
 }
 
+async function smokeTask75TargetedVerificationScope(): Promise<void> {
+  const dir = await mkdtemp(join(tmpdir(), 'na-task-75-'));
+  const opened = await openDatabase(join(dir, 'task-75.db'));
+  if (!opened.ok) {
+    check('task 7.5 SQLite 可用', false, opened.message);
+    await rm(dir, { recursive: true, force: true });
+    return;
+  }
+  const db = opened.db;
+  try {
+    const workflows = new WorkflowRepository(db);
+    const workflowIssues = new WorkflowIssueRepository(db);
+    const service = new WorkflowApplicationService(workflows, new CreativeAssetRepository(db), workflowIssues);
+    const workflow = await service.command({
+      type: 'start-workflow', workflowId: 'task-75-workflow', projectId: 'task-75-project',
+      kind: 'new-book-creation', objective: 'targeted verification scope',
+      requestId: 'task-75-start', operationId: 'task-75-start-op',
+    });
+    if (workflow === null || workflow.currentStageId === null) throw new Error('task 7.5 workflow missing');
+    const [issue] = await workflowIssues.upsertFromAudit(workflow.workflowId, 'task-75-audit', [{
+      type: 'timeline-break', severity: 'critical', description: '跨两章的因果顺序错误。',
+      anchors: [
+        { id: asNodeId('task-75-chapter-1'), kind: 'chapter' },
+        { id: asNodeId('task-75-chapter-2'), kind: 'chapter' },
+      ],
+      requiresHumanDecision: false,
+    }]);
+    if (issue === undefined) throw new Error('task 7.5 issue missing');
+    await workflowIssues.select(issue.issueId, 'author', 'task-75-fix');
+    await workflowIssues.linkCheckpointAndMarkVerifying(issue.issueId, 'task-75-checkpoint');
+    let selectedAgent = '';
+    let verificationPrompt = '';
+    const resolver = {
+      createAdapter(agentId: string): ModelAdapter {
+        selectedAgent = agentId;
+        return {
+          stream: async function* () { yield ''; },
+          complete: async (input: ModelCallInput) => {
+            verificationPrompt = input.messages.map((message) => message.content).join('\n');
+            return { text: '[]', finishReason: 'stop' as const };
+          },
+        };
+      },
+    } as unknown as ModelResolver;
+    const readChapterIds: string[] = [];
+    const runtime = new OrchestrationRuntime({
+      getModelResolver: () => resolver,
+      getCheckpointer: () => undefined,
+      getFactStore: () => undefined,
+      workflows,
+      workflowIssues,
+      manuscript: {
+        readChapterContent: async (nodeId: string) => {
+          readChapterIds.push(nodeId);
+          return { nodeId, content: nodeId.endsWith('1') ? '第一章原因已经修正。' : '第二章结果已经对齐。' };
+        },
+        writeBackRefactoredFragment: async () => ({ ok: false, reason: 'io-error' as const }),
+      },
+    });
+    const wc = new FakeWebContents();
+    const verificationRunId = 'task-75-verification' as RunId;
+    await runtime.runTargetedVerification(wc.asWebContents(), verificationRunId, {
+      workflowId: workflow.workflowId, stageId: workflow.currentStageId, issueId: issue.issueId,
+    });
+    const resolved = await workflowIssues.get(issue.issueId);
+    check('task 7.5：按问题类型选择 fact-checker，并只读取全部稳定影响章节范围',
+      selectedAgent === 'fact-checker'
+      && readChapterIds.join(',') === 'task-75-chapter-1,task-75-chapter-2'
+      && verificationPrompt.includes('chapter:task-75-chapter-1')
+      && verificationPrompt.includes('chapter:task-75-chapter-2'));
+    check('task 7.5：结构化空 finding 使 issue resolved 并记录全部章节与 verification run',
+      resolved?.status === 'resolved'
+      && resolved.verificationRunIds.includes(verificationRunId)
+      && resolved.resolutionHistory.at(-1)?.evidenceRefs.includes('chapter:task-75-chapter-1') === true
+      && resolved.resolutionHistory.at(-1)?.evidenceRefs.includes('chapter:task-75-chapter-2') === true);
+  } finally {
+    await db.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+}
+
 async function smokeWorkflowReviewerIssuePersistence(): Promise<void> {
   const dir = await mkdtemp(join(tmpdir(), 'na-workflow-review-'));
   const opened = await openDatabase(join(dir, 'workflow-review.db'));
@@ -4683,6 +4764,7 @@ async function main(): Promise<void> {
   console.log('=== orchestration-runtime 冲烟 ===');
   smokeReviewerJsonDefence();
   smokeTargetedVerificationRouting();
+  await smokeTask75TargetedVerificationScope();
   smokeVisualDesignContracts();
   smokeToolboxCatalogContracts();
   smokeTaskPlaybookFixtures();

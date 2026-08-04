@@ -2981,9 +2981,16 @@ export class OrchestrationRuntime {
       const payload = await repository.getPayload(workflowRef.issueId);
       if (issue === null || issue.status !== 'verifying') throw new Error('issue is not awaiting verification');
       if (payload === null) throw new Error('issue payload is unavailable; rerun audit before verification');
-      const chapterAnchor = payload.anchors.find((anchor) => anchor.kind === 'chapter');
-      if (chapterAnchor === undefined) throw new Error('targeted verification requires a chapter anchor');
-      const chapter = await (this.#deps.manuscript?.readChapterContent ?? readChapterContent)(chapterAnchor.id);
+      const chapterAnchors = payload.anchors.filter((anchor) => anchor.kind === 'chapter').filter(
+        (anchor, index, all) => all.findIndex((candidate) => candidate.id === anchor.id) === index,
+      );
+      const primaryChapterAnchor = chapterAnchors[0];
+      if (primaryChapterAnchor === undefined) throw new Error('targeted verification requires a chapter anchor');
+      const chapterReader = this.#deps.manuscript?.readChapterContent ?? readChapterContent;
+      const chapters = await Promise.all(chapterAnchors.map(async (anchor) => ({
+        anchor,
+        chapter: await chapterReader(anchor.id),
+      })));
       const resolver = this.#deps.getModelResolver();
       if (resolver === undefined) throw new Error('model resolver is unavailable');
       const verificationAgent = targetedVerificationAgentFor(payload.type);
@@ -2991,17 +2998,23 @@ export class OrchestrationRuntime {
       const result = await adapter.complete({
         messages: [
           { role: 'system', content: '你是针对性复检员。只判断给定问题在当前正文中是否仍存在。若已修复，严格输出 []；若仍存在或出现等价冲突，输出 ConsistencyIssue JSON 数组。不得报告无关的新问题。' },
-          { role: 'user', content: `【待复检问题】\n${JSON.stringify(payload)}\n\n【当前章节正文】\n${chapter.content}` },
+          {
+            role: 'user',
+            content: `【待复检问题】\n${JSON.stringify(payload)}\n\n【受影响章节范围】\n${chapters.map(({ anchor, chapter }) => `--- chapter:${String(anchor.id)} ---\n${chapter.content}`).join('\n\n')}`,
+          },
         ],
         options: { signal: run.controller.signal, maxTokens: 2048 },
       });
+      const chapterAnchorById = new Map(chapterAnchors.map((anchor) => [String(anchor.id), anchor]));
       const findings = parseReviewerIssuesWithDiagnostics(result.text, '').issues.map((finding) => ({
         ...finding,
-        anchors: finding.anchors.map((anchor) => anchor.kind === 'chapter' ? chapterAnchor : anchor),
+        anchors: finding.anchors.map((anchor) => anchor.kind === 'chapter'
+          ? (chapterAnchorById.get(String(anchor.id)) ?? primaryChapterAnchor)
+          : anchor),
       }));
       const passed = findings.length === 0;
       const evidenceRefs = passed
-        ? [`checkpoint:${issue.checkpointIds.at(-1) ?? 'unknown'}`, `chapter:${chapterAnchor.id as string}`]
+        ? [`checkpoint:${issue.checkpointIds.at(-1) ?? 'unknown'}`, ...chapterAnchors.map((anchor) => `chapter:${String(anchor.id)}`)]
         : findings.flatMap((finding) => finding.anchors.map((anchor) => `${anchor.kind}:${anchor.id as string}`));
       const updated = await repository.recordVerificationAndTransition(
         workflowRef.issueId, runId, passed, !passed, evidenceRefs,
