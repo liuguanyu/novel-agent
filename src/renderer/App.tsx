@@ -56,7 +56,11 @@ import { useAssetReview } from './hooks/useAssetReview.js';
 import { useTaskActivityStream } from './hooks/useTaskActivityStream.js';
 import { useTaskUiEffects } from './hooks/useTaskUiEffects.js';
 import { buildIssueRefactorIntent, resolveIssueChapterTarget } from './lib/workflow-ui-contracts.js';
-import { resolveViewModeSurfaces, type AppViewMode } from './lib/workbench-view-contracts.js';
+import {
+  preferredNavContext,
+  resolveViewModeSurfaces,
+  type AppViewMode,
+} from './lib/workbench-view-contracts.js';
 
 function findChapterPath(
   nodes: ReadonlyArray<ChapterTreeNodeDto>,
@@ -146,6 +150,17 @@ export function App(): JSX.Element {
   const [paletteOpen, setPaletteOpen] = useState(false);
   // 左栏上下文切换（章节/问题/人物/故事线/产物）；人物与故事线按需拉取事实库投影。
   const [navContext, setNavContext] = useState<NavContextId>('chapters');
+  const currentWorkflowStage = workflowState.snapshot?.stages.find(
+    (stage) => stage['stageId'] === workflowState.snapshot?.currentStageId,
+  );
+  const currentTemplateStageId = typeof currentWorkflowStage?.['templateStageId'] === 'string'
+    ? currentWorkflowStage['templateStageId']
+    : undefined;
+  // 定位原文必须先选问题：首次进入该阶段时主动切到问题 tab，后续仍允许作者自由切换。
+  useEffect(() => {
+    const preferred = preferredNavContext(currentTemplateStageId);
+    if (preferred !== undefined) setNavContext(preferred);
+  }, [currentTemplateStageId, workflowState.snapshot?.currentStageId]);
   const navStoryBible = useStoryBible(navContext === 'characters' || navContext === 'storylines');
 
   // 当前选中章节路径（读书/对话模式的上下文面包屑）。
@@ -748,6 +763,7 @@ export function App(): JSX.Element {
           }}
           onOpenFactSheet={() => setFactSheetOpen(true)}
           onLocateSource={runLocateSource}
+          onSelectLocateSourceIssue={() => setNavContext('issues')}
           canLocateSource={locateSourceIssueId !== undefined}
         />
 

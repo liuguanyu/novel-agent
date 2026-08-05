@@ -22,6 +22,7 @@ import { Button } from '@/components/ui/button';
 import { getBuiltinWorkflowTemplate } from '../../core/workflow/templates.js';
 import type { WorkflowKind } from '../../core/workflow/types.js';
 import type { ChapterTreeDto, WorkflowSnapshotDto } from '../../shared/ipc/index.js';
+import { locateSourceActionView } from '../lib/workbench-view-contracts.js';
 
 interface WorkflowGraphProps {
   readonly projectId: string | undefined;
@@ -35,6 +36,7 @@ interface WorkflowGraphProps {
   /** 打开事实底稿面板（事实相关阶段的查看入口，task 10.5）。 */
   readonly onOpenFactSheet?: () => void;
   readonly onLocateSource?: () => void;
+  readonly onSelectLocateSourceIssue?: () => void;
   readonly canLocateSource?: boolean;
   readonly taskBusy: boolean;
 }
@@ -131,6 +133,7 @@ export function WorkflowGraph({
   onRunGlobalAudit,
   onOpenFactSheet,
   onLocateSource,
+  onSelectLocateSourceIssue,
   canLocateSource = false,
   taskBusy,
 }: WorkflowGraphProps): JSX.Element {
@@ -267,6 +270,7 @@ export function WorkflowGraph({
     : workflow.status === 'cancelled' ? '已取消'
     : '失败';
   const blocking = current === undefined ? undefined : blockingLabel(current.blockingReason);
+  const locateAction = locateSourceActionView(canLocateSource);
 
   return (
     <section className="border-b border-border bg-card/60 px-4 py-2" aria-label="书目整理进度">
@@ -315,9 +319,14 @@ export function WorkflowGraph({
         </div>
         <div className="flex shrink-0 flex-wrap items-center justify-end gap-1">
           {workflow.status === 'active' && current?.templateStageId === 'locate-source' && current.status === 'ready' && onLocateSource !== undefined && (
-              <Button size="sm" disabled={actionBusy || !canLocateSource} onClick={onLocateSource} title={canLocateSource ? '读取诊断证据并定位正文' : '请先在诊断结果中选择一个问题'}>
+              <Button
+                size="sm"
+                disabled={actionBusy}
+                onClick={locateAction.intent === 'locate' ? onLocateSource : onSelectLocateSourceIssue}
+                title={locateAction.title}
+              >
                 <Play className="size-3.5" />
-                {canLocateSource ? '定位原文' : '请先选择诊断问题'}
+                {locateAction.label}
               </Button>
             )}
           {workflow.status === 'active' && current?.status === 'ready' && current.templateStageId !== 'fact-backfill' && current.templateStageId !== 'locate-source' &&

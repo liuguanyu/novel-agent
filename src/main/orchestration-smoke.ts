@@ -88,8 +88,11 @@ import {
   actorLabel,
   buildWorkflowCollapsedSummary,
   buildWorkflowView,
+  currentTaskStatus,
   impactStatusLabel,
+  locateSourceActionView,
   observationSummary,
+  preferredNavContext,
   readingBackgroundBadge,
   resolveViewModeSurfaces,
   stageStatusLabel,
@@ -5081,6 +5084,23 @@ function smokeTask96WorkbenchViewContracts(): void {
  * 10.11 冲烟（可自动化部分）：三模式互斥可见面矩阵与读书模式后台徽标投影，
  * 与 App/ReadingMode 同源复用 workbench-view-contracts。窗口宽窄/hover/focus 等纯交互项见 tasks.md 手工清单。
  */
+function smokeLocateSourceGuidanceContracts(): void {
+  check('UI 回补：ready 阶段不会被旧 running 任务事件误标为进行中',
+    currentTaskStatus('ready', 'running') === 'ready'
+    && currentTaskStatus('awaiting-confirmation', 'running') === 'awaiting-confirmation'
+    && currentTaskStatus('running', 'paused') === 'paused');
+  check('UI 回补：进入 locate-source 默认引导至问题 tab',
+    preferredNavContext('locate-source') === 'issues'
+    && preferredNavContext('generate-rewrite') === undefined);
+  const withoutIssue = locateSourceActionView(false);
+  const withIssue = locateSourceActionView(true);
+  check('UI 回补：未选 issue 时按钮是可点击引导，选中后切换为定位动作',
+    withoutIssue.intent === 'select-issue'
+    && withoutIssue.label === '选择问题后定位'
+    && withIssue.intent === 'locate'
+    && withIssue.label === '定位原文');
+}
+
 function smokeTask1011ViewModeContracts(): void {
   const modes: ReadonlyArray<AppViewMode> = ['workbench', 'reading', 'conversation'];
   const all = modes.map((mode) => resolveViewModeSurfaces(mode));
@@ -5392,6 +5412,7 @@ async function main(): Promise<void> {
   smokeTask87RendererContracts();
   smokeTask96WorkbenchViewContracts();
   smokeTask1011ViewModeContracts();
+  smokeLocateSourceGuidanceContracts();
   await smokeRendererIsolation();
   await smokeNewBookWritingPlaybooks();
   await smokeNewBookMainPathEndToEnd();

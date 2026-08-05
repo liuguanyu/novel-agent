@@ -50,6 +50,30 @@ export function stageStatusLabel(status: string | undefined): string {
   }
 }
 
+/** 当前任务卡以 workflow stage 为权威；旧 task 事件只在阶段本身 running 时细化暂停/取消等运行态。 */
+export function currentTaskStatus(stageStatus: string | undefined, latestTaskStatus: string | undefined): string {
+  if (stageStatus !== 'running') return stageStatus ?? 'ready';
+  return latestTaskStatus ?? stageStatus;
+}
+
+/** 进入定位原文阶段时，左栏应主动展示问题，而不是继续停留在章节。 */
+export function preferredNavContext(templateStageId: string | undefined): 'chapters' | 'issues' | undefined {
+  return templateStageId === 'locate-source' ? 'issues' : undefined;
+}
+
+export interface LocateSourceActionView {
+  readonly label: string;
+  readonly title: string;
+  readonly intent: 'locate' | 'select-issue';
+}
+
+/** 未选问题时按钮仍是可操作引导，点击切到问题列表；选中后才真正发起定位。 */
+export function locateSourceActionView(hasSelectedIssue: boolean): LocateSourceActionView {
+  return hasSelectedIssue
+    ? { label: '定位原文', title: '读取诊断证据并定位正文', intent: 'locate' }
+    : { label: '选择问题后定位', title: '打开左侧问题列表，选择要定位的诊断问题', intent: 'select-issue' };
+}
+
 export function actorLabel(actor: string | undefined): string {
   switch (actor) {
     case 'author': return '作者';

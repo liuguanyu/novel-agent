@@ -2,6 +2,7 @@ import { CircleAlert, CircleX, Loader2, Pause, Play, Route, Target, X } from 'lu
 import { Button } from '@/components/ui/button';
 import type { BackendTaskActivityEvent, ConsistencyIssueDto, WorkflowSnapshotDto } from '../../shared/ipc/index.js';
 import { WORKFLOW_TASK_GOAL } from './WorkflowGraph.js';
+import { currentTaskStatus } from '../lib/workbench-view-contracts.js';
 
 interface CurrentTaskCardProps {
   readonly workflow: WorkflowSnapshotDto | null;
@@ -121,7 +122,10 @@ export function CurrentTaskCard({ workflow, events, activeIssue, onOpenTaskCente
       break;
     }
   }
-  const status = latest?.status ?? String(stage['status'] ?? 'ready');
+  const status = currentTaskStatus(
+    String(stage['status'] ?? 'ready'),
+    latest?.status,
+  );
   const running = status === 'running';
   const waiting = status === 'awaiting-author';
   const paused = status === 'paused';
