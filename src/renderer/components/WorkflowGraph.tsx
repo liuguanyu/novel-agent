@@ -4,6 +4,8 @@
  * 取代旧的纵向工作流任务大卡：
  * - 未启动：一行启动表单（书目类型 + 目标 + 启动按钮；重建要求在「设定目标」弹层继续维护）
  * - 已启动：横向阶段 Graph（作者语言的阶段标签 + 状态染色）+ 当前任务一句话 + 对应动作按钮
+ * - 当前阶段指引随流程内联更新（你要做什么/完成标准/对原文影响/循环规则），不走静态弹窗；
+ *   事实阶段芯片直接打开对应面板，其余阶段不附加无信息量的点击。
  * 阶段状态来自 workflow snapshot；内部 stage id/actor/version/impact 不进入主视图。
  */
 
@@ -19,18 +21,10 @@ import {
   Workflow,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from '@/components/ui/dialog';
 import { getBuiltinWorkflowTemplate } from '../../core/workflow/templates.js';
 import type { WorkflowKind } from '../../core/workflow/types.js';
 import type { ChapterTreeDto, WorkflowSnapshotDto } from '../../shared/ipc/index.js';
-import { factStageDestination, legacyStageGuide, locateSourceActionView, type LegacyStageSurface } from '../lib/workbench-view-contracts.js';
+import { factStageDestination, legacyStageGuide, locateSourceActionView } from '../lib/workbench-view-contracts.js';
 
 interface WorkflowGraphProps {
   readonly projectId: string | undefined;
@@ -45,10 +39,6 @@ interface WorkflowGraphProps {
   readonly onOpenFactSheet?: () => void;
   /** 打开已沉淀的全书事实库。 */
   readonly onOpenStoryBible?: () => void;
-  readonly onOpenGoal?: () => void;
-  readonly onOpenDashboard?: () => void;
-  readonly onOpenIssues?: () => void;
-  readonly onOpenRefactor?: () => void;
   readonly onLocateSource?: () => void;
   readonly onSelectLocateSourceIssue?: () => void;
   readonly canLocateSource?: boolean;
@@ -146,10 +136,6 @@ export function WorkflowGraph({
   onRunGlobalAudit,
   onOpenFactSheet,
   onOpenStoryBible,
-  onOpenGoal,
-  onOpenDashboard,
-  onOpenIssues,
-  onOpenRefactor,
   onLocateSource,
   onSelectLocateSourceIssue,
   canLocateSource = false,
@@ -162,7 +148,6 @@ export function WorkflowGraph({
   const [busy, setBusy] = useState(false);
   const [commandFailure, setCommandFailure] = useState<string>();
   const [expanded, setExpanded] = useState(false);
-  const [selectedStageId, setSelectedStageId] = useState<string>();
   const rawStages = useMemo(() => workflow?.stages.map(stageSnapshot) ?? [], [workflow]);
   const template = workflow === null
     ? undefined
@@ -290,23 +275,7 @@ export function WorkflowGraph({
     : '失败';
   const blocking = current === undefined ? undefined : blockingLabel(current.blockingReason);
   const locateAction = locateSourceActionView(canLocateSource);
-  const selectedStage = stages.find((stage) => stage.stageId === selectedStageId);
-  const selectedDefinition = selectedStage === undefined ? undefined : template?.stages.find((stage) => stage.id === selectedStage.templateStageId);
-  const selectedGuide = selectedStage === undefined ? undefined : legacyStageGuide(selectedStage.templateStageId);
-  const openSurface = (surface: LegacyStageSurface, stageStatus: string): void => {
-    setSelectedStageId(undefined);
-    switch (surface) {
-      case 'goal': onOpenGoal?.(); return;
-      case 'story-bible':
-        if (factStageDestination(stageStatus) === 'fact-task') onOpenFactSheet?.();
-        else onOpenStoryBible?.();
-        return;
-      case 'fact-task': onOpenFactSheet?.(); return;
-      case 'dashboard': onOpenDashboard?.(); return;
-      case 'issues': onOpenIssues?.(); return;
-      case 'refactor': onOpenRefactor?.(); return;
-    }
-  };
+  const currentGuide = current === undefined || workflow.kind !== 'legacy-book-revision' ? undefined : legacyStageGuide(current.templateStageId);
 
   return (
     <section className="border-b border-border bg-card/60 px-4 py-2" aria-label="书目整理进度">
@@ -324,15 +293,17 @@ export function WorkflowGraph({
           const isCurrent = stage.stageId === workflow.currentStageId;
           const label = template?.stages.find((item) => item.id === stage.templateStageId)?.label ?? stage.templateStageId;
           const done = stage.status === 'completed' || stage.status === 'skipped';
-          const guide = workflow.kind === 'legacy-book-revision' ? legacyStageGuide(stage.templateStageId) : undefined;
-          const clickable = guide !== undefined;
+          const factStage = stage.templateStageId === 'fact-backfill' || stage.templateStageId === 'fact-extraction';
+          const destination = factStageDestination(stage.status);
+          const openFacts = destination === 'story-bible' ? onOpenStoryBible : onOpenFactSheet;
+          const clickable = factStage && openFacts !== undefined;
           return (
             <button
               key={stage.stageId}
               type="button"
               disabled={!clickable}
-              onClick={clickable ? () => setSelectedStageId(stage.stageId) : undefined}
-              title={clickable ? `${index + 1}. ${label}（点击查看阶段规则）` : `${index + 1}. ${label} · ${stageStateLabel(stage.status, isCurrent)}`}
+              onClick={clickable ? openFacts : undefined}
+              title={clickable ? `${index + 1}. ${label}（点击查看${destination === 'story-bible' ? '全书事实库' : '事实核对任务'}）` : `${index + 1}. ${label} · ${stageStateLabel(stage.status, isCurrent)}`}
               className={`flex min-w-0 items-center gap-2 rounded-md border px-2 py-1.5 text-left text-xs transition-colors ${stageTone(stage.status, isCurrent)} ${clickable ? 'cursor-pointer hover:border-primary/60' : 'cursor-default'}`}
               aria-current={isCurrent ? 'step' : undefined}
               role="listitem"
@@ -433,31 +404,21 @@ export function WorkflowGraph({
         </p>
       )}
 
-      <Dialog open={selectedStage !== undefined} onOpenChange={(open) => { if (!open) setSelectedStageId(undefined); }}>
-        {selectedStage !== undefined && selectedGuide !== undefined && (
-          <DialogContent className="sm:max-w-2xl">
-            <DialogHeader>
-              <DialogTitle>{selectedDefinition?.label ?? selectedStage.templateStageId}</DialogTitle>
-              <DialogDescription>
-                当前状态：{stageStateLabel(selectedStage.status, selectedStage.stageId === workflow.currentStageId)} · 执行者：{selectedDefinition?.actor === 'author' ? '作者' : selectedDefinition?.actor === 'expert' ? '专家' : selectedDefinition?.actor === 'quality-gate' ? '质量门' : '系统'}
-              </DialogDescription>
-            </DialogHeader>
-            <div className="grid gap-3 text-sm sm:grid-cols-2">
-              <div className="rounded-md border p-3"><div className="mb-1 font-medium">开始标准</div><p className="text-muted-foreground">{selectedGuide.start}</p></div>
-              <div className="rounded-md border p-3"><div className="mb-1 font-medium">完成标准</div><p className="text-muted-foreground">{selectedGuide.completion}</p></div>
-              <div className="rounded-md border p-3"><div className="mb-1 font-medium">阶段产物</div><p className="text-muted-foreground">{selectedGuide.artifact}</p></div>
-              <div className="rounded-md border p-3"><div className="mb-1 font-medium">人工如何介入</div><p className="text-muted-foreground">{selectedGuide.humanRole}</p></div>
-              <div className="rounded-md border p-3"><div className="mb-1 font-medium">对事实库的影响</div><p className="text-muted-foreground">{selectedGuide.factImpact}</p></div>
-              <div className="rounded-md border p-3"><div className="mb-1 font-medium">对原文的影响</div><p className="text-muted-foreground">{selectedGuide.manuscriptImpact}</p></div>
-            </div>
-            {selectedGuide.loop !== undefined && <div className="rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm text-amber-700 dark:text-amber-400"><span className="font-medium">循环规则：</span>{selectedGuide.loop}</div>}
-            <DialogFooter>
-              <Button type="button" variant="outline" onClick={() => setSelectedStageId(undefined)}>关闭</Button>
-              <Button type="button" onClick={() => openSurface(selectedGuide.surface, selectedStage.status)}>{selectedGuide.surfaceLabel}</Button>
-            </DialogFooter>
-          </DialogContent>
-        )}
-      </Dialog>
+      {currentGuide !== undefined && (
+        <div className="mt-1 rounded-md border border-border bg-background/60 px-3 py-1.5 text-xs leading-5">
+          <span className="font-medium text-foreground">你要做什么：</span><span className="text-muted-foreground">{currentGuide.humanRole}</span>
+          <span className="mx-2 text-muted-foreground/50">|</span>
+          <span className="font-medium text-foreground">完成标准：</span><span className="text-muted-foreground">{currentGuide.completion}</span>
+          <span className="mx-2 text-muted-foreground/50">|</span>
+          <span className="font-medium text-foreground">对原文：</span><span className="text-muted-foreground">{currentGuide.manuscriptImpact}</span>
+          {currentGuide.loop !== undefined && (
+            <>
+              <span className="mx-2 text-muted-foreground/50">|</span>
+              <span className="font-medium text-amber-600">循环：</span><span className="text-amber-600/90">{currentGuide.loop}</span>
+            </>
+          )}
+        </div>
+      )}
     </section>
   );
 }

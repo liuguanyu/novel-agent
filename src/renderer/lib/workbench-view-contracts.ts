@@ -79,8 +79,6 @@ export function factStageDestination(status: string): 'story-bible' | 'fact-task
   return status === 'completed' || status === 'skipped' ? 'story-bible' : 'fact-task';
 }
 
-export type LegacyStageSurface = 'goal' | 'story-bible' | 'fact-task' | 'dashboard' | 'issues' | 'refactor';
-
 export interface LegacyStageGuide {
   readonly start: string;
   readonly completion: string;
@@ -88,8 +86,6 @@ export interface LegacyStageGuide {
   readonly humanRole: string;
   readonly factImpact: string;
   readonly manuscriptImpact: string;
-  readonly surface: LegacyStageSurface;
-  readonly surfaceLabel: string;
   readonly loop?: string;
 }
 
@@ -101,7 +97,6 @@ const LEGACY_STAGE_GUIDES: Readonly<Record<string, LegacyStageGuide>> = {
     humanRole: '补充或修改整理目标，确认后进入事实回填。',
     factImpact: '不修改事实库。',
     manuscriptImpact: '不修改原文。',
-    surface: 'goal', surfaceLabel: '查看整理目标',
   },
   'fact-backfill': {
     start: '目标已确认，正文存在可读取章节。',
@@ -110,7 +105,6 @@ const LEGACY_STAGE_GUIDES: Readonly<Record<string, LegacyStageGuide>> = {
     humanRole: '仅在事实冲突或低置信内容出现时介入确认。',
     factImpact: '新增或更新事实库；后续诊断以新版本为基线。',
     manuscriptImpact: '不修改原文。',
-    surface: 'story-bible', surfaceLabel: '查看事实库/核对任务',
   },
   'initial-audit': {
     start: '全书事实底稿已有可用版本。',
@@ -119,7 +113,6 @@ const LEGACY_STAGE_GUIDES: Readonly<Record<string, LegacyStageGuide>> = {
     humanRole: '查看诊断依据；本步不要求逐条修改。',
     factImpact: '只读取事实库。',
     manuscriptImpact: '不修改原文。',
-    surface: 'dashboard', surfaceLabel: '查看诊断报告',
   },
   'issue-triage': {
     start: '诊断结束，并存在需要分类或排序的问题。',
@@ -128,7 +121,6 @@ const LEGACY_STAGE_GUIDES: Readonly<Record<string, LegacyStageGuide>> = {
     humanRole: '筛选、排序、忽略或选择一个问题进入修复。',
     factImpact: '不直接修改事实库。',
     manuscriptImpact: '不修改原文。',
-    surface: 'issues', surfaceLabel: '打开待处理问题',
     loop: '每处理完一个问题可回到这里选择下一项；最终复检发现新问题也会回到这里。',
   },
   'locate-source': {
@@ -138,7 +130,6 @@ const LEGACY_STAGE_GUIDES: Readonly<Record<string, LegacyStageGuide>> = {
     humanRole: '多候选时明确选择位置；无锚点时补充证据。',
     factImpact: '只读取诊断与事实证据。',
     manuscriptImpact: '只定位和高亮，不修改原文。',
-    surface: 'issues', surfaceLabel: '查看当前问题与定位',
   },
   'generate-rewrite': {
     start: '当前问题已有唯一、稳定的原文片段。',
@@ -147,7 +138,6 @@ const LEGACY_STAGE_GUIDES: Readonly<Record<string, LegacyStageGuide>> = {
     humanRole: '可调整改写要求或编辑候选文本，再确认。',
     factImpact: '只读取事实约束。',
     manuscriptImpact: '不修改原文。',
-    surface: 'refactor', surfaceLabel: '打开局部改写',
     loop: '针对性复检失败时回到本步重新生成方案。',
   },
   'hunk-review': {
@@ -157,7 +147,6 @@ const LEGACY_STAGE_GUIDES: Readonly<Record<string, LegacyStageGuide>> = {
     humanRole: '逐处接受或拒绝；未接受内容不会进入正文。',
     factImpact: '不修改事实库。',
     manuscriptImpact: '审阅期间不落盘。',
-    surface: 'refactor', surfaceLabel: '逐处审阅改动',
   },
   'apply-checkpoint': {
     start: '所有 hunk 已裁决，原文锚点仍有效且正文版本未冲突。',
@@ -166,7 +155,6 @@ const LEGACY_STAGE_GUIDES: Readonly<Record<string, LegacyStageGuide>> = {
     humanRole: '执行最终落盘确认；版本或锚点变化时重新审阅。',
     factImpact: '事实库不会自动随正文改写，后续复检负责发现不一致。',
     manuscriptImpact: '这是 11 步中首次真正修改原文的步骤。',
-    surface: 'refactor', surfaceLabel: '查看落盘与检查点',
   },
   'targeted-verification': {
     start: '正文已落盘并关联 checkpoint。',
@@ -175,7 +163,6 @@ const LEGACY_STAGE_GUIDES: Readonly<Record<string, LegacyStageGuide>> = {
     humanRole: '查看复检证据；失败时决定如何调整方案。',
     factImpact: '读取事实基线；不直接维护事实库。',
     manuscriptImpact: '不再写正文，只校验刚才的改动。',
-    surface: 'dashboard', surfaceLabel: '查看复检结果',
     loop: '复检失败会回到第 6 步，而不是继续关闭问题。',
   },
   'close-issue': {
@@ -185,7 +172,6 @@ const LEGACY_STAGE_GUIDES: Readonly<Record<string, LegacyStageGuide>> = {
     humanRole: '通常无需编辑；仍有待办时回到问题队列。',
     factImpact: '不修改事实库。',
     manuscriptImpact: '不修改原文。',
-    surface: 'issues', surfaceLabel: '查看问题处理结果',
     loop: '仍有问题时回到第 4 步，处理下一项。',
   },
   'final-audit': {
@@ -195,7 +181,6 @@ const LEGACY_STAGE_GUIDES: Readonly<Record<string, LegacyStageGuide>> = {
     humanRole: '确认交付结果，或选择继续处理新发现的问题。',
     factImpact: '只读取当前事实基线；若正文已改变，可能提示事实需重新抽取。',
     manuscriptImpact: '不修改原文。',
-    surface: 'dashboard', surfaceLabel: '查看最终复检',
     loop: '发现新问题会回到第 4 步；通过并确认后工作流才结束。',
   },
 };
