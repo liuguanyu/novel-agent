@@ -2611,6 +2611,109 @@ async function smokeTask68AssetClarificationImpacts(): Promise<void> {
 }
 
 /**
+ * task 11.5：任意阶段资产澄清链路的规划阶段整合覆盖。
+ * 6.8 已覆盖 draft-writing（正文阶段）的完整分流；本用例在 concept（规划阶段，未 start-stage）
+ * 召唤跨阶段 worldbuilding 专家，验证同一澄清链路在非正文阶段同样成立：
+ * 唯一候选自动锁定 → pending candidate（主阶段/阶段状态/stage-run 零副作用）→ 作者确认落成版本化资产。
+ */
+async function smokeTask115PlanningStageAssetClarification(): Promise<void> {
+  const dir = await mkdtemp(join(tmpdir(), 'na-task-115-'));
+  const opened = await openDatabase(join(dir, 'task-115.db'));
+  if (!opened.ok) {
+    check('task 11.5 SQLite 可用', false, opened.message);
+    await rm(dir, { recursive: true, force: true });
+    return;
+  }
+  const db = opened.db;
+  try {
+    const workflows = new WorkflowRepository(db);
+    const workflowIssues = new WorkflowIssueRepository(db);
+    const creativeAssets = new CreativeAssetRepository(db);
+    const stageRunEvidence = new SqliteStageRunEvidenceRecorder(db);
+    const service = new WorkflowApplicationService(workflows, creativeAssets, workflowIssues);
+    const workflowId = 'task-115-workflow';
+    const projectId = 'task-115-project';
+    await service.command({
+      type: 'start-workflow', workflowId, projectId, kind: 'new-book-creation',
+      objective: 'task 11.5 planning-stage asset clarification',
+      requestId: 'task-115-start', operationId: 'task-115-start-op',
+    });
+    const workflow = await workflows.get(workflowId);
+    if (workflow === null || workflow.currentStageId === null) throw new Error('task 11.5 workflow missing');
+    const conceptStage = workflow.stages.find((stage) => stage.stageId === workflow.currentStageId);
+    if (conceptStage?.templateStageId !== 'concept') throw new Error('task 11.5 expected concept stage');
+
+    // 唯一 worldbuilding 资产：召唤后应自动锁定为目标，无需消歧。
+    const assetId = 'asset:task-115:worldbuilding';
+    await creativeAssets.create({
+      assetId, projectId, kind: 'worldbuilding', scope: { kind: 'project', projectId },
+      content: { canonicalName: '雾城', attributes: { climate: '常年阴雨' } },
+      status: 'confirmed', provenance: { runId: 'task-115-seed' },
+    });
+
+    const clarificationDraft = JSON.stringify({
+      canonicalName: '雾城', attributes: { climate: '雨季分明，旱季多雾' },
+    });
+    const runtime = new OrchestrationRuntime({
+      getModelResolver: () => new FakeModelResolver(clarificationDraft, '[]').asResolver(),
+      getCheckpointer: () => new SqliteCheckpointer(db),
+      getFactStore: () => new SqliteFactStore(db),
+      workflows, workflowIssues, creativeAssets, stageRunEvidence,
+    });
+    const clarifyRunId = 'task-115-clarify' as RunId;
+    const wc = new FakeWebContents();
+    await runtime.summon(wc.asWebContents(), {
+      runId: clarifyRunId, mode: 'mutate', agent: 'worldbuilding',
+      instruction: '雾城的气候应当是雨季分明、旱季多雾',
+      workflowRef: { workflowId, stageId: conceptStage.stageId },
+    });
+    const rejected = wc.stream.find((item) => item.type === 'stream-error');
+    const proposed = wc.control.find((event) => event.type === 'creative-asset-change-proposed');
+    if (proposed?.type !== 'creative-asset-change-proposed') {
+      check('task 11.5：规划阶段跨阶段澄清产出 candidate', false, JSON.stringify([rejected, ...wc.control]));
+      return;
+    }
+    const candidate = await creativeAssets.getCandidate(proposed.candidate.candidateId);
+    const afterClarify = await workflows.get(workflowId);
+    const clarifyStageRun = await db.get('SELECT 1 FROM workflow_stage_runs WHERE run_id=?', clarifyRunId);
+    check('task 11.5：concept 阶段澄清自动锁定唯一 worldbuilding 资产并形成 pending candidate',
+      rejected === undefined
+      && candidate?.assetId === assetId
+      && candidate.status === 'pending'
+      && candidate.baseVersion === 1);
+    check('task 11.5：规划阶段澄清零阶段副作用（主阶段/状态不变、不写 stage-run、资产未动）',
+      afterClarify?.currentStageId === conceptStage.stageId
+      && afterClarify.stages.find((stage) => stage.stageId === conceptStage.stageId)?.status === conceptStage.status
+      && clarifyStageRun === null
+      && (await creativeAssets.get(assetId))?.version === 1);
+
+    const beforeConfirm = await workflows.get(workflowId);
+    if (beforeConfirm === null) throw new Error('task 11.5 workflow lost before confirm');
+    await service.command({
+      type: 'workflow-confirm-asset-change', workflowId, stageId: conceptStage.stageId,
+      expectedVersion: beforeConfirm.version, candidateId: proposed.candidate.candidateId,
+      runId: 'task-115-confirm', requestId: 'task-115-confirm', operationId: 'task-115-confirm-op',
+    });
+    const confirmed = await creativeAssets.get(assetId);
+    const versionRows = await db.all('SELECT version FROM creative_asset_versions WHERE asset_id=? ORDER BY version', assetId);
+    const confirmedContent = confirmed?.content as {
+      canonicalName?: string;
+      attributes?: { climate?: string };
+      draft?: string;
+    } | undefined;
+    check('task 11.5：作者确认后规划阶段澄清落成版本化资产（v1 保留、v2 生效）',
+      confirmed?.version === 2
+      && confirmedContent?.canonicalName === '雾城'
+      && confirmedContent.attributes?.climate === '雨季分明，旱季多雾'
+      && confirmedContent.draft === clarificationDraft
+      && versionRows.map((row) => Number(row['version'])).join(',') === '1,2');
+  } finally {
+    await db.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+}
+
+/**
  * 视觉设计契约冒烟 (I8 visual-design)：验证 core 侧可测契约——
  * 每个 agent 目录条目都有图标名；主题解析真值表正确；三态循环遍历全部偏好。
  */
@@ -5276,6 +5379,7 @@ async function main(): Promise<void> {
   await smokeWorkflowReviewerIssuePersistence();
   await smokeTask67GuidedMainPaths();
   await smokeTask68AssetClarificationImpacts();
+  await smokeTask115PlanningStageAssetClarification();
   await smokeWorkflowContinuationResume();
   await smokeLocateSourceTask();
   await smokeLocateSourceEndToEnd();
