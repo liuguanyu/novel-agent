@@ -108,7 +108,7 @@ const LEGACY_STAGE_GUIDES: Readonly<Record<string, LegacyStageGuide>> = {
   },
   'initial-audit': {
     start: '全书事实底稿已有可用版本。',
-    completion: '全书诊断运行结束，问题已形成结构化记录；无问题则通过质量门。',
+    completion: '全书诊断运行结束，问题已形成结构化记录；无问题则直接进入最终复检。',
     artifact: '健康分、诊断报告、带证据和章节锚点的问题列表。',
     humanRole: '查看诊断依据；本步不要求逐条修改。',
     factImpact: '只读取事实库。',
@@ -142,28 +142,28 @@ const LEGACY_STAGE_GUIDES: Readonly<Record<string, LegacyStageGuide>> = {
   },
   'hunk-review': {
     start: '原片段与改写候选已计算出最小差异。',
-    completion: '每个 hunk 都被接受或拒绝，作者确认裁决。',
-    artifact: '逐 hunk 决策与最终待拼回文本。',
+    completion: '每一处改动都被接受或拒绝，作者确认审阅结果。',
+    artifact: '逐处审阅结果与最终待写入文本。',
     humanRole: '逐处接受或拒绝；未接受内容不会进入正文。',
     factImpact: '不修改事实库。',
     manuscriptImpact: '审阅期间不落盘。',
   },
   'apply-checkpoint': {
-    start: '所有 hunk 已裁决，原文锚点仍有效且正文版本未冲突。',
-    completion: '仅接受的 hunk 精确拼回正文，并创建可回滚 checkpoint。',
-    artifact: '新正文版本和 checkpoint。',
+    start: '所有改动均已审阅，原文位置仍有效且正文版本未冲突。',
+    completion: '仅将作者接受的改动精确写入正文，并创建可回滚版本。',
+    artifact: '新正文与可回滚版本。',
     humanRole: '执行最终落盘确认；版本或锚点变化时重新审阅。',
     factImpact: '事实库不会自动随正文改写，后续复检负责发现不一致。',
-    manuscriptImpact: '这是 11 步中首次真正修改原文的步骤。',
+    manuscriptImpact: '这是修复循环中唯一真正修改原文的动作。',
   },
   'targeted-verification': {
-    start: '正文已落盘并关联 checkpoint。',
-    completion: '质量门确认当前问题已修复；失败则返回生成改写方案。',
+    start: '正文已写入并留有可回滚版本。',
+    completion: '复检确认当前问题已修复；失败则返回重新改写。',
     artifact: '针对性复检报告和问题生命周期更新。',
     humanRole: '查看复检证据；失败时决定如何调整方案。',
     factImpact: '读取事实基线；不直接维护事实库。',
     manuscriptImpact: '不再写正文，只校验刚才的改动。',
-    loop: '复检失败会回到第 6 步，而不是继续关闭问题。',
+    loop: '复检失败会返回“改写”，不会关闭当前问题。',
   },
   'close-issue': {
     start: '针对性复检通过。',
@@ -172,16 +172,16 @@ const LEGACY_STAGE_GUIDES: Readonly<Record<string, LegacyStageGuide>> = {
     humanRole: '通常无需编辑；仍有待办时回到问题队列。',
     factImpact: '不修改事实库。',
     manuscriptImpact: '不修改原文。',
-    loop: '仍有问题时回到第 4 步，处理下一项。',
+    loop: '仍有问题时回到“选问题”，继续处理下一项。',
   },
   'final-audit': {
-    start: '计划处理的问题均已关闭，正文处于最新 checkpoint。',
+    start: '计划处理的问题均已关闭，正文处于最新可回滚版本。',
     completion: '全书复检通过并由作者确认；发现问题则回到问题队列。',
     artifact: '最终健康分、复检报告和新增问题（如有）。',
     humanRole: '确认交付结果，或选择继续处理新发现的问题。',
     factImpact: '只读取当前事实基线；若正文已改变，可能提示事实需重新抽取。',
     manuscriptImpact: '不修改原文。',
-    loop: '发现新问题会回到第 4 步；通过并确认后工作流才结束。',
+    loop: '发现新问题会回到“选问题”；通过并确认后整理才结束。',
   },
 };
 
@@ -189,11 +189,117 @@ export function legacyStageGuide(stageId: string): LegacyStageGuide | undefined 
   return LEGACY_STAGE_GUIDES[stageId];
 }
 
+/* ── 作者视角阶段投影：11 个机器步骤折叠为 4 个作者阶段 ────────────────
+ * 作者只需感知「建立底稿 → 全书诊断 → 修复问题（按问题循环）→ 最终复检」。
+ * 内部 11 步仍由状态机驱动；这里只负责展示投影，不改变推进语义。 */
+
+export type LegacyPhaseId = 'foundation' | 'diagnosis' | 'repair' | 'delivery';
+
+export interface LegacyPhaseDefinition {
+  readonly id: LegacyPhaseId;
+  readonly label: string;
+  /** 一句话说明这个阶段在帮作者做什么。 */
+  readonly goal: string;
+  readonly stageIds: ReadonlyArray<string>;
+}
+
+export const LEGACY_PHASES: ReadonlyArray<LegacyPhaseDefinition> = [
+  {
+    id: 'foundation', label: '建立底稿',
+    goal: '确认整理目标，并让系统先读懂全书，形成事实底稿。',
+    stageIds: ['import-book', 'fact-backfill'],
+  },
+  {
+    id: 'diagnosis', label: '全书诊断',
+    goal: '对照事实底稿做全身体检，产出带证据的问题清单。',
+    stageIds: ['initial-audit'],
+  },
+  {
+    id: 'repair', label: '修复问题',
+    goal: '一次只处理一个问题：定位原文、生成改写、逐处审阅后再落盘复检。',
+    stageIds: ['issue-triage', 'locate-source', 'generate-rewrite', 'hunk-review', 'apply-checkpoint', 'targeted-verification', 'close-issue'],
+  },
+  {
+    id: 'delivery', label: '最终复检',
+    goal: '对修订后的全书做最终体检；发现新问题会再回到修复环节。',
+    stageIds: ['final-audit'],
+  },
+];
+
+/** 机器阶段 → 作者阶段；未知阶段返回 undefined（调用方回退到旧视图）。 */
+export function legacyPhaseOfStage(templateStageId: string): LegacyPhaseDefinition | undefined {
+  return LEGACY_PHASES.find((phase) => phase.stageIds.includes(templateStageId));
+}
+
+export interface RepairStepDefinition {
+  readonly id: string;
+  readonly label: string;
+  readonly templateStageId: string;
+}
+
+/** 修复循环内的微步骤顺序（一次处理一个问题的完整路径）。 */
+export const LEGACY_REPAIR_STEPS: ReadonlyArray<RepairStepDefinition> = [
+  { id: 'pick', label: '选问题', templateStageId: 'issue-triage' },
+  { id: 'locate', label: '定位', templateStageId: 'locate-source' },
+  { id: 'rewrite', label: '改写', templateStageId: 'generate-rewrite' },
+  { id: 'review', label: '审阅', templateStageId: 'hunk-review' },
+  { id: 'apply', label: '落盘', templateStageId: 'apply-checkpoint' },
+  { id: 'verify', label: '复检', templateStageId: 'targeted-verification' },
+  { id: 'close', label: '关闭', templateStageId: 'close-issue' },
+];
+
+export function repairStepOfStage(templateStageId: string): RepairStepDefinition | undefined {
+  return LEGACY_REPAIR_STEPS.find((step) => step.templateStageId === templateStageId);
+}
+
+export type LegacyPhaseStatus = 'done' | 'current' | 'pending';
+
+export interface LegacyPhaseView {
+  readonly definition: LegacyPhaseDefinition;
+  readonly status: LegacyPhaseStatus;
+  /** 当前阶段内作者正在处理的机器步骤中文名（仅 current 阶段有值）。 */
+  readonly currentStageLabel: string | undefined;
+}
+
+/**
+ * 由当前机器阶段推导 4 个作者阶段的状态。阶段在前的视为已完成；
+ * 循环回退（终检发现问题回到修复）时后续阶段自然回到 pending——作者看到的始终是真实位置。
+ */
+export function buildLegacyPhaseView(
+  currentTemplateStageId: string | undefined,
+  workflowCompleted: boolean,
+  currentStageLabel?: string,
+): ReadonlyArray<LegacyPhaseView> {
+  if (workflowCompleted || currentTemplateStageId === undefined) {
+    return LEGACY_PHASES.map((definition) => ({ definition, status: workflowCompleted ? 'done' as const : 'pending' as const, currentStageLabel: undefined }));
+  }
+  const currentIndex = LEGACY_PHASES.findIndex((phase) => phase.stageIds.includes(currentTemplateStageId));
+  return LEGACY_PHASES.map((definition, index) => ({
+    definition,
+    status: currentIndex < 0 ? 'pending' : index < currentIndex ? 'done' : index === currentIndex ? 'current' : 'pending',
+    currentStageLabel: index === currentIndex ? currentStageLabel : undefined,
+  }));
+}
+
+export interface LegacyIssueProgress {
+  readonly current: number;
+  readonly total: number;
+}
+
+/** 修复阶段的头部一句话：正在处理第几个问题、进行到哪一微步。 */
+export function repairLoopHeadline(currentTemplateStageId: string, progress?: LegacyIssueProgress): string {
+  const step = repairStepOfStage(currentTemplateStageId);
+  const issuePart = progress === undefined ? '' : ` · 第 ${progress.current}/${progress.total} 个问题`;
+  if (step === undefined) return issuePart.slice(3);
+  const stepIndex = LEGACY_REPAIR_STEPS.indexOf(step);
+  return `${step.label}（${stepIndex + 1}/${LEGACY_REPAIR_STEPS.length}）${issuePart}`;
+}
+
 export function actorLabel(actor: string | undefined): string {
   switch (actor) {
     case 'author': return '作者';
     case 'expert': return '专家';
-    case 'quality-gate': return '质量门';
+    case 'quality-gate': return '复检';
     case 'system': return '系统';
     default: return actor ?? '未分配';
   }
@@ -213,7 +319,7 @@ export function stageBlockingLabel(reason: unknown): string | undefined {
     case 'quality-gate': {
       const issueIds = record['issueIds'];
       const count = Array.isArray(issueIds) ? issueIds.length : 0;
-      return count > 0 ? `质量门未通过：${count} 个问题待处理` : '质量门未通过';
+      return count > 0 ? `复检未通过：${count} 个问题待处理` : '复检未通过';
     }
     case 'version-conflict': return '数据版本冲突，请刷新后重试';
     default: return undefined;

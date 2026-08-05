@@ -24,7 +24,16 @@ import { Button } from '@/components/ui/button';
 import { getBuiltinWorkflowTemplate } from '../../core/workflow/templates.js';
 import type { WorkflowKind } from '../../core/workflow/types.js';
 import type { ChapterTreeDto, WorkflowSnapshotDto } from '../../shared/ipc/index.js';
-import { factStageDestination, legacyStageGuide, locateSourceActionView } from '../lib/workbench-view-contracts.js';
+import {
+  LEGACY_REPAIR_STEPS,
+  buildLegacyPhaseView,
+  factStageDestination,
+  legacyPhaseOfStage,
+  legacyStageGuide,
+  locateSourceActionView,
+  repairLoopHeadline,
+  type LegacyIssueProgress,
+} from '../lib/workbench-view-contracts.js';
 
 interface WorkflowGraphProps {
   readonly projectId: string | undefined;
@@ -42,6 +51,8 @@ interface WorkflowGraphProps {
   readonly onLocateSource?: () => void;
   readonly onSelectLocateSourceIssue?: () => void;
   readonly canLocateSource?: boolean;
+  /** 修复循环内的问题进度（第几个/共几个），由 App 从问题列表投影。 */
+  readonly issueProgress?: LegacyIssueProgress;
   readonly taskBusy: boolean;
 }
 
@@ -139,6 +150,7 @@ export function WorkflowGraph({
   onLocateSource,
   onSelectLocateSourceIssue,
   canLocateSource = false,
+  issueProgress,
   taskBusy,
 }: WorkflowGraphProps): JSX.Element {
   const hasExistingChapters = (tree?.roots.length ?? 0) > 0;
@@ -275,7 +287,16 @@ export function WorkflowGraph({
     : '失败';
   const blocking = current === undefined ? undefined : blockingLabel(current.blockingReason);
   const locateAction = locateSourceActionView(canLocateSource);
-  const currentGuide = current === undefined || workflow.kind !== 'legacy-book-revision' ? undefined : legacyStageGuide(current.templateStageId);
+  const isLegacy = workflow.kind === 'legacy-book-revision';
+  const currentGuide = current === undefined || !isLegacy ? undefined : legacyStageGuide(current.templateStageId);
+  const phaseViews = isLegacy ? buildLegacyPhaseView(current?.templateStageId, workflow.status === 'completed', currentLabel) : undefined;
+  const repairHeadline = current !== undefined && isLegacy && legacyPhaseOfStage(current.templateStageId)?.id === 'repair'
+    ? repairLoopHeadline(current.templateStageId, issueProgress)
+    : undefined;
+  const factBackfillStage = stages.find((stage) => stage.templateStageId === 'fact-backfill');
+  const foundationDestination = factStageDestination(factBackfillStage?.status ?? 'pending');
+  const foundationOpen = foundationDestination === 'story-bible' ? onOpenStoryBible : onOpenFactSheet;
+  const repairStepIndex = current === undefined ? -1 : LEGACY_REPAIR_STEPS.findIndex((step) => step.templateStageId === current.templateStageId);
 
   return (
     <section className="border-b border-border bg-card/60 px-4 py-2" aria-label="书目整理进度">
@@ -285,10 +306,67 @@ export function WorkflowGraph({
         className="flex w-full items-center justify-between gap-3 rounded px-1 py-1 text-left text-xs transition-colors hover:bg-accent/50"
         aria-expanded={expanded}
       >
-        <span className="font-medium text-foreground">已完成 {completedCount}/{stages.length} · 当前：{currentLabel}{nextLabel === undefined ? '' : ` · 下一步：${nextLabel}`}</span>
-        <span className="text-muted-foreground">{expanded ? '收起完整流程' : '展开完整流程'}</span>
+        {phaseViews === undefined ? (
+          <span className="font-medium text-foreground">已完成 {completedCount}/{stages.length} · 当前：{currentLabel}{nextLabel === undefined ? '' : ` · 下一步：${nextLabel}`}</span>
+        ) : (
+          <span className="flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-0.5">
+            {phaseViews.map((view, index) => (
+              <span key={view.definition.id} className="flex items-center gap-1">
+                {index > 0 && <span className="text-muted-foreground/50">→</span>}
+                <span className={view.status === 'current' ? 'font-medium text-primary' : view.status === 'done' ? 'text-emerald-600 dark:text-emerald-400' : 'text-muted-foreground/70'}>
+                  {view.status === 'done' ? '✓ ' : ''}{index + 1} {view.definition.label}
+                  {view.status === 'current' && repairHeadline !== undefined ? ` · ${repairHeadline}` : view.status === 'current' ? ` · ${currentLabel}` : ''}
+                </span>
+              </span>
+            ))}
+          </span>
+        )}
+        <span className="text-muted-foreground">{expanded ? '收起' : '详情'}</span>
       </button>
-      {expanded && <div className="mt-2 grid grid-cols-2 gap-1.5 sm:grid-cols-3 lg:grid-cols-5 xl:grid-cols-6" role="list" aria-label="整理阶段">
+      {expanded && phaseViews !== undefined && (
+        <div className="mt-2 grid grid-cols-2 gap-1.5 lg:grid-cols-4" role="list" aria-label="整理阶段">
+          {phaseViews.map((view, index) => {
+            const isFoundation = view.definition.id === 'foundation';
+            const clickable = isFoundation && foundationOpen !== undefined;
+            return (
+              <div key={view.definition.id} role="listitem" className={`rounded-md border px-2.5 py-2 text-xs ${view.status === 'current' ? 'border-primary bg-primary/10' : view.status === 'done' ? 'border-emerald-500/50 bg-emerald-500/10' : 'border-border bg-background'}`}>
+                <div className="flex items-center justify-between gap-1">
+                  <span className="flex items-center gap-1.5 font-medium">
+                    <span className="flex size-4 items-center justify-center rounded-full border border-current/30 text-[10px]">
+                      {view.status === 'done' ? <Check className="size-3" aria-hidden /> : index + 1}
+                    </span>
+                    {view.definition.label}
+                  </span>
+                  <span className="text-[10px] text-muted-foreground">
+                    {view.status === 'done' ? '已完成' : view.status === 'current' ? '进行中' : '待进行'}
+                  </span>
+                </div>
+                <p className="mt-1 text-muted-foreground">{view.definition.goal}</p>
+                {clickable && (
+                  <button type="button" className="mt-1 text-primary underline-offset-2 hover:underline" onClick={foundationOpen}
+                    title={foundationDestination === 'story-bible' ? '打开全书事实库' : '打开事实核对任务'}>
+                    {foundationDestination === 'story-bible' ? '查看全书事实库' : '查看事实核对任务'}
+                  </button>
+                )}
+                {view.definition.id === 'repair' && view.status === 'current' && (
+                  <div className="mt-1.5 flex flex-wrap items-center gap-1 text-[10px]">
+                    {LEGACY_REPAIR_STEPS.map((step, stepIndex) => (
+                      <span key={step.id} className="flex items-center gap-1">
+                        {stepIndex > 0 && <span className="text-muted-foreground/40">→</span>}
+                        <span className={stepIndex === repairStepIndex ? 'rounded bg-primary px-1 py-0.5 font-medium text-primary-foreground' : stepIndex < repairStepIndex ? 'text-emerald-600 dark:text-emerald-400' : 'text-muted-foreground/70'}>
+                          {step.label}
+                        </span>
+                      </span>
+                    ))}
+                    {issueProgress !== undefined && <span className="text-muted-foreground">（第 {issueProgress.current}/{issueProgress.total} 个问题）</span>}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+      {expanded && phaseViews === undefined && <div className="mt-2 grid grid-cols-2 gap-1.5 sm:grid-cols-3 lg:grid-cols-5 xl:grid-cols-6" role="list" aria-label="整理阶段">
         {stages.map((stage, index) => {
           const isCurrent = stage.stageId === workflow.currentStageId;
           const label = template?.stages.find((item) => item.id === stage.templateStageId)?.label ?? stage.templateStageId;

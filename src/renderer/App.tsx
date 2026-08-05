@@ -609,6 +609,12 @@ export function App(): JSX.Element {
   }, [supplementRunId, taskStream.activeTaskRunId]);
 
   const locateSourceIssueId = workflowState.snapshot?.selectedIssueId ?? activeIssue?.issueId;
+  const legacyIssueProgress = useMemo(() => {
+    if (locateSourceIssueId === undefined) return undefined;
+    const issueIds = Array.from(findingsByRun.values()).flatMap((finding) => finding.issues.map((issue) => issue.issueId));
+    const currentIndex = issueIds.indexOf(locateSourceIssueId);
+    return currentIndex < 0 ? undefined : { current: currentIndex + 1, total: issueIds.length };
+  }, [findingsByRun, locateSourceIssueId]);
   const runLocateSource = useCallback((): void => {
     if (workflowRef === undefined || locateSourceIssueId === undefined) return;
     window.novelAgent.sendCommand({
@@ -766,6 +772,7 @@ export function App(): JSX.Element {
           onLocateSource={runLocateSource}
           onSelectLocateSourceIssue={() => setNavContext('issues')}
           canLocateSource={locateSourceIssueId !== undefined}
+          {...(legacyIssueProgress === undefined ? {} : { issueProgress: legacyIssueProgress })}
         />
 
         <CurrentTaskCard

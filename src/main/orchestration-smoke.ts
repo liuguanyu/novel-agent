@@ -86,16 +86,21 @@ import {
 import {
   activitySummary,
   actorLabel,
+  buildLegacyPhaseView,
   buildWorkflowCollapsedSummary,
   buildWorkflowView,
   currentTaskStatus,
   factStageDestination,
   impactStatusLabel,
+  LEGACY_PHASES,
+  LEGACY_REPAIR_STEPS,
+  legacyPhaseOfStage,
   legacyStageGuide,
   locateSourceActionView,
   observationSummary,
   preferredNavContext,
   readingBackgroundBadge,
+  repairLoopHeadline,
   resolveViewModeSurfaces,
   stageStatusLabel,
   workflowStageView,
@@ -5046,7 +5051,7 @@ function smokeTask96WorkbenchViewContracts(): void {
     && chapterLoopView.current.nextStep === '分场大纲'
     && chapterLoopView.completedCount === 11);
 
-  // 场景 7：老书 issue 循环——第二个问题的 issue-scoped 实例组正确投影，质量门 actor 人话化。
+  // 场景 7：老书 issue 循环——第二个问题的 issue-scoped 实例组正确投影，复检 actor 人话化。
   const wfD = 'workflow-96d';
   const issueLoop = snapshot({
     workflowId: wfD,
@@ -5067,7 +5072,7 @@ function smokeTask96WorkbenchViewContracts(): void {
     && issueLoopView.current?.name === '生成局部改写方案'
     && issueLoopView.current.nextStep === '逐 hunk 接受或拒绝'
     && issueLoopView.completedCount === 11
-    && actorLabel('quality-gate') === '质量门');
+    && actorLabel('quality-gate') === '复检');
 
   // 场景 8：standalone（无 workflow）——折叠摘要回退活动态/轨迹观察，待裁决优先于运行中。
   const standaloneActivities: WorkbenchActivities = new Map([
@@ -5119,9 +5124,25 @@ function smokeLocateSourceGuidanceContracts(): void {
     }));
   check('老书流程：事实维护不改原文，只有正文落盘阶段明确写入原文',
     legacyStageGuide('fact-backfill')?.manuscriptImpact === '不修改原文。'
-    && legacyStageGuide('apply-checkpoint')?.manuscriptImpact.includes('首次真正修改原文') === true
-    && legacyStageGuide('targeted-verification')?.loop?.includes('第 6 步') === true
-    && legacyStageGuide('final-audit')?.loop?.includes('第 4 步') === true);
+    && legacyStageGuide('apply-checkpoint')?.manuscriptImpact.includes('唯一真正修改原文') === true
+    && legacyStageGuide('targeted-verification')?.loop?.includes('返回“改写”') === true
+    && legacyStageGuide('final-audit')?.loop?.includes('回到“选问题”') === true);
+  const mappedStageIds = LEGACY_PHASES.flatMap((phase) => phase.stageIds);
+  check('老书作者视图：11 个内部阶段完整且唯一投影为 4 个作者阶段',
+    LEGACY_PHASES.length === 4
+    && mappedStageIds.length === 11
+    && new Set(mappedStageIds).size === 11
+    && legacyTemplate?.stages.every((stage) => legacyPhaseOfStage(stage.id) !== undefined) === true);
+  check('老书作者视图：第 4–10 步投影为顺序稳定的 7 步修复循环',
+    legacyTemplate?.stages.slice(3, 10).every((stage) => legacyPhaseOfStage(stage.id)?.id === 'repair') === true
+    && LEGACY_REPAIR_STEPS.map((step) => step.templateStageId).join(',')
+      === 'issue-triage,locate-source,generate-rewrite,hunk-review,apply-checkpoint,targeted-verification,close-issue');
+  const locatePhaseView = buildLegacyPhaseView('locate-source', false, '定位问题原文');
+  check('老书作者视图：定位原文时前两阶段完成、修复进行中、终检待进行',
+    locatePhaseView.map((phase) => phase.status).join(',') === 'done,done,current,pending');
+  const repairHeadline = repairLoopHeadline('locate-source', { current: 2, total: 7 });
+  check('老书作者视图：修复标题同时呈现当前动作和真实问题进度',
+    repairHeadline.includes('定位（2/7）') && repairHeadline.includes('第 2/7 个问题'));
 }
 
 function smokeTask1011ViewModeContracts(): void {
