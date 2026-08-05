@@ -74,7 +74,7 @@ import { asEntityId, asCheckpointId, asFactVersionId, type ConsistencyIssue, typ
 import { asNodeId } from '../core/manuscript/index.js';
 import type { NovelState } from '../core/orchestration/index.js';
 import { locateSourceEvidence } from '../core/workflow/index.js';
-import { NEW_BOOK_CREATION_TEMPLATE } from '../core/workflow/templates.js';
+import { getBuiltinWorkflowTemplate, NEW_BOOK_CREATION_TEMPLATE } from '../core/workflow/templates.js';
 import {
   buildAssetCandidateDecisionCommand,
   buildAssetClarificationSelectionCommand,
@@ -91,6 +91,7 @@ import {
   currentTaskStatus,
   factStageDestination,
   impactStatusLabel,
+  legacyStageGuide,
   locateSourceActionView,
   observationSummary,
   preferredNavContext,
@@ -5105,6 +5106,22 @@ function smokeLocateSourceGuidanceContracts(): void {
     && factStageDestination('skipped') === 'story-bible'
     && factStageDestination('running') === 'fact-task'
     && factStageDestination('awaiting-confirmation') === 'fact-task');
+  const legacyTemplate = getBuiltinWorkflowTemplate('legacy-book-revision', 1);
+  check('老书流程：11 个模板阶段都有统一的开始/完成/产物/人工介入/影响契约',
+    legacyTemplate?.stages.length === 11
+    && legacyTemplate.stages.every((stage) => {
+      const guide = legacyStageGuide(stage.id);
+      return guide !== undefined
+        && guide.start.length > 0
+        && guide.completion.length > 0
+        && guide.artifact.length > 0
+        && guide.humanRole.length > 0;
+    }));
+  check('老书流程：事实维护不改原文，只有正文落盘阶段明确写入原文',
+    legacyStageGuide('fact-backfill')?.manuscriptImpact === '不修改原文。'
+    && legacyStageGuide('apply-checkpoint')?.manuscriptImpact.includes('首次真正修改原文') === true
+    && legacyStageGuide('targeted-verification')?.loop?.includes('第 6 步') === true
+    && legacyStageGuide('final-audit')?.loop?.includes('第 4 步') === true);
 }
 
 function smokeTask1011ViewModeContracts(): void {

@@ -763,6 +763,10 @@ export function App(): JSX.Element {
           }}
           onOpenFactSheet={() => setFactSheetOpen(true)}
           onOpenStoryBible={() => setBibleOpen(true)}
+          onOpenGoal={() => setGoalOpen(true)}
+          onOpenDashboard={() => setDashOpen(true)}
+          onOpenIssues={() => setNavContext('issues')}
+          onOpenRefactor={() => setRefactorOpen(true)}
           onLocateSource={runLocateSource}
           onSelectLocateSourceIssue={() => setNavContext('issues')}
           canLocateSource={locateSourceIssueId !== undefined}

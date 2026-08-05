@@ -79,6 +79,131 @@ export function factStageDestination(status: string): 'story-bible' | 'fact-task
   return status === 'completed' || status === 'skipped' ? 'story-bible' : 'fact-task';
 }
 
+export type LegacyStageSurface = 'goal' | 'story-bible' | 'fact-task' | 'dashboard' | 'issues' | 'refactor';
+
+export interface LegacyStageGuide {
+  readonly start: string;
+  readonly completion: string;
+  readonly artifact: string;
+  readonly humanRole: string;
+  readonly factImpact: string;
+  readonly manuscriptImpact: string;
+  readonly surface: LegacyStageSurface;
+  readonly surfaceLabel: string;
+  readonly loop?: string;
+}
+
+const LEGACY_STAGE_GUIDES: Readonly<Record<string, LegacyStageGuide>> = {
+  'import-book': {
+    start: '已导入既有章节，可以说明本次要保留、提取和修复的目标。',
+    completion: '作者确认目标与具体要求。',
+    artifact: '工作流目标与作者要求清单。',
+    humanRole: '补充或修改整理目标，确认后进入事实回填。',
+    factImpact: '不修改事实库。',
+    manuscriptImpact: '不修改原文。',
+    surface: 'goal', surfaceLabel: '查看整理目标',
+  },
+  'fact-backfill': {
+    start: '目标已确认，正文存在可读取章节。',
+    completion: '所有章节完成事实抽取；冲突已经作者裁决；形成事实版本。',
+    artifact: '全书事实版本、人物/事件/关系/伏笔及出处。',
+    humanRole: '仅在事实冲突或低置信内容出现时介入确认。',
+    factImpact: '新增或更新事实库；后续诊断以新版本为基线。',
+    manuscriptImpact: '不修改原文。',
+    surface: 'story-bible', surfaceLabel: '查看事实库/核对任务',
+  },
+  'initial-audit': {
+    start: '全书事实底稿已有可用版本。',
+    completion: '全书诊断运行结束，问题已形成结构化记录；无问题则通过质量门。',
+    artifact: '健康分、诊断报告、带证据和章节锚点的问题列表。',
+    humanRole: '查看诊断依据；本步不要求逐条修改。',
+    factImpact: '只读取事实库。',
+    manuscriptImpact: '不修改原文。',
+    surface: 'dashboard', surfaceLabel: '查看诊断报告',
+  },
+  'issue-triage': {
+    start: '诊断结束，并存在需要分类或排序的问题。',
+    completion: '作者选定下一项要处理的问题并确认优先级。',
+    artifact: '问题队列、生命周期状态和当前选中问题。',
+    humanRole: '筛选、排序、忽略或选择一个问题进入修复。',
+    factImpact: '不直接修改事实库。',
+    manuscriptImpact: '不修改原文。',
+    surface: 'issues', surfaceLabel: '打开待处理问题',
+    loop: '每处理完一个问题可回到这里选择下一项；最终复检发现新问题也会回到这里。',
+  },
+  'locate-source': {
+    start: '已选择问题，且问题带稳定章节证据或可供选择的候选位置。',
+    completion: '作者或系统确定唯一正文片段；无法稳定定位时阻塞，禁止写入。',
+    artifact: '章节 ID、原文引用和稳定锚点。',
+    humanRole: '多候选时明确选择位置；无锚点时补充证据。',
+    factImpact: '只读取诊断与事实证据。',
+    manuscriptImpact: '只定位和高亮，不修改原文。',
+    surface: 'issues', surfaceLabel: '查看当前问题与定位',
+  },
+  'generate-rewrite': {
+    start: '当前问题已有唯一、稳定的原文片段。',
+    completion: '专家生成局部改写建议，作者确认建议可进入差异审阅。',
+    artifact: '局部改写候选，不是已落盘正文。',
+    humanRole: '可调整改写要求或编辑候选文本，再确认。',
+    factImpact: '只读取事实约束。',
+    manuscriptImpact: '不修改原文。',
+    surface: 'refactor', surfaceLabel: '打开局部改写',
+    loop: '针对性复检失败时回到本步重新生成方案。',
+  },
+  'hunk-review': {
+    start: '原片段与改写候选已计算出最小差异。',
+    completion: '每个 hunk 都被接受或拒绝，作者确认裁决。',
+    artifact: '逐 hunk 决策与最终待拼回文本。',
+    humanRole: '逐处接受或拒绝；未接受内容不会进入正文。',
+    factImpact: '不修改事实库。',
+    manuscriptImpact: '审阅期间不落盘。',
+    surface: 'refactor', surfaceLabel: '逐处审阅改动',
+  },
+  'apply-checkpoint': {
+    start: '所有 hunk 已裁决，原文锚点仍有效且正文版本未冲突。',
+    completion: '仅接受的 hunk 精确拼回正文，并创建可回滚 checkpoint。',
+    artifact: '新正文版本和 checkpoint。',
+    humanRole: '执行最终落盘确认；版本或锚点变化时重新审阅。',
+    factImpact: '事实库不会自动随正文改写，后续复检负责发现不一致。',
+    manuscriptImpact: '这是 11 步中首次真正修改原文的步骤。',
+    surface: 'refactor', surfaceLabel: '查看落盘与检查点',
+  },
+  'targeted-verification': {
+    start: '正文已落盘并关联 checkpoint。',
+    completion: '质量门确认当前问题已修复；失败则返回生成改写方案。',
+    artifact: '针对性复检报告和问题生命周期更新。',
+    humanRole: '查看复检证据；失败时决定如何调整方案。',
+    factImpact: '读取事实基线；不直接维护事实库。',
+    manuscriptImpact: '不再写正文，只校验刚才的改动。',
+    surface: 'dashboard', surfaceLabel: '查看复检结果',
+    loop: '复检失败会回到第 6 步，而不是继续关闭问题。',
+  },
+  'close-issue': {
+    start: '针对性复检通过。',
+    completion: '当前问题标记为已解决，并决定继续下一问题或进入最终复检。',
+    artifact: '问题关闭记录、修复与复检证据链。',
+    humanRole: '通常无需编辑；仍有待办时回到问题队列。',
+    factImpact: '不修改事实库。',
+    manuscriptImpact: '不修改原文。',
+    surface: 'issues', surfaceLabel: '查看问题处理结果',
+    loop: '仍有问题时回到第 4 步，处理下一项。',
+  },
+  'final-audit': {
+    start: '计划处理的问题均已关闭，正文处于最新 checkpoint。',
+    completion: '全书复检通过并由作者确认；发现问题则回到问题队列。',
+    artifact: '最终健康分、复检报告和新增问题（如有）。',
+    humanRole: '确认交付结果，或选择继续处理新发现的问题。',
+    factImpact: '只读取当前事实基线；若正文已改变，可能提示事实需重新抽取。',
+    manuscriptImpact: '不修改原文。',
+    surface: 'dashboard', surfaceLabel: '查看最终复检',
+    loop: '发现新问题会回到第 4 步；通过并确认后工作流才结束。',
+  },
+};
+
+export function legacyStageGuide(stageId: string): LegacyStageGuide | undefined {
+  return LEGACY_STAGE_GUIDES[stageId];
+}
+
 export function actorLabel(actor: string | undefined): string {
   switch (actor) {
     case 'author': return '作者';

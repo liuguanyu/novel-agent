@@ -1,6 +1,6 @@
 /** Story Bible 查看与维护面板。 */
 
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Button } from '@/components/ui/button';
 import {
   Dialog,
@@ -537,17 +537,24 @@ export function StoryBibleDrawer({
   const open = controlled ? openProp : internalOpen;
   const setOpen = onOpenChange ?? setInternalOpen;
   const [query, setQuery] = useState('');
+  const [statusFilter, setStatusFilter] = useState<'all' | StoryBibleEntityDto['status']>('all');
+  const [visibleEntityCount, setVisibleEntityCount] = useState(20);
   const { bible, loading, confirming, editing, deleting, merging, error, confirmationMessage, refresh, confirmFact, editFact, deleteFact, mergeEntities } = useStoryBible(open);
 
   const filteredEntities = useMemo(() => {
     const q = query.trim().toLowerCase();
     if (bible === undefined) return [];
-    if (q.length === 0) return bible.entities;
     return bible.entities.filter((entity) =>
-      entity.canonicalName.toLowerCase().includes(q) ||
-      entity.aliases.some((alias) => alias.toLowerCase().includes(q)),
+      (statusFilter === 'all' || entity.status === statusFilter) &&
+      (q.length === 0 || entity.canonicalName.toLowerCase().includes(q) || entity.aliases.some((alias) => alias.toLowerCase().includes(q))),
     );
-  }, [bible, query]);
+  }, [bible, query, statusFilter]);
+  const visibleEntities = filteredEntities.slice(0, visibleEntityCount);
+  const pendingCount = bible?.entities.filter((entity) => entity.status !== 'confirmed').length ?? 0;
+
+  useEffect(() => {
+    setVisibleEntityCount(20);
+  }, [query, statusFilter, bible?.latestVersion]);
 
   return (
     <Sheet open={open} onOpenChange={setOpen}>
@@ -564,17 +571,34 @@ export function StoryBibleDrawer({
           </SheetDescription>
         </SheetHeader>
 
-        <div className="mt-4 flex items-center gap-2 px-4">
+        <div className="mx-4 mt-4 rounded-md border border-primary/25 bg-primary/5 px-3 py-2 text-xs text-muted-foreground">
+          <div className="font-medium text-foreground">事实库维护不会直接改写原文</div>
+          <div className="mt-1">编辑会修改单条事实；合并会把源实体的别名、属性和关系迁移到目标实体后删除源实体。两者都会生成新事实版本，并使已有诊断可能过期；只有“正文落盘与 checkpoint”阶段会真正修改原文。</div>
+        </div>
+
+        <div className="mt-3 flex flex-wrap items-center gap-2 px-4">
           <input
             value={query}
             onChange={(event) => setQuery(event.target.value)}
             placeholder="过滤人物/别名…"
             className="h-8 flex-1 rounded-md border border-input bg-background px-2 text-sm outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50"
           />
+          <select
+            value={statusFilter}
+            onChange={(event) => setStatusFilter(event.target.value as typeof statusFilter)}
+            className="h-8 rounded-md border border-input bg-background px-2 text-sm"
+            title="按确认状态筛选"
+          >
+            <option value="all">全部状态</option>
+            <option value="inferred">待确认</option>
+            <option value="conflicting">有冲突</option>
+            <option value="confirmed">已确认</option>
+          </select>
           <Button type="button" size="sm" variant="outline" disabled={loading} onClick={refresh}>
             {loading ? '刷新中…' : '刷新'}
           </Button>
         </div>
+        <div className="px-4 pt-2 text-xs text-muted-foreground">共 {bible?.entities.length ?? 0} 个实体 · 待人工处理 {pendingCount} 个 · 当前筛选 {filteredEntities.length} 个 · 分批显示 {visibleEntities.length} 个</div>
 
         {error !== undefined && (
           <div className="mx-4 mt-3 rounded-md border border-destructive/40 bg-destructive/10 px-2 py-1 text-sm text-destructive">
@@ -593,7 +617,7 @@ export function StoryBibleDrawer({
           <section>
             <h3 className="mb-2 text-sm font-semibold">实体（{filteredEntities.length}）</h3>
             <div className="space-y-2">
-              {filteredEntities.map((entity) => (
+              {visibleEntities.map((entity) => (
                 <EntityCard
                   key={entity.id}
                   entity={entity}
@@ -609,6 +633,11 @@ export function StoryBibleDrawer({
                 />
               ))}
             </div>
+            {visibleEntities.length < filteredEntities.length && (
+              <Button type="button" className="mt-3 w-full" variant="outline" onClick={() => setVisibleEntityCount((count) => count + 20)}>
+                再显示 20 个（剩余 {filteredEntities.length - visibleEntities.length}）
+              </Button>
+            )}
           </section>
 
           <section>

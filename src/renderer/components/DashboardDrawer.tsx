@@ -2,7 +2,7 @@
  * 底部质量仪表盘抽屉：触发全书总检并展示健康分、红黄牌与锚点跳章。
  */
 
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Button } from '@/components/ui/button';
 import {
   Sheet,
@@ -153,15 +153,18 @@ export function DashboardDrawer({
 }: DashboardDrawerProps): JSX.Element {
   const [internalOpen, setInternalOpen] = useState(false);
   const [workflowStatus, setWorkflowStatus] = useState<WorkflowStatusFilter>('all');
+  const [visibleIssueCount, setVisibleIssueCount] = useState(20);
   const internalDashboard = useDashboard();
   const controlled = openProp !== undefined;
   const open = controlled ? openProp : internalOpen;
   const setOpen = onOpenChange ?? setInternalOpen;
   const dashboard = dashboardProp ?? internalDashboard;
-  const groups = useMemo(() => {
+  const filteredIssues = useMemo(() => {
     const issues = dashboard.state.dashboard?.issues ?? [];
-    return issueGroups(workflowStatus === 'all' ? issues : issues.filter((issue) => issue.workflowStatus === workflowStatus));
+    return workflowStatus === 'all' ? issues : issues.filter((issue) => issue.workflowStatus === workflowStatus);
   }, [dashboard.state.dashboard?.issues, workflowStatus]);
+  const visibleIssues = filteredIssues.slice(0, visibleIssueCount);
+  const groups = useMemo(() => issueGroups(visibleIssues), [visibleIssues]);
   const explanation = dashboard.state.dashboard?.scoreExplanation;
   const auditIssues = dashboard.state.dashboard?.issues ?? [];
   const diagnosis = dashboard.state.dashboard?.legacyDiagnosis;
@@ -170,6 +173,10 @@ export function DashboardDrawer({
     counts[status] = (counts[status] ?? 0) + 1;
     return counts;
   }, {}), [auditIssues]);
+
+  useEffect(() => {
+    setVisibleIssueCount(20);
+  }, [workflowStatus, dashboard.state.dashboard?.generatedAt]);
 
   return (
     <Sheet open={open} onOpenChange={setOpen}>
@@ -227,6 +234,7 @@ export function DashboardDrawer({
             </select>
           </label>
           <span className="text-xs text-muted-foreground">
+            {dashboard.state.dashboard === undefined ? '' : `问题 ${visibleIssues.length}/${filteredIssues.length} · `}
             {dashboard.state.status === 'running'
               ? `${phaseLabel(dashboard.state.phase)} · ${dashboard.state.completedItems}/${dashboard.state.totalItems}`
               : `状态：${dashboard.state.status}`}
@@ -303,6 +311,11 @@ export function DashboardDrawer({
                       </div>
                     </section>
                     ))}
+                    {visibleIssues.length < filteredIssues.length && (
+                      <Button type="button" className="w-full" variant="outline" onClick={() => setVisibleIssueCount((count) => count + 20)}>
+                        再显示 20 个问题（剩余 {filteredIssues.length - visibleIssues.length}）
+                      </Button>
+                    )}
                   </div>
                 )}
               </div>

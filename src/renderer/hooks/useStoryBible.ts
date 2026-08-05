@@ -126,7 +126,7 @@ export function useStoryBible(autoLoad: boolean): UseStoryBibleResult {
         switch (event.type) {
           case 'story-bible-fact-edited':
             setEditingRunId(undefined);
-            setConfirmationMessage(`已编辑事实，版本 ${event.factVersion}`);
+            setConfirmationMessage(`已编辑事实并生成版本 ${event.factVersion}。原文未改变；既有诊断已标记为可能过期，建议重新运行全书诊断。`);
             refresh();
             return;
           case 'story-bible-fact-edit-failed':
@@ -141,7 +141,7 @@ export function useStoryBible(autoLoad: boolean): UseStoryBibleResult {
         switch (event.type) {
           case 'story-bible-fact-deleted':
             setDeletingRunId(undefined);
-            setConfirmationMessage(`已删除事实，版本 ${event.factVersion}`);
+            setConfirmationMessage(`已删除事实并生成版本 ${event.factVersion}。原文未改变；既有诊断已标记为可能过期，建议重新运行全书诊断。`);
             refresh();
             return;
           case 'story-bible-fact-delete-failed':
@@ -156,7 +156,7 @@ export function useStoryBible(autoLoad: boolean): UseStoryBibleResult {
         switch (event.type) {
           case 'story-bible-entities-merged':
             setMergingRunId(undefined);
-            setConfirmationMessage(`已合并实体，版本 ${event.factVersion}`);
+            setConfirmationMessage(`已合并实体并生成版本 ${event.factVersion}。源实体引用已迁移后删除；原文未改变，建议重新运行全书诊断。`);
             refresh();
             return;
           case 'story-bible-entities-merge-failed':
