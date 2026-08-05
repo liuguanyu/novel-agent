@@ -1,7 +1,15 @@
-/** Story Bible 只读查看面板。 */
+/** Story Bible 查看与维护面板。 */
 
 import { useMemo, useState } from 'react';
 import { Button } from '@/components/ui/button';
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog';
 import {
   Sheet,
   SheetContent,
@@ -54,11 +62,61 @@ function ConfirmButton({
   );
 }
 
-function EditButton({ disabled, onClick }: { readonly disabled: boolean; readonly onClick: () => void }): JSX.Element {
+function EditButton({
+  disabled,
+  title,
+  value,
+  onSubmit,
+}: {
+  readonly disabled: boolean;
+  readonly title: string;
+  readonly value: string;
+  readonly onSubmit: (value: string) => void;
+}): JSX.Element {
+  const [open, setOpen] = useState(false);
+  const [draft, setDraft] = useState(value);
+  const trimmed = draft.trim();
+
   return (
-    <Button type="button" size="sm" variant="ghost" disabled={disabled} onClick={onClick}>
-      编辑
-    </Button>
+    <Dialog open={open} onOpenChange={(nextOpen) => {
+      setOpen(nextOpen);
+      if (nextOpen) setDraft(value);
+    }}>
+      <Button type="button" size="sm" variant="ghost" disabled={disabled} onClick={() => setOpen(true)}>
+        编辑
+      </Button>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>{title}</DialogTitle>
+          <DialogDescription>修改后将生成新的事实版本，并保留原始出处。</DialogDescription>
+        </DialogHeader>
+        <input
+          autoFocus
+          value={draft}
+          onChange={(event) => setDraft(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === 'Enter' && trimmed.length > 0 && trimmed !== value) {
+              onSubmit(trimmed);
+              setOpen(false);
+            }
+          }}
+          className="h-9 rounded-md border border-input bg-background px-3 text-sm outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50"
+        />
+        <DialogFooter>
+          <Button type="button" variant="outline" onClick={() => setOpen(false)}>取消</Button>
+          <Button
+            type="button"
+            disabled={trimmed.length === 0 || trimmed === value}
+            onClick={() => {
+              onSubmit(trimmed);
+              setOpen(false);
+            }}
+          >
+            保存
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
 
@@ -67,25 +125,110 @@ function DeleteButton({
   onDelete,
   target,
   confirmMessage,
+  label = '删除',
 }: {
   readonly disabled: boolean;
   readonly onDelete: (target: StoryBibleFactDeleteLocatorDto) => void;
   readonly target: StoryBibleFactDeleteLocatorDto;
   readonly confirmMessage: string;
+  readonly label?: string;
 }): JSX.Element {
+  const [open, setOpen] = useState(false);
   return (
-    <Button
-      type="button"
-      size="sm"
-      variant="ghost"
-      className="text-destructive hover:text-destructive"
-      disabled={disabled}
-      onClick={() => {
-        if (window.confirm(confirmMessage)) onDelete(target);
-      }}
-    >
-      删除
-    </Button>
+    <Dialog open={open} onOpenChange={setOpen}>
+      <Button
+        type="button"
+        size="sm"
+        variant="ghost"
+        className="text-destructive hover:text-destructive"
+        disabled={disabled}
+        title={label === '×' ? '删除别名' : undefined}
+        onClick={() => setOpen(true)}
+      >
+        {label}
+      </Button>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>确认删除</DialogTitle>
+          <DialogDescription>{confirmMessage}</DialogDescription>
+        </DialogHeader>
+        <DialogFooter>
+          <Button type="button" variant="outline" onClick={() => setOpen(false)}>取消</Button>
+          <Button
+            type="button"
+            variant="destructive"
+            onClick={() => {
+              onDelete(target);
+              setOpen(false);
+            }}
+          >
+            确认删除
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function MergeEntityButton({
+  disabled,
+  entity,
+  entities,
+  onMerge,
+}: {
+  readonly disabled: boolean;
+  readonly entity: StoryBibleEntityDto;
+  readonly entities: ReadonlyArray<StoryBibleEntityDto>;
+  readonly onMerge: (sourceEntityId: string, targetEntityId: string) => void;
+}): JSX.Element {
+  const targets = entities.filter((candidate) => candidate.id !== entity.id);
+  const [open, setOpen] = useState(false);
+  const [targetId, setTargetId] = useState('');
+  const target = targets.find((candidate) => candidate.id === targetId);
+
+  return (
+    <Dialog open={open} onOpenChange={(nextOpen) => {
+      setOpen(nextOpen);
+      if (nextOpen) setTargetId('');
+    }}>
+      <Button type="button" size="sm" variant="ghost" disabled={disabled || targets.length === 0} onClick={() => setOpen(true)}>
+        合并
+      </Button>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>合并实体「{entity.canonicalName}」</DialogTitle>
+          <DialogDescription>选择保留的目标实体。当前实体的别名、属性和关系会迁移，随后删除当前实体。</DialogDescription>
+        </DialogHeader>
+        <select
+          autoFocus
+          value={targetId}
+          onChange={(event) => setTargetId(event.target.value)}
+          className="h-9 rounded-md border border-input bg-background px-3 text-sm outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50"
+        >
+          <option value="">请选择目标实体…</option>
+          {targets.map((candidate) => (
+            <option key={candidate.id} value={candidate.id}>{candidate.canonicalName}</option>
+          ))}
+        </select>
+        {target !== undefined && (
+          <p className="text-sm text-destructive">确认后「{entity.canonicalName}」将合并到「{target.canonicalName}」，此操作会生成新的事实版本。</p>
+        )}
+        <DialogFooter>
+          <Button type="button" variant="outline" onClick={() => setOpen(false)}>取消</Button>
+          <Button
+            type="button"
+            disabled={target === undefined}
+            onClick={() => {
+              if (target === undefined) return;
+              onMerge(entity.id, target.id);
+              setOpen(false);
+            }}
+          >
+            确认合并
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
 
@@ -123,39 +266,16 @@ function EntityCard({
           <div className="text-xs text-muted-foreground">{entity.aliases.length} aliases</div>
           <EditButton
             disabled={editing}
-            onClick={() => {
-              const canonicalName = window.prompt('实体规范名', entity.canonicalName)?.trim();
-              if (canonicalName !== undefined && canonicalName.length > 0 && canonicalName !== entity.canonicalName) {
-                onEdit({ kind: 'entity', entityId: entity.id, canonicalName });
-              }
-            }}
+            title="编辑实体规范名"
+            value={entity.canonicalName}
+            onSubmit={(canonicalName) => onEdit({ kind: 'entity', entityId: entity.id, canonicalName })}
           />
-          <Button
-            type="button"
-            size="sm"
-            variant="ghost"
-            disabled={merging || entities.length < 2}
-            onClick={() => {
-              const targetName = window.prompt(
-                `把「${entity.canonicalName}」合并到哪个实体？输入目标实体的规范名`,
-              )?.trim();
-              if (targetName === undefined || targetName.length === 0) return;
-              const target = entities.find(
-                (candidate) =>
-                  candidate.id !== entity.id &&
-                  (candidate.canonicalName === targetName || candidate.aliases.includes(targetName)),
-              );
-              if (target === undefined) {
-                window.alert(`未找到名为「${targetName}」的目标实体`);
-                return;
-              }
-              if (window.confirm(`确认把「${entity.canonicalName}」合并到「${target.canonicalName}」？源实体将被删除。`)) {
-                onMerge(entity.id, target.id);
-              }
-            }}
-          >
-            合并
-          </Button>
+          <MergeEntityButton
+            disabled={merging}
+            entity={entity}
+            entities={entities}
+            onMerge={onMerge}
+          />
           <DeleteButton
             disabled={deleting}
             onDelete={onDelete}
@@ -176,19 +296,13 @@ function EntityCard({
           {entity.aliases.map((alias) => (
             <span key={alias} className="group inline-flex items-center gap-1 rounded bg-secondary px-2 py-0.5 text-xs text-secondary-foreground">
               {alias}
-              <button
-                type="button"
+              <DeleteButton
                 disabled={deleting}
-                className="text-muted-foreground hover:text-destructive"
-                title="删除别名"
-                onClick={() => {
-                  if (window.confirm(`确认删除别名「${alias}」？`)) {
-                    onDelete({ kind: 'entity-alias', entityId: entity.id, alias });
-                  }
-                }}
-              >
-                ×
-              </button>
+                onDelete={onDelete}
+                target={{ kind: 'entity-alias', entityId: entity.id, alias }}
+                confirmMessage={`确认删除别名「${alias}」？`}
+                label="×"
+              />
             </span>
           ))}
         </div>
@@ -204,18 +318,15 @@ function EntityCard({
               <div className="flex items-center gap-1">
                 <EditButton
                   disabled={editing}
-                  onClick={() => {
-                    const newValue = window.prompt(`${attr.key} 的新值`, attr.value)?.trim();
-                    if (newValue !== undefined && newValue.length > 0 && newValue !== attr.value) {
-                      onEdit({
-                        kind: 'entity-attribute',
-                        entityId: entity.id,
-                        attributeKey: attr.key,
-                        attributeValue: attr.value,
-                        newValue,
-                      });
-                    }
-                  }}
+                  title={`编辑属性「${attr.key}」`}
+                  value={attr.value}
+                  onSubmit={(newValue) => onEdit({
+                    kind: 'entity-attribute',
+                    entityId: entity.id,
+                    attributeKey: attr.key,
+                    attributeValue: attr.value,
+                    newValue,
+                  })}
                 />
                 <DeleteButton
                   disabled={deleting}
@@ -274,12 +385,9 @@ function TimelineItem({
         <div className="flex items-center gap-1">
           <EditButton
             disabled={editing}
-            onClick={() => {
-              const description = window.prompt('时间线事件描述', event.description)?.trim();
-              if (description !== undefined && description.length > 0 && description !== event.description) {
-                onEdit({ kind: 'timeline-event', eventId: event.id, description });
-              }
-            }}
+            title="编辑时间线事件描述"
+            value={event.description}
+            onSubmit={(description) => onEdit({ kind: 'timeline-event', eventId: event.id, description })}
           />
           <DeleteButton
             disabled={deleting}
@@ -340,12 +448,9 @@ function RelationItem({
               <div className="flex items-center gap-1">
                 <EditButton
                   disabled={editing}
-                  onClick={() => {
-                    const kindValue = window.prompt('关系类型', phase.kind)?.trim();
-                    if (kindValue !== undefined && kindValue.length > 0 && kindValue !== phase.kind) {
-                      onEdit({ kind: 'relation-phase', relationId: relation.id, phaseIndex: index, kindValue });
-                    }
-                  }}
+                  title="编辑关系类型"
+                  value={phase.kind}
+                  onSubmit={(kindValue) => onEdit({ kind: 'relation-phase', relationId: relation.id, phaseIndex: index, kindValue })}
                 />
                 {phase.status !== 'confirmed' && (
                   <ConfirmButton
@@ -388,12 +493,9 @@ function PlotHookItem({
         <div className="flex items-center gap-1">
           <EditButton
             disabled={editing}
-            onClick={() => {
-              const description = window.prompt('伏笔描述', hook.description)?.trim();
-              if (description !== undefined && description.length > 0 && description !== hook.description) {
-                onEdit({ kind: 'plot-hook', hookId: hook.id, description });
-              }
-            }}
+            title="编辑伏笔描述"
+            value={hook.description}
+            onSubmit={(description) => onEdit({ kind: 'plot-hook', hookId: hook.id, description })}
           />
           <DeleteButton
             disabled={deleting}

@@ -74,6 +74,11 @@ export function locateSourceActionView(hasSelectedIssue: boolean): LocateSourceA
     : { label: '选择问题后定位', title: '打开左侧问题列表，选择要定位的诊断问题', intent: 'select-issue' };
 }
 
+/** 已完成的事实阶段查看持久事实库；未完成阶段查看当前核对任务。 */
+export function factStageDestination(status: string): 'story-bible' | 'fact-task' {
+  return status === 'completed' || status === 'skipped' ? 'story-bible' : 'fact-task';
+}
+
 export function actorLabel(actor: string | undefined): string {
   switch (actor) {
     case 'author': return '作者';

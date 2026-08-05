@@ -22,7 +22,7 @@ import { Button } from '@/components/ui/button';
 import { getBuiltinWorkflowTemplate } from '../../core/workflow/templates.js';
 import type { WorkflowKind } from '../../core/workflow/types.js';
 import type { ChapterTreeDto, WorkflowSnapshotDto } from '../../shared/ipc/index.js';
-import { locateSourceActionView } from '../lib/workbench-view-contracts.js';
+import { factStageDestination, locateSourceActionView } from '../lib/workbench-view-contracts.js';
 
 interface WorkflowGraphProps {
   readonly projectId: string | undefined;
@@ -33,8 +33,10 @@ interface WorkflowGraphProps {
   readonly onSnapshot: (snapshot: WorkflowSnapshotDto) => void;
   readonly onBackfillFacts?: () => void;
   readonly onRunGlobalAudit?: () => void;
-  /** 打开事实底稿面板（事实相关阶段的查看入口，task 10.5）。 */
+  /** 打开进行中的事实核对任务面板。 */
   readonly onOpenFactSheet?: () => void;
+  /** 打开已沉淀的全书事实库。 */
+  readonly onOpenStoryBible?: () => void;
   readonly onLocateSource?: () => void;
   readonly onSelectLocateSourceIssue?: () => void;
   readonly canLocateSource?: boolean;
@@ -132,6 +134,7 @@ export function WorkflowGraph({
   onBackfillFacts,
   onRunGlobalAudit,
   onOpenFactSheet,
+  onOpenStoryBible,
   onLocateSource,
   onSelectLocateSourceIssue,
   canLocateSource = false,
@@ -288,14 +291,18 @@ export function WorkflowGraph({
           const isCurrent = stage.stageId === workflow.currentStageId;
           const label = template?.stages.find((item) => item.id === stage.templateStageId)?.label ?? stage.templateStageId;
           const done = stage.status === 'completed' || stage.status === 'skipped';
-          const clickable = FACT_STAGES.has(stage.templateStageId) && onOpenFactSheet !== undefined;
+          const factStage = FACT_STAGES.has(stage.templateStageId);
+          const destination = factStageDestination(stage.status);
+          const openFacts = destination === 'story-bible' ? onOpenStoryBible : onOpenFactSheet;
+          const clickable = factStage && openFacts !== undefined;
+          const factDestination = destination === 'story-bible' ? '全书事实库' : '事实核对任务';
           return (
             <button
               key={stage.stageId}
               type="button"
               disabled={!clickable}
-              onClick={clickable ? onOpenFactSheet : undefined}
-              title={clickable ? `${index + 1}. ${label}（点击查看事实底稿）` : `${index + 1}. ${label} · ${stageStateLabel(stage.status, isCurrent)}`}
+              onClick={clickable ? openFacts : undefined}
+              title={clickable ? `${index + 1}. ${label}（点击查看${factDestination}）` : `${index + 1}. ${label} · ${stageStateLabel(stage.status, isCurrent)}`}
               className={`flex min-w-0 items-center gap-2 rounded-md border px-2 py-1.5 text-left text-xs transition-colors ${stageTone(stage.status, isCurrent)} ${clickable ? 'cursor-pointer hover:border-primary/60' : 'cursor-default'}`}
               aria-current={isCurrent ? 'step' : undefined}
               role="listitem"

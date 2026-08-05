@@ -762,6 +762,7 @@ export function App(): JSX.Element {
             dashboard.runGlobalAudit(workflowRef);
           }}
           onOpenFactSheet={() => setFactSheetOpen(true)}
+          onOpenStoryBible={() => setBibleOpen(true)}
           onLocateSource={runLocateSource}
           onSelectLocateSourceIssue={() => setNavContext('issues')}
           canLocateSource={locateSourceIssueId !== undefined}
@@ -886,7 +887,10 @@ export function App(): JSX.Element {
       <FactSheetDrawer
         open={factSheetOpen}
         onOpenChange={setFactSheetOpen}
-        onOpenBible={() => setBibleOpen(true)}
+        onOpenBible={() => {
+          setFactSheetOpen(false);
+          setBibleOpen(true);
+        }}
         panelProps={{
           state: factExtraction.state,
           busy: factExtraction.busy,

@@ -89,6 +89,7 @@ import {
   buildWorkflowCollapsedSummary,
   buildWorkflowView,
   currentTaskStatus,
+  factStageDestination,
   impactStatusLabel,
   locateSourceActionView,
   observationSummary,
@@ -5099,6 +5100,11 @@ function smokeLocateSourceGuidanceContracts(): void {
     && withoutIssue.label === '选择问题后定位'
     && withIssue.intent === 'locate'
     && withIssue.label === '定位原文');
+  check('UI 回补：已完成事实阶段直达事实库，执行中阶段查看任务面板',
+    factStageDestination('completed') === 'story-bible'
+    && factStageDestination('skipped') === 'story-bible'
+    && factStageDestination('running') === 'fact-task'
+    && factStageDestination('awaiting-confirmation') === 'fact-task');
 }
 
 function smokeTask1011ViewModeContracts(): void {
