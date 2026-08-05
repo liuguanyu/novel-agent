@@ -84,7 +84,7 @@ concept-generator、scene-outliner、researcher 等）。
 - **AND** 仅在作者确认 candidate 后，Main 才 MUST 提交版本化 scene-outline asset；计划性内容 MUST NOT 自动写成 Story Bible 事实
 - **AND** 完成后 MUST 收敛 END，MUST NOT 进入写-审-改环
 
-#### Scenario: researcher 为 research artifact 节点
+#### Scenario: researcher 为已落地策划类节点
 - **WHEN** 作者召唤 `researcher`（动作 `research`）为题材做背景资料研究（关键史实/技术细节/可用角度）
 - **THEN** 图 MUST 路由到已落地的 researcher 节点，该节点 MUST 产出中文自然语言研究札记，写入 currentDraft 并作为对话消息呈现给作者
 - **AND** 该节点 MUST 持久化为可寻址的 research artifact（含来源与版本），但 MUST NOT 写入 CreativeAsset、Story Bible 或 CreativeAsset change set

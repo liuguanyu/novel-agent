@@ -9,7 +9,7 @@
 - **THEN** 系统 MUST 经 story-workspace 稳定标识符定位到对应冲突章节
 - **AND** 定位 MUST NOT 因重命名/移序/编辑而漂移
 
-#### Scenario: 从全书问题进入局部修复
+#### Scenario: 一键修复占位
 - **WHEN** 作者对某个 open 问题请求修复
 - **THEN** 系统 MUST 将问题纳入或关联老书修订工作流并定位原文
 - **AND** MUST 通过 surgical-refactor 局部 diff 通道与逐 hunk 裁决落盘
