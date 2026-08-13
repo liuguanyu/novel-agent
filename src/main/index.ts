@@ -129,7 +129,7 @@ app.whenReady().then(
         creativeAssetRepository!,
         issueRepository,
       );
-    registerIpcHandlers(orchestration, workflowService);
+    registerIpcHandlers(orchestration, workflowService, () => modelResolver);
     if (result.ok) {
       modelResolver = new ModelResolver(result.config);
       // 模型就绪后注册新书写作/审校循环执行器（初稿/修订/连贯性/事实底稿）。

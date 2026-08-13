@@ -77,6 +77,9 @@ import { asCheckpointId, asFactVersionId } from '../../core/story-bible/index.js
 import { asNodeId } from '../../core/manuscript/node-id.js';
 import type { ModelResolver } from '../model-resolver.js';
 import { appendOrchestrationLog } from '../local-log.js';
+import { DEFAULT_NOVEL_DIR } from '../novel-reader.js';
+import { loadOutline, loadPreservations } from '../legacy-organization/store.js';
+import { buildLegacyRevisionContext, renderLegacyRevisionContext } from '../../core/legacy-organization/index.js';
 import type { CreativeAssetRepository, ResearchArtifactRepository, SqliteCheckpointer, SqliteFactStore, TaskRunRepository, WorkflowIssueRepository, WorkflowRepository } from '../db/index.js';
 import {
   assembleContext,
@@ -888,6 +891,7 @@ export class OrchestrationRuntime {
     const checkpointer = this.#deps.getCheckpointer();
     const factStore = this.#deps.getFactStore();
     const assembly = run.assembly;
+    const legacyRevisionContext = this.#loadLegacyRevisionContext(run);
     return {
       createAdapter: (agentId: string, tier: CapabilityTier, options) =>
         resolver.createAdapter(agentId, tier, options),
@@ -910,9 +914,12 @@ export class OrchestrationRuntime {
       },
       // section 6：按 agent 声明装配上下文。无事实库时返回 null（图降级为不召回）。
       assembleContext: async (agentId: string, state: NovelState) => {
-        if (factStore === undefined) return null;
         const request = this.#assemblyRequest(agentId, assembly);
-        return assembleContext(factStore, state, request);
+        const additionalContext = await legacyRevisionContext;
+        return assembleContext(factStore, state, {
+          ...request,
+          ...(additionalContext === undefined ? {} : { additionalContext }),
+        });
       },
       // section 7：事实库硬检查（章号纠偏+指令冲突）——reviewer 节点合并入 activeBugs。
       checkFacts: async (agentId: string, _state: NovelState) =>
@@ -940,6 +947,18 @@ export class OrchestrationRuntime {
         run.parent = cp.id;
       },
     };
+  }
+
+  async #loadLegacyRevisionContext(run: ActiveRun): Promise<string | undefined> {
+    if (run.workflowRef === undefined) return undefined;
+    const workflow = await this.#deps.workflows?.get(run.workflowRef.workflowId);
+    if (workflow?.kind !== 'legacy-book-revision') return undefined;
+    const [outline, manifest] = await Promise.all([
+      loadOutline(DEFAULT_NOVEL_DIR),
+      loadPreservations(DEFAULT_NOVEL_DIR),
+    ]);
+    if (outline === undefined || manifest === undefined) return undefined;
+    return renderLegacyRevisionContext(buildLegacyRevisionContext(outline, manifest));
   }
 
   /** 把运行的组装基座投影为 AssemblyRequest（关键词→FactRetrievalQuery）。 */

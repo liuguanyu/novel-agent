@@ -193,6 +193,8 @@ export interface AssemblyRequest {
   softChapterNodeId?: string;
   /** 从指令/对话提取的检索关键词（实体名/伏笔关键词等） */
   keywords?: FactRetrievalQuery;
+  /** 由特定工作流提供的附加约束；与事实召回分区呈现。 */
+  additionalContext?: string;
 }
 
 /** 组装结果：召回条目（含真实 provenance）+ 近期对话 + contextRefs（版本指针）。 */
@@ -207,6 +209,8 @@ export interface AssembledContext {
   strategy: AgentAssemblyStrategy;
   /** 是否硬锚点（scope=node/selection） */
   isHardAnchor: boolean;
+  /** 特定工作流附加的独立上下文区块。 */
+  additionalContext?: string;
 }
 
 /** 硬锚点判定：划词/点章（node/selection）为硬锚点，其余为软范围。 */
@@ -222,7 +226,7 @@ export function isHardAnchor(scope: SummonScope): boolean {
  * @param request 组装请求（agent + scope + 锚点 + 关键词）
  */
 export async function assembleContext(
-  store: Pick<FactStoreReader, 'getView'> & { getLatestVersion: () => Promise<FactVersionId | null> },
+  store: (Pick<FactStoreReader, 'getView'> & { getLatestVersion: () => Promise<FactVersionId | null> }) | undefined,
   state: NovelState,
   request: AssemblyRequest,
 ): Promise<AssembledContext> {
@@ -236,7 +240,7 @@ export async function assembleContext(
   let retrieval: RetrievalResult = { entities: [], plotHooks: [], timelineEvents: [] };
   let factRef: ContextRefs['facts'] = null;
 
-  if (strategy.wantsFacts) {
+  if (strategy.wantsFacts && store !== undefined) {
     const version = await store.getLatestVersion();
     if (version !== null) {
       const view = await store.getView(version);
@@ -267,7 +271,14 @@ export async function assembleContext(
     corpus: state.contextRefs.corpus,
   };
 
-  return { retrieval, recentDialogue, contextRefs, strategy, isHardAnchor: hardAnchor };
+  return {
+    retrieval,
+    recentDialogue,
+    contextRefs,
+    strategy,
+    isHardAnchor: hardAnchor,
+    ...(request.additionalContext === undefined ? {} : { additionalContext: request.additionalContext }),
+  };
 }
 
 /** 硬锚点过滤：只保留出处/埋点落在锚点节点的命中（不扩散到其他章节）。 */
@@ -340,9 +351,15 @@ export function renderAssembledContext(assembled: AssembledContext): string {
     }
   }
 
-  if (lines.length === 0) return '';
-  const anchorNote = assembled.isHardAnchor
-    ? '（以下事实严格限定在作者指定的锚点范围内）'
-    : '（以下事实由内容召回得到，章号仅为软提示，请以出处锚点为准）';
-  return `【事实库召回${anchorNote}】\n${lines.join('\n')}`;
+  const sections: string[] = [];
+  if (lines.length > 0) {
+    const anchorNote = assembled.isHardAnchor
+      ? '（以下事实严格限定在作者指定的锚点范围内）'
+      : '（以下事实由内容召回得到，章号仅为软提示，请以出处锚点为准）';
+    sections.push(`【事实库召回${anchorNote}】\n${lines.join('\n')}`);
+  }
+  if (assembled.additionalContext !== undefined && assembled.additionalContext.length > 0) {
+    sections.push(assembled.additionalContext);
+  }
+  return sections.join('\n\n');
 }

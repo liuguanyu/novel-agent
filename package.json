@@ -24,6 +24,11 @@
     "smoke:persistence": "tsc -p tsconfig.smoke.json && node out-smoke/main/persistence-smoke.js",
     "smoke:orchestration": "tsc -p tsconfig.smoke.json && node out-smoke/main/orchestration-smoke.js",
     "smoke:extraction": "tsc -p tsconfig.smoke.json && node out-smoke/main/extraction-smoke.js",
+    "smoke:legacy-plots": "tsc -p tsconfig.smoke.json && node out-smoke/main/legacy-organization/plot-recognizer-smoke.js",
+    "smoke:legacy-advisor": "tsc -p tsconfig.smoke.json && node out-smoke/main/legacy-organization/plot-advisor-smoke.js",
+    "smoke:legacy-revision": "tsc -p tsconfig.smoke.json && node out-smoke/main/legacy-organization/revision-context-smoke.js",
+    "smoke:legacy-plotmap": "tsc -p tsconfig.smoke.json && node out-smoke/main/legacy-organization/plot-map-smoke.js",
+    "smoke:legacy-diagnosis": "tsc -p tsconfig.smoke.json && node out-smoke/main/legacy-organization/book-diagnoser-smoke.js",
     "smoke:workflow": "tsc -p tsconfig.smoke.json && node out-smoke/main/workflow-smoke.js && node out-smoke/main/workflow-integration-smoke.js"
   },
   "dependencies": {

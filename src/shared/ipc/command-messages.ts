@@ -351,7 +351,27 @@ export type FrontendCommandMessage =
   | MergeStoryBibleEntitiesCommand
   | ComputeRefactorDiffCommand
   | ApplyHunkDecisionsCommand
-  | RetrieveCorpusCommand;
+  | RetrieveCorpusCommand
+  | GenerateLegacyOutlineCommand
+  | RecognizeChapterPlotsCommand
+  | RecognizeBookPlotsCommand
+  | AskLegacyPlotAdvisorCommand
+  | DiagnoseLegacyBookCommand
+  | AddOutlinePlotCommand
+  | UpdateOutlinePlotCommand
+  | MoveOutlinePlotCommand
+  | DeleteOutlinePlotCommand
+  | RestoreDeletedPlotCommand
+  | MergeOutlinePlotsCommand
+  | AddCrossChapterIssueCommand
+  | UpdateCrossChapterIssueCommand
+  | SaveAdvisorConversationCommand
+  | ClearAdvisorConversationCommand
+  | PreservePlotCommand
+  | UnpreservePlotCommand
+  | PreserveQuoteCommand
+  | UnpreserveQuoteCommand
+  | UpdatePreservationNoteCommand;
 
 /**
  * 检索作用域投影 (I7 corpus-worker-runtime)。
@@ -394,4 +414,197 @@ export interface RetrieveCorpusCommand {
   type: 'retrieve-corpus';
   runId: RunId;
   query: CorpusQueryDto;
+}
+
+/** 开始生成旧稿大纲（异步后台任务）。 */
+export interface GenerateLegacyOutlineCommand {
+  type: 'generate-legacy-outline';
+  runId: RunId;
+  projectId: string;
+}
+
+/** 识别某一章中的情节候选。 */
+export interface RecognizeChapterPlotsCommand {
+  type: 'recognize-chapter-plots';
+  runId: RunId;
+  projectId: string;
+  chapterNodeId: string;
+}
+
+/** 依次补齐全书尚未识别的章节；长章节由 Main 自动分片并归并。 */
+export interface RecognizeBookPlotsCommand {
+  type: 'recognize-book-plots';
+  runId: RunId;
+  projectId: string;
+}
+
+/** 针对单个情节候选向参谋提问；只返回建议，不修改正文或大纲。 */
+export interface AskLegacyPlotAdvisorCommand {
+  type: 'ask-legacy-plot-advisor';
+  runId: RunId;
+  projectId: string;
+  chapterNodeId: string;
+  plotNodeId: string;
+  plotTitle: string;
+  plotSummary: string;
+  evidenceQuote?: string;
+  question: string;
+  /** 同一情节此前的追问记录，供参谋继续讨论；作者为 author，参谋为 advisor。 */
+  conversation?: ReadonlyArray<{ role: 'author' | 'advisor'; content: string }>;
+  mode: 'auto' | 'timeline' | 'historical-context' | 'plot-logic' | 'character' | 'panel';
+}
+
+/** 全书诊断：基于旧稿大纲检查跨章时间线/人物状态/因果关系。 */
+export interface DiagnoseLegacyBookCommand {
+  type: 'diagnose-legacy-book';
+  runId: RunId;
+  projectId: string;
+}
+
+/** 新增一个人工情节候选。 */
+export interface AddOutlinePlotCommand {
+  type: 'add-outline-plot';
+  runId: RunId;
+  projectId: string;
+  chapterNodeId: string;
+  title: string;
+  summary: string;
+}
+
+/** 编辑情节候选。 */
+export interface UpdateOutlinePlotCommand {
+  type: 'update-outline-plot';
+  runId: RunId;
+  projectId: string;
+  plotNodeId: string;
+  title: string;
+  summary: string;
+}
+
+/** 在用于重写的全书情节线中移动一个情节；不改变其原文章节来源。 */
+export interface MoveOutlinePlotCommand {
+  type: 'move-outline-plot';
+  runId: RunId;
+  projectId: string;
+  plotNodeId: string;
+  direction: 'up' | 'down';
+}
+
+/** 删除情节候选。 */
+export interface DeleteOutlinePlotCommand {
+  type: 'delete-outline-plot';
+  runId: RunId;
+  projectId: string;
+  plotNodeId: string;
+}
+
+/** 从回收站恢复情节候选。 */
+export interface RestoreDeletedPlotCommand {
+  type: 'restore-deleted-plot';
+  runId: RunId;
+  projectId: string;
+  plotNodeId: string;
+}
+
+/** 将多个章节候选合并为一个跨章情节；这是可选处理动作，不代表所有跨章问题都应合并。 */
+export interface MergeOutlinePlotsCommand {
+  type: 'merge-outline-plots';
+  runId: RunId;
+  projectId: string;
+  plotNodeIds: ReadonlyArray<string>;
+  primaryChapterNodeId: string;
+  title: string;
+  summary: string;
+}
+
+/** 记录跨章关联或冲突，保留原情节不变。 */
+export interface AddCrossChapterIssueCommand {
+  type: 'add-cross-chapter-issue';
+  runId: RunId;
+  projectId: string;
+  plotNodeIds: ReadonlyArray<string>;
+  kind: 'timeline' | 'character-state' | 'causality' | 'duplicate-event' | 'continuity' | 'other';
+  severity: 'low' | 'medium' | 'high' | 'unknown';
+  description: string;
+  evidence: ReadonlyArray<string>;
+  authorNote?: string;
+}
+
+/** 更新跨章问题的作者裁决状态或备注。 */
+export interface UpdateCrossChapterIssueCommand {
+  type: 'update-cross-chapter-issue';
+  runId: RunId;
+  projectId: string;
+  issueId: string;
+  status: 'open' | 'confirmed' | 'resolved' | 'dismissed';
+  authorNote?: string;
+}
+
+/** 保存某情节的参谋讨论记录。 */
+export interface SaveAdvisorConversationCommand {
+  type: 'save-advisor-conversation';
+  runId: RunId;
+  projectId: string;
+  plotNodeId: string;
+  turns: ReadonlyArray<{
+    question: string;
+    advice: string;
+    options: ReadonlyArray<string>;
+    askedAt: string;
+  }>;
+}
+
+/** 清空某情节的参谋讨论记录。 */
+export interface ClearAdvisorConversationCommand {
+  type: 'clear-advisor-conversation';
+  runId: RunId;
+  projectId: string;
+  plotNodeId: string;
+}
+
+/** 保留情节。 */
+export interface PreservePlotCommand {
+  type: 'preserve-plot';
+  runId: RunId;
+  projectId: string;
+  outlineNodeId: string;
+  authorNote: string | undefined;
+}
+
+/** 取消保留情节。 */
+export interface UnpreservePlotCommand {
+  type: 'unpreserve-plot';
+  runId: RunId;
+  projectId: string;
+  plotId: string;
+}
+
+/** 保留原文。 */
+export interface PreserveQuoteCommand {
+  type: 'preserve-quote';
+  runId: RunId;
+  projectId: string;
+  text: string;
+  sourceNodeId: string;
+  sourceChapterTitle: string;
+  outlineNodeId: string | undefined;
+  authorNote: string | undefined;
+}
+
+/** 取消保留原文。 */
+export interface UnpreserveQuoteCommand {
+  type: 'unpreserve-quote';
+  runId: RunId;
+  projectId: string;
+  quoteId: string;
+}
+
+/** 更新保留项备注。 */
+export interface UpdatePreservationNoteCommand {
+  type: 'update-preservation-note';
+  runId: RunId;
+  projectId: string;
+  itemId: string;
+  kind: 'plot' | 'quote';
+  note: string;
 }

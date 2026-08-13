@@ -17,6 +17,8 @@ import { RefactorReviewPanel } from './components/RefactorReviewPanel.js';
 import { FindingConnector } from './components/FindingConnector.js';
 import { ExpertWorkbench } from './components/ExpertWorkbench.js';
 import { WorkflowGraph } from './components/WorkflowGraph.js';
+import { LegacyOutlinePanel } from './components/LegacyOutlinePanel.js';
+import { PreservationDrawer } from './components/PreservationDrawer.js';
 import { GoalDialog } from './components/GoalDialog.js';
 import { FactSheetDrawer } from './components/FactSheetDrawer.js';
 import { StatusFooter } from './components/StatusFooter.js';
@@ -31,6 +33,7 @@ import {
   ResizableHandle,
 } from './components/ui/resizable.js';
 import { useChapters } from './hooks/useChapters.js';
+import { useLegacyOrganization } from './hooks/useLegacyOrganization.js';
 import { useDialogue, type SummonRequest } from './hooks/useDialogue.js';
 import { useReviewFindings } from './hooks/useReviewFindings.js';
 import { useStoryBible } from './hooks/useStoryBible.js';
@@ -129,6 +132,7 @@ export function App(): JSX.Element {
     return findChapterPath(tree.roots, chapterId);
   }, [latestFactModelTask?.chapterId, tree]);
   const dashboard = useDashboard();
+  const legacyOrganization = useLegacyOrganization(workspaceProjectId);
   // 当前项目身份来自 Main 的工作区 manifest；查询失败时保留 standalone 工作台。
   const workflowState = useWorkflowSnapshot(workspaceProjectId);
   const workflowRef = workflowState.snapshot?.currentStageId === null || workflowState.snapshot === null
@@ -148,6 +152,7 @@ export function App(): JSX.Element {
   const [factSheetOpen, setFactSheetOpen] = useState(false);
   const [taskActivityOpen, setTaskActivityOpen] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
+  const [requestedLegacyPlotNodeId, setRequestedLegacyPlotNodeId] = useState<string | undefined>(undefined);
   // 左栏上下文切换（章节/问题/人物/故事线/产物）；人物与故事线按需拉取事实库投影。
   const [navContext, setNavContext] = useState<NavContextId>('chapters');
   const currentWorkflowStage = workflowState.snapshot?.stages.find(
@@ -655,6 +660,29 @@ export function App(): JSX.Element {
   );
 
   const bookTitle = tree?.title.trim();
+  const isLegacyWorkflow = workflowState.snapshot?.kind === 'legacy-book-revision';
+  const legacyContextSummary = isLegacyWorkflow && legacyOrganization.manifest !== undefined
+    ? {
+        preservedPlots: legacyOrganization.manifest.plots.map((plot) => {
+          const outlineNode = legacyOrganization.outline?.nodes.find((node) => node.id === plot.outlineNodeId);
+          return {
+            title: outlineNode?.title ?? plot.title,
+            summary: outlineNode?.summary ?? '',
+            ...(plot.authorNote === undefined ? {} : { authorNote: plot.authorNote }),
+          };
+        }),
+        preservedQuotes: legacyOrganization.manifest.quotes.map((quote) => ({
+          text: quote.text,
+          sourceChapterTitle: quote.sourceChapterTitle,
+          ...(quote.authorNote === undefined ? {} : { authorNote: quote.authorNote }),
+        })),
+        crossChapterIssues: (legacyOrganization.outline?.crossChapterIssues ?? []).map((issue) => ({
+          description: issue.description,
+          status: issue.status,
+          ...(issue.authorNote === undefined ? {} : { authorNote: issue.authorNote }),
+        })),
+      }
+    : undefined;
   // 三模式可见面矩阵（task 10.7/10.10）：与 orchestration 冲烟同源，互斥关系不在 JSX 里散落判断。
   const surfaces = resolveViewModeSurfaces(viewMode);
 
@@ -748,6 +776,56 @@ export function App(): JSX.Element {
 
       {/* 工作台主体：非 workbench 模式仅隐藏不卸载，保留滚动位置/高亮/栏宽与后台订阅。 */}
       <div className={surfaces.workbenchBodyVisible ? 'flex min-h-0 flex-1 flex-col' : 'hidden'}>
+        {isLegacyWorkflow ? (
+          <>
+            <div className="min-h-0 flex-1">
+              <LegacyOutlinePanel
+                projectId={workspaceProjectId}
+                tree={tree}
+                outline={legacyOrganization.outline}
+                manifest={legacyOrganization.manifest}
+                progress={legacyOrganization.progress}
+                loading={legacyOrganization.loading}
+                error={legacyOrganization.error}
+                content={content}
+                loadingContent={loadingContent}
+                selectedNodeId={selectedNodeId}
+                requestedPlotNodeId={requestedLegacyPlotNodeId}
+                contentNodeId={contentNodeId}
+                onGenerateOutline={legacyOrganization.generateOutline}
+                onRecognizeChapterPlots={legacyOrganization.recognizeChapterPlots}
+                onRecognizeBookPlots={legacyOrganization.recognizeBookPlots}
+                onAddOutlinePlot={legacyOrganization.addOutlinePlot}
+                onUpdateOutlinePlot={legacyOrganization.updateOutlinePlot}
+                onMoveOutlinePlot={legacyOrganization.moveOutlinePlot}
+                onDeleteOutlinePlot={legacyOrganization.deleteOutlinePlot}
+                onRestoreDeletedPlot={legacyOrganization.restoreDeletedPlot}
+                onAddCrossChapterIssue={legacyOrganization.addCrossChapterIssue}
+                onUpdateCrossChapterIssue={legacyOrganization.updateCrossChapterIssue}
+                onPreservePlot={legacyOrganization.preservePlot}
+                onUnpreservePlot={legacyOrganization.unpreservePlot}
+                onPreserveQuote={legacyOrganization.preserveQuote}
+                onUnpreserveQuote={legacyOrganization.unpreserveQuote}
+                onSaveAdvisorConversation={legacyOrganization.saveAdvisorConversation}
+                onClearAdvisorConversation={legacyOrganization.clearAdvisorConversation}
+                onDiagnoseBook={legacyOrganization.diagnoseBook}
+                onSelectChapter={selectChapter}
+                onRefresh={legacyOrganization.refresh}
+              />
+            </div>
+            <PreservationDrawer
+              manifest={legacyOrganization.manifest}
+              onSelectChapter={selectChapter}
+              onOpenPlot={(outlineNodeId) => {
+                setRequestedLegacyPlotNodeId(undefined);
+                window.setTimeout(() => setRequestedLegacyPlotNodeId(outlineNodeId), 0);
+              }}
+              onUnpreservePlot={legacyOrganization.unpreservePlot}
+              onUnpreserveQuote={legacyOrganization.unpreserveQuote}
+            />
+          </>
+        ) : (
+          <>
         <WorkflowGraph
           projectId={workspaceProjectId}
           tree={tree}
@@ -838,16 +916,20 @@ export function App(): JSX.Element {
           onOpenActivities={() => setTaskActivityOpen(true)}
           onOpenFactSheet={() => setFactSheetOpen(true)}
         />
+          </>
+        )}
       </div>
 
-      <ToolboxDrawer
-        selectedNodeId={selectedNodeId}
-        open={toolboxOpen}
-        onOpenChange={setToolboxOpen}
-        onSummon={summon}
-        onOpenBoard={handleOpenBoard}
-        onAction={handleAction}
-      />
+      {!isLegacyWorkflow && (
+        <ToolboxDrawer
+          selectedNodeId={selectedNodeId}
+          open={toolboxOpen}
+          onOpenChange={setToolboxOpen}
+          onSummon={summon}
+          onOpenBoard={handleOpenBoard}
+          onAction={handleAction}
+        />
+      )}
 
       {/* Hero 连线为全屏工作台专属（task 10.10）：其他模式下卸载，停止坐标计算；
           返回后仅当选中问题与锚点仍存在时自然恢复。 */}
@@ -938,6 +1020,7 @@ export function App(): JSX.Element {
         loadingContent={loadingContent}
         refactor={refactor}
         prefill={refactorPrefill}
+        {...(legacyContextSummary === undefined ? {} : { legacyContextSummary })}
       />
     </div>
   );

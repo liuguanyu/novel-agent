@@ -24,6 +24,12 @@ export const QUERY_CHANNELS = {
   getArchitectBoard: 'query:get-architect-board',
   /** 取持久化任务运行摘要、作者可见活动及待确认候选。 */
   getTaskCenter: 'query:get-task-center',
+  /** 取老书整理的最新旧稿大纲。 */
+  getLegacyOutline: 'query:get-legacy-outline',
+  /** 取老书整理的保留内容清单。 */
+  getPreservationManifest: 'query:get-preservation-manifest',
+  /** 取大纲生成进度。 */
+  getOutlineGenerationProgress: 'query:get-outline-generation-progress',
 } as const;
 
 export type QueryChannel = (typeof QUERY_CHANNELS)[keyof typeof QUERY_CHANNELS];
@@ -204,4 +210,119 @@ export interface ArchitectBoardDto {
   plotHooks: ReadonlyArray<StoryBiblePlotHookDto>;
   /** 核心人设集：实体。 */
   entities: ReadonlyArray<StoryBibleEntityDto>;
+}
+
+// ─── 老书整理 v2 查询 DTO（大纲与保留内容） ───────────────────
+
+/** 大纲节点来源（DTO 投影，shared/ 不依赖 core/）。 */
+export interface OutlineSourceRefDto {
+  readonly nodeId: string;
+  readonly label: string;
+  readonly quote: string | undefined;
+}
+
+/** 大纲节点 DTO。 */
+export interface OutlineNodeDto {
+  readonly id: string;
+  readonly parentId: string | undefined;
+  readonly order: number;
+  readonly kind: 'volume' | 'chapter' | 'arc' | 'plot-beat' | 'scene';
+  readonly title: string;
+  readonly summary: string;
+  readonly characters: ReadonlyArray<string>;
+  readonly sources: ReadonlyArray<OutlineSourceRefDto>;
+  readonly crossChapter: boolean;
+  readonly preserved: boolean;
+  readonly authorNote: string | undefined;
+}
+
+/** 单轮参谋讨论记录 DTO。 */
+export interface AdvisorConversationTurnDto {
+  readonly question: string;
+  readonly advice: string;
+  readonly options: ReadonlyArray<string>;
+  readonly askedAt: string;
+}
+
+/** 单个情节的参谋讨论记录 DTO。 */
+export interface AdvisorConversationDto {
+  readonly plotNodeId: string;
+  readonly turns: ReadonlyArray<AdvisorConversationTurnDto>;
+  readonly updatedAt: string;
+}
+
+/** 旧稿大纲 DTO。 */
+export interface LegacyOutlineDto {
+  readonly id: string;
+  readonly projectId: string;
+  readonly version: number;
+  readonly createdAt: string;
+  readonly nodes: ReadonlyArray<OutlineNodeDto>;
+  /** 作者确认和调整后的重写情节线；元素为稳定 plot node id。 */
+  readonly plotSequence: ReadonlyArray<string>;
+  readonly deletedPlots: ReadonlyArray<DeletedPlotDto>;
+  readonly crossChapterIssues: ReadonlyArray<CrossChapterIssueDto>;
+  readonly advisorConversations: ReadonlyArray<AdvisorConversationDto>;
+}
+
+export interface DeletedPlotDto {
+  readonly node: OutlineNodeDto;
+  readonly deletedAt: string;
+}
+
+export interface CrossChapterIssueDto {
+  readonly id: string;
+  readonly plotNodeIds: ReadonlyArray<string>;
+  readonly chapterNodeIds: ReadonlyArray<string>;
+  readonly kind: 'timeline' | 'character-state' | 'causality' | 'duplicate-event' | 'continuity' | 'other';
+  readonly severity: 'low' | 'medium' | 'high' | 'unknown';
+  readonly description: string;
+  readonly evidence: ReadonlyArray<string>;
+  readonly status: 'open' | 'confirmed' | 'resolved' | 'dismissed';
+  readonly authorNote: string | undefined;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+}
+
+/** 保留情节 DTO。 */
+export interface PreservedPlotDto {
+  readonly id: string;
+  readonly outlineNodeId: string;
+  readonly title: string;
+  readonly sourceNodeIds: ReadonlyArray<string>;
+  readonly authorNote: string | undefined;
+  readonly preservedAt: string;
+}
+
+/** 保留原文 DTO。 */
+export interface PreservedQuoteDto {
+  readonly id: string;
+  readonly text: string;
+  readonly sourceNodeId: string;
+  readonly sourceChapterTitle: string;
+  readonly outlineNodeId: string | undefined;
+  readonly recommended: boolean;
+  readonly authorNote: string | undefined;
+  readonly preservedAt: string;
+}
+
+/** 保留清单 DTO。 */
+export interface PreservationManifestDto {
+  readonly projectId: string;
+  readonly outlineId: string;
+  readonly plots: ReadonlyArray<PreservedPlotDto>;
+  readonly quotes: ReadonlyArray<PreservedQuoteDto>;
+  readonly updatedAt: string;
+}
+
+/** 大纲生成进度 DTO。 */
+export interface OutlineGenerationProgressDto {
+  readonly status: 'idle' | 'reading' | 'structuring' | 'analyzing' | 'completed' | 'failed';
+  readonly chaptersRead: number | undefined;
+  readonly totalChapters: number | undefined;
+  readonly error: string | undefined;
+  readonly currentChapterTitle?: string;
+  readonly currentSegment?: number;
+  readonly totalSegments?: number;
+  readonly failedChapters?: ReadonlyArray<{ chapterNodeId: string; title: string; error: string }>;
 }

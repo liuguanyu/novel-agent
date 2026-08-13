@@ -21,6 +21,9 @@ import type {
   WorkspaceProjectContextDto,
   GetTaskCenterRequest,
   TaskCenterSnapshotDto,
+  LegacyOutlineDto,
+  PreservationManifestDto,
+  OutlineGenerationProgressDto,
 } from './query-messages.js';
 import type { WorkflowSnapshotResponse, GetWorkflowSnapshotRequest, WorkflowCommand, WorkflowAssetQuery, WorkflowAssetResponse, WorkflowIssuesQuery, WorkflowIssuesResponse } from './workflow-messages.js';
 
@@ -60,4 +63,10 @@ export interface NovelAgentBridge {
   getWorkflowAsset(request: WorkflowAssetQuery): Promise<WorkflowAssetResponse>;
   getWorkflowIssues(request: WorkflowIssuesQuery): Promise<WorkflowIssuesResponse>;
   sendWorkflowCommand(command: WorkflowCommand): Promise<WorkflowSnapshotResponse>;
+  /** 取老书整理的最新旧稿大纲。 */
+  getLegacyOutline(projectId: string): Promise<LegacyOutlineDto | undefined>;
+  /** 取老书整理的保留内容清单。 */
+  getPreservationManifest(projectId: string): Promise<PreservationManifestDto | undefined>;
+  /** 取大纲生成进度。 */
+  getOutlineGenerationProgress(projectId: string): Promise<OutlineGenerationProgressDto>;
 }

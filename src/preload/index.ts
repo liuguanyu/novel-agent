@@ -25,6 +25,9 @@ import {
   type WorkspaceProjectContextDto,
   type GetTaskCenterRequest,
   type TaskCenterSnapshotDto,
+  type LegacyOutlineDto,
+  type PreservationManifestDto,
+  type OutlineGenerationProgressDto,
   type NovelAgentBridge,
   type Unsubscribe,
   WORKFLOW_QUERY_CHANNELS,
@@ -65,6 +68,18 @@ const api: NovelAgentBridge = {
   getWorkflowAsset(request: WorkflowAssetQuery): Promise<WorkflowAssetResponse> { return ipcRenderer.invoke(WORKFLOW_QUERY_CHANNELS.asset, request) as Promise<WorkflowAssetResponse>; },
   getWorkflowIssues(request: WorkflowIssuesQuery): Promise<WorkflowIssuesResponse> { return ipcRenderer.invoke(WORKFLOW_QUERY_CHANNELS.issues, request) as Promise<WorkflowIssuesResponse>; },
   sendWorkflowCommand(command: WorkflowCommand): Promise<WorkflowSnapshotResponse> { return ipcRenderer.invoke(WORKFLOW_COMMAND_CHANNEL, command) as Promise<WorkflowSnapshotResponse>; },
+  /** 取老书整理的最新旧稿大纲。 */
+  getLegacyOutline(projectId: string): Promise<LegacyOutlineDto | undefined> {
+    return ipcRenderer.invoke(QUERY_CHANNELS.getLegacyOutline, projectId) as Promise<LegacyOutlineDto | undefined>;
+  },
+  /** 取老书整理的保留内容清单。 */
+  getPreservationManifest(projectId: string): Promise<PreservationManifestDto | undefined> {
+    return ipcRenderer.invoke(QUERY_CHANNELS.getPreservationManifest, projectId) as Promise<PreservationManifestDto | undefined>;
+  },
+  /** 取大纲生成进度。 */
+  getOutlineGenerationProgress(projectId: string): Promise<OutlineGenerationProgressDto> {
+    return ipcRenderer.invoke(QUERY_CHANNELS.getOutlineGenerationProgress, projectId) as Promise<OutlineGenerationProgressDto>;
+  },
   /** 发送前端命令（召唤/中断等），经 control-event 通道上行。 */
   sendCommand(command: FrontendCommandMessage): void {
     ipcRenderer.send(IPC_CHANNELS.controlEvent, command);

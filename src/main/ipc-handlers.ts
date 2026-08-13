@@ -28,8 +28,11 @@ import {
   type GetTaskCenterRequest,
   type TaskCenterSnapshotDto,
   WORKFLOW_QUERY_CHANNELS, WORKFLOW_COMMAND_CHANNEL, type WorkflowCommand,
+  type LegacyOutlineDto,
+  type PreservationManifestDto,
+  type OutlineGenerationProgressDto,
 } from '../shared/ipc/index.js';
-import { readChapterTree, readChapterContent, readManifestChapterIds, readWorkspaceProjectContext } from './novel-reader.js';
+import { readChapterTree, readChapterContent, readManifestChapterIds, readWorkspaceProjectContext, DEFAULT_NOVEL_DIR } from './novel-reader.js';
 import { asNodeId } from '../core/manuscript/index.js';
 import {
   asCorpusItemType,
@@ -48,6 +51,10 @@ import {
   type SummonParams,
   type RestartParams,
 } from './orchestration/runtime.js';
+import * as legacyOrgService from './legacy-organization/outline-service.js';
+import * as legacyOrgStore from './legacy-organization/store.js';
+import { PlotAdvisor } from './legacy-organization/plot-advisor.js';
+import { BookDiagnoser } from './legacy-organization/book-diagnoser.js';
 
 const idSchema = z.string().trim().min(1).max(256);
 const workflowRefSchema = z.object({ workflowId: idSchema, stageId: idSchema, issueId: idSchema.optional() }).strict();
@@ -113,7 +120,11 @@ const workflowCommandSchema = z.union([startWorkflowSchema, workflowActionSchema
  * 注册所有 IPC handlers。启动时调用一次。
  * @param runtime 长驻编排运行时（持有单一有状态图 + checkpointer 接线）。
  */
-export function registerIpcHandlers(runtime: OrchestrationRuntime, workflowService?: WorkflowApplicationService): void {
+export function registerIpcHandlers(
+  runtime: OrchestrationRuntime,
+  workflowService?: WorkflowApplicationService,
+  getModelResolver?: () => ModelResolver | undefined,
+): void {
   if (workflowService !== undefined) {
     ipcMain.handle(WORKFLOW_QUERY_CHANNELS.snapshot, async (_e, raw: unknown) => ({ snapshot: await workflowService.get(workflowSnapshotQuerySchema.parse(raw) as unknown as Parameters<WorkflowApplicationService['get']>[0]) }));
     ipcMain.handle(WORKFLOW_QUERY_CHANNELS.active, async (_e, raw: unknown) => ({ snapshot: await workflowService.active(idSchema.parse(raw)) }));
@@ -198,6 +209,114 @@ export function registerIpcHandlers(runtime: OrchestrationRuntime, workflowServi
     async (_event: IpcMainInvokeEvent, raw: unknown): Promise<TaskCenterSnapshotDto> => {
       const request = taskCenterQuerySchema.parse(raw) as GetTaskCenterRequest;
       return runtime.getTaskCenter(request);
+    },
+  );
+
+  // ── 老书整理 v2 查询 ──────────────────────────────────────────
+
+  ipcMain.handle(
+    QUERY_CHANNELS.getLegacyOutline,
+    async (_event: IpcMainInvokeEvent, raw: unknown): Promise<LegacyOutlineDto | undefined> => {
+      const projectId = typeof raw === 'string' ? raw : '';
+      if (projectId.length === 0) return undefined;
+      const outline = await legacyOrgStore.loadOutline(DEFAULT_NOVEL_DIR);
+      if (outline === undefined) return undefined;
+      return {
+        id: outline.id,
+        projectId: outline.projectId,
+        version: outline.version,
+        createdAt: outline.createdAt,
+        crossChapterIssues: (outline.crossChapterIssues ?? []).map((issue) => ({
+          id: issue.id,
+          plotNodeIds: issue.plotNodeIds,
+          chapterNodeIds: issue.chapterNodeIds,
+          kind: issue.kind,
+          severity: issue.severity,
+          description: issue.description,
+          evidence: issue.evidence,
+          status: issue.status,
+          authorNote: issue.authorNote,
+          createdAt: issue.createdAt,
+          updatedAt: issue.updatedAt,
+        })),
+        deletedPlots: (outline.deletedPlots ?? []).map((item) => ({
+          node: {
+            id: item.node.id,
+            parentId: item.node.parentId,
+            order: item.node.order,
+            kind: item.node.kind,
+            title: item.node.title,
+            summary: item.node.summary,
+            characters: item.node.characters,
+            sources: item.node.sources.map((s) => ({ nodeId: s.nodeRef.id, label: s.label, quote: s.quote })),
+            crossChapter: item.node.crossChapter ?? false,
+            preserved: item.node.preserved,
+            authorNote: item.node.authorNote,
+          },
+          deletedAt: item.deletedAt,
+        })),
+        plotSequence: legacyOrgService.resolvePlotSequence(outline),
+        nodes: outline.nodes.map((n) => ({
+          id: n.id,
+          parentId: n.parentId,
+          order: n.order,
+          kind: n.kind,
+          title: n.title,
+          summary: n.summary,
+          characters: n.characters,
+          sources: n.sources.map((s) => ({ nodeId: s.nodeRef.id, label: s.label, quote: s.quote })),
+          crossChapter: n.crossChapter ?? false,
+          preserved: n.preserved,
+          authorNote: n.authorNote,
+        })),
+        advisorConversations: (outline.advisorConversations ?? []).map((conv) => ({
+          plotNodeId: conv.plotNodeId,
+          turns: conv.turns,
+          updatedAt: conv.updatedAt,
+        })),
+      };
+    },
+  );
+
+  ipcMain.handle(
+    QUERY_CHANNELS.getPreservationManifest,
+    async (_event: IpcMainInvokeEvent, raw: unknown): Promise<PreservationManifestDto | undefined> => {
+      const projectId = typeof raw === 'string' ? raw : '';
+      if (projectId.length === 0) return undefined;
+      const manifest = await legacyOrgStore.loadPreservations(DEFAULT_NOVEL_DIR);
+      if (manifest === undefined) return undefined;
+      return {
+        projectId: manifest.projectId,
+        outlineId: manifest.outlineId,
+        plots: manifest.plots.map((p) => ({
+          id: p.id,
+          outlineNodeId: p.outlineNodeId,
+          title: p.title,
+          sourceNodeIds: p.sourceRefs.map((s) => s.id),
+          authorNote: p.authorNote,
+          preservedAt: p.preservedAt,
+        })),
+        quotes: manifest.quotes.map((q) => ({
+          id: q.id,
+          text: q.text,
+          sourceNodeId: q.sourceNodeRef.id,
+          sourceChapterTitle: q.sourceChapterTitle,
+          outlineNodeId: q.outlineNodeId,
+          recommended: q.recommended,
+          authorNote: q.authorNote,
+          preservedAt: q.preservedAt,
+        })),
+        updatedAt: manifest.updatedAt,
+      };
+    },
+  );
+
+  ipcMain.handle(
+    QUERY_CHANNELS.getOutlineGenerationProgress,
+    async (_event: IpcMainInvokeEvent, raw: unknown): Promise<OutlineGenerationProgressDto> => {
+      const projectId = typeof raw === 'string' ? raw : '';
+      if (projectId.length === 0) return { status: 'idle', chaptersRead: undefined, totalChapters: undefined, error: undefined };
+      return legacyOrgStore.loadProgress(DEFAULT_NOVEL_DIR);
     },
   );
 
@@ -416,6 +535,232 @@ export function registerIpcHandlers(runtime: OrchestrationRuntime, workflowServi
       case 'get-chapter-content':
         // 查询走 invoke/handle 通道，此处忽略。
         return;
+      case 'generate-legacy-outline': {
+        const tree = await readChapterTree(DEFAULT_NOVEL_DIR);
+        const ctx = await readWorkspaceProjectContext(DEFAULT_NOVEL_DIR);
+        await legacyOrgService.generateOutline(ctx.projectId, DEFAULT_NOVEL_DIR, tree);
+        return;
+      }
+      case 'recognize-chapter-plots': {
+        const ctx = await readWorkspaceProjectContext(DEFAULT_NOVEL_DIR);
+        const resolver = getModelResolver?.();
+        if (resolver === undefined) {
+          await legacyOrgStore.saveProgress(DEFAULT_NOVEL_DIR, {
+            status: 'failed', chaptersRead: 0, totalChapters: 1, error: '模型尚未配置，无法识别章节情节',
+          });
+          return;
+        }
+        await legacyOrgService.recognizeChapterPlots(
+          DEFAULT_NOVEL_DIR,
+          ctx.projectId,
+          message.chapterNodeId,
+          resolver,
+        ).catch(() => {
+          // 服务已将明确失败原因写入进度；控制消息无需制造未处理 rejection。
+        });
+        return;
+      }
+      case 'recognize-book-plots': {
+        const ctx = await readWorkspaceProjectContext(DEFAULT_NOVEL_DIR);
+        const resolver = getModelResolver?.();
+        if (resolver === undefined) {
+          await legacyOrgStore.saveProgress(DEFAULT_NOVEL_DIR, {
+            status: 'failed', chaptersRead: 0, totalChapters: undefined, error: '模型尚未配置，无法识别全书情节',
+          });
+          return;
+        }
+        await legacyOrgService.recognizeBookPlots(
+          DEFAULT_NOVEL_DIR,
+          ctx.projectId,
+          resolver,
+        ).catch(() => {
+          // 服务已经写入可恢复的失败进度。
+        });
+        return;
+      }
+      case 'ask-legacy-plot-advisor': {
+        const resolver = getModelResolver?.();
+        if (resolver === undefined) {
+          wc.send(IPC_CHANNELS.controlEvent, {
+            type: 'legacy-plot-advisor-failed',
+            runId: message.runId,
+            plotNodeId: message.plotNodeId,
+            error: '模型尚未配置，无法联系参谋',
+          });
+          return;
+        }
+        try {
+          const outline = await legacyOrgStore.loadOutline(DEFAULT_NOVEL_DIR);
+          const chapter = outline?.nodes.find((node) => node.id === message.chapterNodeId && node.kind === 'chapter');
+          const plot = outline?.nodes.find((node) => node.id === message.plotNodeId && node.kind === 'plot-beat' && node.parentId === message.chapterNodeId);
+          if (chapter === undefined || plot === undefined) throw new Error('找不到当前情节，请刷新后重试');
+          const chapterContent = await readChapterContent(message.chapterNodeId, DEFAULT_NOVEL_DIR);
+          const advice = await new PlotAdvisor(resolver).ask({
+            chapterTitle: chapter.title,
+            chapterContent: chapterContent.content,
+            plotTitle: plot.title,
+            plotSummary: plot.summary,
+            evidenceQuote: plot.sources[0]?.quote,
+            question: message.question,
+            conversation: message.conversation ?? [],
+            mode: message.mode,
+          });
+          wc.send(IPC_CHANNELS.controlEvent, {
+            type: 'legacy-plot-advisor-completed',
+            runId: message.runId,
+            plotNodeId: message.plotNodeId,
+            question: message.question,
+            advice: advice.advice,
+            options: advice.options,
+          });
+        } catch (error: unknown) {
+          wc.send(IPC_CHANNELS.controlEvent, {
+            type: 'legacy-plot-advisor-failed',
+            runId: message.runId,
+            plotNodeId: message.plotNodeId,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+        return;
+      }
+      case 'diagnose-legacy-book': {
+        const resolver = getModelResolver?.();
+        if (resolver === undefined) {
+          wc.send(IPC_CHANNELS.controlEvent, {
+            type: 'legacy-book-diagnosis-failed',
+            runId: message.runId,
+            error: '模型尚未配置，无法运行全书诊断',
+          });
+          return;
+        }
+        try {
+          const outline = await legacyOrgStore.loadOutline(DEFAULT_NOVEL_DIR);
+          if (outline === undefined) throw new Error('大纲尚未生成，请先生成大纲');
+          const candidates = await new BookDiagnoser(resolver).diagnose(outline);
+          wc.send(IPC_CHANNELS.controlEvent, {
+            type: 'legacy-book-diagnosis-completed',
+            runId: message.runId,
+            candidates,
+          });
+        } catch (error: unknown) {
+          wc.send(IPC_CHANNELS.controlEvent, {
+            type: 'legacy-book-diagnosis-failed',
+            runId: message.runId,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+        return;
+      }
+      case 'add-outline-plot': {
+        const ctx = await readWorkspaceProjectContext(DEFAULT_NOVEL_DIR);
+        await legacyOrgService.addOutlinePlot(DEFAULT_NOVEL_DIR, ctx.projectId, message.chapterNodeId, message.title, message.summary);
+        return;
+      }
+      case 'update-outline-plot': {
+        const ctx = await readWorkspaceProjectContext(DEFAULT_NOVEL_DIR);
+        await legacyOrgService.updateOutlinePlot(DEFAULT_NOVEL_DIR, ctx.projectId, message.plotNodeId, message.title, message.summary);
+        return;
+      }
+      case 'move-outline-plot': {
+        const ctx = await readWorkspaceProjectContext(DEFAULT_NOVEL_DIR);
+        await legacyOrgService.moveOutlinePlot(DEFAULT_NOVEL_DIR, ctx.projectId, message.plotNodeId, message.direction);
+        return;
+      }
+      case 'delete-outline-plot': {
+        const ctx = await readWorkspaceProjectContext(DEFAULT_NOVEL_DIR);
+        await legacyOrgService.deleteOutlinePlot(DEFAULT_NOVEL_DIR, ctx.projectId, message.plotNodeId);
+        return;
+      }
+      case 'restore-deleted-plot': {
+        const ctx = await readWorkspaceProjectContext(DEFAULT_NOVEL_DIR);
+        await legacyOrgService.restoreDeletedPlot(DEFAULT_NOVEL_DIR, ctx.projectId, message.plotNodeId);
+        return;
+      }
+      case 'merge-outline-plots': {
+        const ctx = await readWorkspaceProjectContext(DEFAULT_NOVEL_DIR);
+        await legacyOrgService.mergeOutlinePlots(DEFAULT_NOVEL_DIR, ctx.projectId, message.plotNodeIds, message.primaryChapterNodeId, message.title, message.summary);
+        return;
+      }
+      case 'add-cross-chapter-issue': {
+        const ctx = await readWorkspaceProjectContext(DEFAULT_NOVEL_DIR);
+        await legacyOrgService.addCrossChapterIssue(DEFAULT_NOVEL_DIR, ctx.projectId, message.plotNodeIds, message.kind, message.severity, message.description, message.evidence, message.authorNote);
+        return;
+      }
+      case 'update-cross-chapter-issue': {
+        const ctx = await readWorkspaceProjectContext(DEFAULT_NOVEL_DIR);
+        await legacyOrgService.updateCrossChapterIssue(DEFAULT_NOVEL_DIR, ctx.projectId, message.issueId, message.status, message.authorNote);
+        return;
+      }
+      case 'save-advisor-conversation': {
+        const ctx = await readWorkspaceProjectContext(DEFAULT_NOVEL_DIR);
+        await legacyOrgService.saveAdvisorConversation(DEFAULT_NOVEL_DIR, ctx.projectId, message.plotNodeId, message.turns);
+        return;
+      }
+      case 'clear-advisor-conversation': {
+        const ctx = await readWorkspaceProjectContext(DEFAULT_NOVEL_DIR);
+        await legacyOrgService.clearAdvisorConversation(DEFAULT_NOVEL_DIR, ctx.projectId, message.plotNodeId);
+        return;
+      }
+      case 'preserve-plot': {
+        const outline = await legacyOrgStore.loadOutline(DEFAULT_NOVEL_DIR);
+        const ctx = await readWorkspaceProjectContext(DEFAULT_NOVEL_DIR);
+        if (outline === undefined) return;
+        const node = outline.nodes.find((n) => n.id === message.outlineNodeId);
+        await legacyOrgService.preservePlot(
+          DEFAULT_NOVEL_DIR,
+          ctx.projectId,
+          outline.id,
+          { outlineNodeId: message.outlineNodeId, authorNote: message.authorNote },
+          node?.title ?? '',
+        );
+        return;
+      }
+      case 'unpreserve-plot': {
+        const outline = await legacyOrgStore.loadOutline(DEFAULT_NOVEL_DIR);
+        const ctx = await readWorkspaceProjectContext(DEFAULT_NOVEL_DIR);
+        if (outline === undefined) return;
+        await legacyOrgService.unpreservePlot(DEFAULT_NOVEL_DIR, ctx.projectId, outline.id, message.plotId);
+        return;
+      }
+      case 'preserve-quote': {
+        const outline = await legacyOrgStore.loadOutline(DEFAULT_NOVEL_DIR);
+        const ctx = await readWorkspaceProjectContext(DEFAULT_NOVEL_DIR);
+        if (outline === undefined) return;
+        await legacyOrgService.preserveQuote(
+          DEFAULT_NOVEL_DIR,
+          ctx.projectId,
+          outline.id,
+          {
+            text: message.text,
+            sourceNodeRef: message.sourceNodeId,
+            sourceChapterTitle: message.sourceChapterTitle,
+            outlineNodeId: message.outlineNodeId,
+            authorNote: message.authorNote,
+          },
+        );
+        return;
+      }
+      case 'unpreserve-quote': {
+        const outline = await legacyOrgStore.loadOutline(DEFAULT_NOVEL_DIR);
+        const ctx = await readWorkspaceProjectContext(DEFAULT_NOVEL_DIR);
+        if (outline === undefined) return;
+        await legacyOrgService.unpreserveQuote(DEFAULT_NOVEL_DIR, ctx.projectId, outline.id, message.quoteId);
+        return;
+      }
+      case 'update-preservation-note': {
+        const outline = await legacyOrgStore.loadOutline(DEFAULT_NOVEL_DIR);
+        const ctx = await readWorkspaceProjectContext(DEFAULT_NOVEL_DIR);
+        if (outline === undefined) return;
+        await legacyOrgService.updateNote(
+          DEFAULT_NOVEL_DIR,
+          ctx.projectId,
+          outline.id,
+          message.itemId,
+          message.kind,
+          message.note,
+        );
+        return;
+      }
     }
   });
 }

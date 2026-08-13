@@ -508,7 +508,45 @@ export interface AssetImpactDetectedEvent {
  * 后端 → 前端 控制事件判别联合。
  * 接收方通过 `type` 收窄；后续 change（纠偏/冲突/时间旅行）在此叠加成员。
  */
+export interface LegacyPlotAdvisorCompletedEvent {
+  type: 'legacy-plot-advisor-completed';
+  runId: RunId;
+  plotNodeId: string;
+  question: string;
+  advice: string;
+  options: ReadonlyArray<string>;
+}
+
+export interface LegacyPlotAdvisorFailedEvent {
+  type: 'legacy-plot-advisor-failed';
+  runId: RunId;
+  plotNodeId: string;
+  error: string;
+}
+
+export interface LegacyBookDiagnosisCompletedEvent {
+  type: 'legacy-book-diagnosis-completed';
+  runId: RunId;
+  candidates: ReadonlyArray<{
+    kind: 'timeline' | 'character-state' | 'causality' | 'duplicate-event' | 'continuity' | 'other';
+    severity: 'low' | 'medium' | 'high' | 'unknown';
+    description: string;
+    evidence: ReadonlyArray<string>;
+    plotNodeIds: ReadonlyArray<string>;
+  }>;
+}
+
+export interface LegacyBookDiagnosisFailedEvent {
+  type: 'legacy-book-diagnosis-failed';
+  runId: RunId;
+  error: string;
+}
+
 export type BackendControlEvent =
+  | LegacyPlotAdvisorCompletedEvent
+  | LegacyPlotAdvisorFailedEvent
+  | LegacyBookDiagnosisCompletedEvent
+  | LegacyBookDiagnosisFailedEvent
   | WorkflowSnapshotEvent
   | WorkflowFailureEvent
   | AssetTargetSelectionRequiredEvent

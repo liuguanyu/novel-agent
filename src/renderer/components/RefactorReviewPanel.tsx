@@ -42,6 +42,24 @@ interface RefactorReviewPanelProps {
     readonly suggestion: string;
     readonly rewritten: '';
   } | undefined;
+  /** 老书改写将实际带入的整理结果摘要。 */
+  readonly legacyContextSummary?: {
+    readonly preservedPlots: ReadonlyArray<{
+      readonly title: string;
+      readonly summary: string;
+      readonly authorNote?: string;
+    }>;
+    readonly preservedQuotes: ReadonlyArray<{
+      readonly text: string;
+      readonly sourceChapterTitle: string;
+      readonly authorNote?: string;
+    }>;
+    readonly crossChapterIssues: ReadonlyArray<{
+      readonly description: string;
+      readonly status: 'open' | 'confirmed' | 'resolved' | 'dismissed';
+      readonly authorNote?: string;
+    }>;
+  };
 }
 
 function statusText(status: RefactorState['status']): string {
@@ -131,6 +149,7 @@ export function RefactorReviewPanel({
   open: openProp,
   onOpenChange,
   prefill,
+  legacyContextSummary,
 }: RefactorReviewPanelProps): JSX.Element {
   const [internalOpen, setInternalOpen] = useState(false);
   const controlled = openProp !== undefined;
@@ -202,6 +221,48 @@ export function RefactorReviewPanel({
           <SheetDescription>
             确认原片段与改写片段 → 计算差异 → 逐段接受/拒绝 → 拼回落盘（后端执行，可回滚）。
           </SheetDescription>
+          {legacyContextSummary !== undefined && (
+            <details className="mt-2 rounded-md border border-border bg-muted/30 px-3 py-2 text-xs">
+              <summary className="cursor-pointer font-medium text-foreground">
+                本次改写将带入：{legacyContextSummary.preservedPlots.length} 个保留情节 · {legacyContextSummary.preservedQuotes.length} 段保留原文 · {legacyContextSummary.crossChapterIssues.filter((issue) => issue.status === 'open' || issue.status === 'confirmed').length} 个待处理贯穿问题
+              </summary>
+              <div className="mt-2 max-h-52 space-y-3 overflow-y-auto text-left">
+                {legacyContextSummary.preservedPlots.length > 0 && (
+                  <section>
+                    <div className="font-medium text-foreground">必须保留的情节</div>
+                    {legacyContextSummary.preservedPlots.map((plot, index) => (
+                      <div key={`${plot.title}-${index}`} className="mt-1 text-muted-foreground">
+                        <div>• {plot.title}：{plot.summary}</div>
+                        {plot.authorNote !== undefined && <div className="ml-3 text-foreground">后续改写要求：{plot.authorNote}</div>}
+                      </div>
+                    ))}
+                  </section>
+                )}
+                {legacyContextSummary.preservedQuotes.length > 0 && (
+                  <section>
+                    <div className="font-medium text-foreground">保留原文</div>
+                    {legacyContextSummary.preservedQuotes.map((quote, index) => (
+                      <div key={`${quote.sourceChapterTitle}-${index}`} className="mt-1 text-muted-foreground">
+                        <div>• {quote.sourceChapterTitle}：「{quote.text}」</div>
+                        {quote.authorNote !== undefined && <div className="ml-3 text-foreground">作者说明：{quote.authorNote}</div>}
+                      </div>
+                    ))}
+                  </section>
+                )}
+                {legacyContextSummary.crossChapterIssues.length > 0 && (
+                  <section>
+                    <div className="font-medium text-foreground">贯穿问题与作者裁决</div>
+                    {legacyContextSummary.crossChapterIssues.map((issue, index) => (
+                      <div key={`${issue.description}-${index}`} className="mt-1 text-muted-foreground">
+                        <div>• [{issue.status}] {issue.description}</div>
+                        {issue.authorNote !== undefined && <div className="ml-3 text-foreground">作者裁决：{issue.authorNote}</div>}
+                      </div>
+                    ))}
+                  </section>
+                )}
+              </div>
+            </details>
+          )}
         </SheetHeader>
 
         <div className="flex flex-col gap-3 px-4 py-3 text-sm">
