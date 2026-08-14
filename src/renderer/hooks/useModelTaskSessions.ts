@@ -1,3 +1,4 @@
+import { subscribeModelTaskEvent } from '../lib/ipc-event-bus.js';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import type {
   BackendModelTaskEvent,
@@ -72,7 +73,7 @@ export function useModelTaskSessions(): UseModelTaskSessionsResult {
   const [attempts, setAttempts] = useState<ReadonlyArray<ModelTaskAttemptView>>([]);
   const [selectedAttemptId, setSelectedAttemptId] = useState<string | undefined>(undefined);
 
-  useEffect(() => window.novelAgent.onModelTaskEvent((event) => {
+  useEffect(() => subscribeModelTaskEvent((event) => {
     setAttempts((prev) => {
       const existingIndex = prev.findIndex((attempt) => attempt.attemptId === event.attemptId);
       if (existingIndex < 0) return [...prev, createAttempt(event)];

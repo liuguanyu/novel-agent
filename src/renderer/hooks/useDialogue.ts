@@ -5,6 +5,7 @@
  * 正文（content）与 reasoning（旁路，带 \u0001reasoning\u0001 前缀）分流拼接。
  * 手刹（中断）经 abort-run 命令经桥上报。Renderer 无业务逻辑：仅渲染与交互。
  */
+import { subscribeControlEvent, subscribeDialogueStream } from '../lib/ipc-event-bus.js';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { toControlCommand } from '../../core/shell/handbrake.js';
@@ -110,7 +111,7 @@ export function useDialogue(workflowRef?: WorkflowRefDto): UseDialogueResult {
   }, []);
 
   useEffect(() => {
-    const off = window.novelAgent.onDialogueStream((message: BackendStreamMessage) => {
+    const off = subscribeDialogueStream((message: BackendStreamMessage) => {
       switch (message.type) {
         case 'stream-start':
           applyToRun(message.runId, (t) => ({ ...t, status: 'streaming' }));
@@ -146,7 +147,7 @@ export function useDialogue(workflowRef?: WorkflowRefDto): UseDialogueResult {
   // 订阅控制事件通道：主召唤/对话流因 reviewer 抛出需裁决问题而挂起时，后端推 interrupt-raised。
   // 仅处理本 hook 发起的 runId（抽取冲突由 useFactExtraction 处理，避免双重接管）。
   useEffect(() => {
-    const off = window.novelAgent.onControlEvent((event: BackendControlEvent) => {
+    const off = subscribeControlEvent((event: BackendControlEvent) => {
       if (event.type !== 'interrupt-raised') return;
       if (!startedRunsRef.current.has(event.runId)) return;
       setPendingConflict({ runId: event.runId, issues: event.issues, ...(event.workflowRef === undefined ? {} : { workflowRef: event.workflowRef }) });

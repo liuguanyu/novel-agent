@@ -10,7 +10,13 @@ import type { CapabilityTier, ModelAdapter } from '../../core/model/index.js';
 import type { LegacyOutline } from '../../core/legacy-organization/index.js';
 
 const DIAGNOSIS_AGENT_ID = 'architect';
-const DIAGNOSIS_TIER: CapabilityTier = 'reasoning';
+// 使用 cheap-fast 档位而非 reasoning：reasoning 模型会先消耗思考 token，
+// 在 maxOutputTokens 限制下容易把预算全花在 reasoning 上导致正文为空。
+// cheap-fast 模型直接产出结构化 JSON，对跨章分析同样有效。
+const DIAGNOSIS_TIER: CapabilityTier = 'cheap-fast';
+// reasoning 档位的模型会先消耗思考 token 再产出正文；4096 容易被 reasoning 吃光导致正文为空。
+// 提到 8192 与 advisor 一致，给 reasoning + 正文输出都留够空间。
+const DIAGNOSIS_MAX_OUTPUT_TOKENS = 8_192;
 const MAX_PLOT_SUMMARY_CHARS = 200;
 
 export interface BookDiagnosisModelResolver {
@@ -34,6 +40,64 @@ const diagnosisOutputSchema = z.object({
     plotNodeIds: z.array(z.string().min(1)).min(2).max(10),
   })).max(20),
 }).strict();
+
+/**
+ * 尝试修复被截断的 JSON：模型可能在输出到最后一个 issue 时触发 length 限制。
+ * 策略：找到最后一个完整的 `}` 闭合点，把后面的不完整部分丢掉，再补上外层 `]` 和 `}`。
+ */
+function tryRepairTruncatedJson(text: string): string | undefined {
+  const stripped = text.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim();
+  if (stripped.length === 0) return undefined;
+  // 已经是合法 JSON，不需要修复
+  try {
+    JSON.parse(stripped);
+    return stripped;
+  } catch {
+    // 继续
+  }
+  // 找到最后一个完整 issue 对象的闭合 `}`
+  // JSON 结构：{"issues":[{...},{...},...  被截断时缺少 ] 和 }
+  // 找到 issues 数组中最后一个完整的 `}`
+  const lastCompleteBrace = stripped.lastIndexOf('},');
+  if (lastCompleteBrace >= 0) {
+    const truncated = stripped.slice(0, lastCompleteBrace + 1) + ']}';
+    try {
+      JSON.parse(truncated);
+      return truncated;
+    } catch {
+      // 继续
+    }
+  }
+  // 如果只有一个 issue 被截断（没有 `},`）
+  // 找到 issues 数组开始后的第一个 `{` 和对应的 `}`
+  const issuesStart = stripped.indexOf('[{');
+  if (issuesStart >= 0) {
+    // 单个 issue，被截断 —— 尝试找到最后一个可能完整或修复的 `}`
+    const singleIssue = stripped.slice(issuesStart + 1); // 从 { 开始
+    const lastBrace = singleIssue.lastIndexOf('}');
+    if (lastBrace >= 0) {
+      const candidate = '{"issues":[' + singleIssue.slice(0, lastBrace + 1) + ']}';
+      try {
+        JSON.parse(candidate);
+        return candidate;
+      } catch {
+        // 继续
+      }
+    }
+  }
+  // 尝试空 issues 修复
+  const issuesIdx = stripped.indexOf('"issues"');
+  if (issuesIdx >= 0) {
+    const candidate = '{"issues":[]}';
+    try {
+      JSON.parse(candidate);
+      return candidate;
+    } catch {
+      // 继续
+    }
+  }
+  return undefined;
+}
 
 function parseOutput(text: string): ReadonlyArray<BookDiagnosisCandidate> {
   let raw: unknown;
@@ -105,12 +169,37 @@ export function renderBookDiagnosisPrompt(outline: LegacyOutline): string {
 export class BookDiagnoser {
   constructor(private readonly resolver: BookDiagnosisModelResolver) {}
 
+  private static readonly MAX_RETRIES = 2;
+
   async diagnose(outline: LegacyOutline): Promise<ReadonlyArray<BookDiagnosisCandidate>> {
     const adapter = this.resolver.createAdapter(DIAGNOSIS_AGENT_ID, DIAGNOSIS_TIER);
-    const result = await adapter.complete({
-      messages: [{ role: 'user', content: renderBookDiagnosisPrompt(outline) }],
-      options: { maxTokens: 4096 },
-    });
-    return parseOutput(result.text);
+    let lastError: Error | undefined;
+    for (let attempt = 0; attempt <= BookDiagnoser.MAX_RETRIES; attempt++) {
+      const result = await adapter.complete({
+        messages: [{ role: 'user', content: renderBookDiagnosisPrompt(outline) }],
+        options: { maxTokens: DIAGNOSIS_MAX_OUTPUT_TOKENS },
+      });
+      // 截断时先尝试修复部分 JSON；只有完全无法解析时才进入重试
+      if (result.finishReason === 'length') {
+        const repaired = tryRepairTruncatedJson(result.text);
+        if (repaired !== undefined) {
+          try {
+            return parseOutput(repaired);
+          } catch (err) {
+            lastError = err instanceof Error ? err : new Error(String(err));
+            continue;
+          }
+        }
+        lastError = new Error('全书诊断结果被模型截断，请重试');
+        continue;
+      }
+      try {
+        return parseOutput(result.text);
+      } catch (err) {
+        lastError = err instanceof Error ? err : new Error(String(err));
+        continue;
+      }
+    }
+    throw lastError ?? new Error('全书诊断解析失败，请重试');
   }
 }

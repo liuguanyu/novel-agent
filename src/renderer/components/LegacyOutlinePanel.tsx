@@ -6,6 +6,7 @@
  * - 中栏：原稿正文（只读）
  * - 右栏：当前节点详情 + 保留操作
  */
+import { subscribeControlEvent } from '../lib/ipc-event-bus.js';
 
 import { useMemo, useState, useCallback, useRef, useEffect } from 'react';
 import {
@@ -282,7 +283,7 @@ export function LegacyOutlinePanel({
 
   // 接收当前窗口内情节参谋的结构化回复，并持久化。
   useEffect(() => {
-    return window.novelAgent.onControlEvent((event) => {
+    return subscribeControlEvent((event) => {
       if (event.type === 'legacy-plot-advisor-completed') {
         setAdvisorBusyPlotId(undefined);
         setAdvisorByPlot((previous) => {

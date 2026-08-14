@@ -1,3 +1,4 @@
+import { subscribeTaskActivityEvent } from '../lib/ipc-event-bus.js';
 import { useEffect, useMemo, useState } from 'react';
 import type { BackendTaskActivityEvent, TaskActivityEvent } from '../../shared/ipc/index.js';
 
@@ -38,7 +39,7 @@ export function useTaskActivityStream(projectId?: string): TaskActivityStreamSta
   useEffect(() => {
     let disposed = false;
     setEvents([]);
-    const unsubscribe = window.novelAgent.onTaskActivityEvent((event) => {
+    const unsubscribe = subscribeTaskActivityEvent((event) => {
       if (!disposed) setEvents((previous) => mergeEvents(previous, [event]));
     });
     void window.novelAgent.getTaskCenter(projectId === undefined ? {} : { projectId }).then(

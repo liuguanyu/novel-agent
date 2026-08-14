@@ -1,3 +1,4 @@
+import { subscribeControlEvent, subscribeDialogueStream } from '../lib/ipc-event-bus.js';
 import { useEffect, useRef, useState } from 'react';
 import type { NodeName } from '../../core/orchestration/graph-topology.js';
 import type {
@@ -124,7 +125,7 @@ export function useWorkbenchActivities(activeRunId: string | undefined): UseWork
       runningNodes.clear();
     };
 
-    const offControl = window.novelAgent.onControlEvent((event: BackendControlEvent) => {
+    const offControl = subscribeControlEvent((event: BackendControlEvent) => {
       if (event.type === 'graph-node-activated') {
         if (event.phase === 'enter') enterNode(event.runId, event.node);
         else settleNode(event.runId, event.node, 'done');
@@ -140,7 +141,7 @@ export function useWorkbenchActivities(activeRunId: string | undefined): UseWork
       }
     });
 
-    const offDialogue = window.novelAgent.onDialogueStream((message: BackendStreamMessage) => {
+    const offDialogue = subscribeDialogueStream((message: BackendStreamMessage) => {
       if (message.type === 'stream-start') {
         beginRun(message.runId);
         return;

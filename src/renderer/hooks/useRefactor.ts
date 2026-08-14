@@ -4,6 +4,7 @@
  * Renderer 只发送 compute-refactor-diff / apply-hunk-decisions 命令并订阅 Main 下发的
  * refactor-* control-event；不读取正文文件、不计算 diff、不写入正文（accept/reject 只上报意图）。
  */
+import { subscribeControlEvent } from '../lib/ipc-event-bus.js';
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import type {
@@ -213,7 +214,7 @@ export function useRefactor(
   }, []);
 
   useEffect(() => {
-    const off = window.novelAgent.onControlEvent((event: BackendControlEvent) => {
+    const off = subscribeControlEvent((event: BackendControlEvent) => {
       setState((prev) => {
         if (prev.runId !== event.runId) return prev;
         switch (event.type) {

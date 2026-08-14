@@ -4,6 +4,7 @@
  * Renderer 只发送抽取/补库/恢复/中断命令，并订阅 Main 下发的 control-event；
  * 不读取正文文件、不调用模型、不写事实库。
  */
+import { subscribeControlEvent } from '../lib/ipc-event-bus.js';
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import type {
@@ -160,7 +161,7 @@ export function useFactExtraction(): UseFactExtractionResult {
   }, []);
 
   useEffect(() => {
-    const off = window.novelAgent.onControlEvent((event: BackendControlEvent) => {
+    const off = subscribeControlEvent((event: BackendControlEvent) => {
       setState((prev) => {
         if (event.type === 'fact-extraction-started') {
           const mode = prev.runId === event.runId && prev.mode !== undefined ? prev.mode : 'chapter';

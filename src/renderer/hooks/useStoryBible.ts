@@ -1,4 +1,5 @@
 /** Story Bible 面板数据与确认事实 hook。 */
+import { subscribeControlEvent } from '../lib/ipc-event-bus.js';
 
 import { useCallback, useEffect, useState } from 'react';
 import type {
@@ -101,7 +102,7 @@ export function useStoryBible(autoLoad: boolean): UseStoryBibleResult {
   }, [autoLoad, bible, loading, refresh]);
 
   useEffect(() => {
-    const off = window.novelAgent.onControlEvent((event: BackendControlEvent) => {
+    const off = subscribeControlEvent((event: BackendControlEvent) => {
       // 事实抽取完成且有新版本落库时，Story Bible 是廉价 DB 读取，直接自动刷新。
       if (event.type === 'fact-extraction-completed' && event.factVersion !== undefined) {
         refresh();

@@ -33,9 +33,9 @@ export interface PlotAdvisorResult {
 }
 
 const advisorOutputSchema = z.object({
-  advice: z.string().trim().min(1).max(2_000),
-  options: z.array(z.string().trim().min(1).max(300)).max(5).default([]),
-}).strict();
+  advice: z.string().trim().min(1).max(4_000),
+  options: z.array(z.string().trim().min(1).max(500)).max(8).default([]),
+}).passthrough();
 
 function parseOutput(text: string): PlotAdvisorResult {
   let raw: unknown;
@@ -82,16 +82,30 @@ export function renderPlotAdvisorPrompt(input: PlotAdvisorInput): string {
 export class PlotAdvisor {
   constructor(private readonly resolver: PlotAdvisorModelResolver) {}
 
+  private static readonly MAX_RETRIES = 2;
+
   async ask(input: PlotAdvisorInput): Promise<PlotAdvisorResult> {
     const adapter = this.resolver.createAdapter(ADVISOR_AGENT_ID, ADVISOR_TIER);
-    const result = await adapter.complete({
-      messages: [
-        { role: 'system', content: '你只输出合法 JSON，不输出 Markdown、分析过程或整章改写。' },
-        { role: 'user', content: renderPlotAdvisorPrompt(input) },
-      ],
-      options: { temperature: 0.2, maxTokens: ADVISOR_MAX_OUTPUT_TOKENS },
-    });
-    if (result.finishReason === 'length') throw new Error('参谋建议被截断，请重试');
-    return parseOutput(result.text);
+    let lastError: Error | undefined;
+    for (let attempt = 0; attempt <= PlotAdvisor.MAX_RETRIES; attempt++) {
+      const result = await adapter.complete({
+        messages: [
+          { role: 'system', content: '你只输出合法 JSON，不输出 Markdown、分析过程或整章改写。' },
+          { role: 'user', content: renderPlotAdvisorPrompt(input) },
+        ],
+        options: { temperature: 0.2, maxTokens: ADVISOR_MAX_OUTPUT_TOKENS },
+      });
+      if (result.finishReason === 'length') {
+        lastError = new Error('参谋建议被截断，请重试');
+        continue;
+      }
+      try {
+        return parseOutput(result.text);
+      } catch (err) {
+        lastError = err instanceof Error ? err : new Error(String(err));
+        continue;
+      }
+    }
+    throw lastError ?? new Error('参谋建议解析失败，请重试');
   }
 }

@@ -1,6 +1,7 @@
 /**
  * 质量仪表盘 hook：Renderer 仅发送总检/中断命令并消费 Main 下发的控制事件。
  */
+import { subscribeControlEvent } from '../lib/ipc-event-bus.js';
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import type {
@@ -130,7 +131,7 @@ export function useDashboard(): UseDashboardResult {
   }, []);
 
   useEffect(() => {
-    const off = window.novelAgent.onControlEvent((event: BackendControlEvent) => {
+    const off = subscribeControlEvent((event: BackendControlEvent) => {
       setState((prev) => {
         if (event.type === 'global-audit-started') return fromStarted(event);
         if (event.type === 'targeted-verification-completed' && prev.dashboard !== undefined) {

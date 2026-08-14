@@ -1,3 +1,4 @@
+import { subscribeControlEvent } from '../lib/ipc-event-bus.js';
 import { useCallback, useEffect, useState } from 'react';
 import type { BackendControlEvent, WorkflowSnapshotDto } from '../../shared/ipc/index.js';
 
@@ -23,7 +24,7 @@ export function useWorkflowSnapshot(projectId: string | undefined): UseWorkflowS
   }, [projectId]);
   useEffect(() => { reload(); }, [reload]);
   useEffect(() => {
-    const off = window.novelAgent.onControlEvent((event: BackendControlEvent) => {
+    const off = subscribeControlEvent((event: BackendControlEvent) => {
       if (event.type === 'workflow-snapshot' && (projectId === undefined || event.snapshot.projectId === projectId)) { setSnapshot(event.snapshot); setFailure(undefined); }
       if (event.type === 'workflow-failure' && (projectId === undefined || event.snapshot?.projectId === projectId)) { setFailure(event.error.message); if (event.snapshot !== undefined) setSnapshot(event.snapshot); }
     });

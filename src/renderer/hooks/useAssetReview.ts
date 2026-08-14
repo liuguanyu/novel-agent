@@ -1,3 +1,4 @@
+import { subscribeControlEvent } from '../lib/ipc-event-bus.js';
 import { useEffect, useState } from 'react';
 import type { AssetImpactDto, BackendControlEvent, CreativeAssetCandidateDto, WorkflowSnapshotDto } from '../../shared/ipc/index.js';
 import { buildAssetCandidateDecisionCommand } from '../lib/workflow-ui-contracts.js';
@@ -27,7 +28,7 @@ export function useAssetReview(workflow: WorkflowSnapshotDto | null): UseAssetRe
     setPendingIds(new Set());
     setError(undefined);
   }, [workflow?.workflowId]);
-  useEffect(() => window.novelAgent.onControlEvent((event: BackendControlEvent) => {
+  useEffect(() => subscribeControlEvent((event: BackendControlEvent) => {
     if (workflow === null) return;
     if (event.type === 'creative-asset-change-proposed' && event.candidate.workflowRef?.workflowId === workflow.workflowId) {
       setCandidates((old) => old.some((item) => item.candidateId === event.candidate.candidateId) ? old : [...old, event.candidate]);

@@ -29,6 +29,7 @@
     "smoke:legacy-revision": "tsc -p tsconfig.smoke.json && node out-smoke/main/legacy-organization/revision-context-smoke.js",
     "smoke:legacy-plotmap": "tsc -p tsconfig.smoke.json && node out-smoke/main/legacy-organization/plot-map-smoke.js",
     "smoke:legacy-diagnosis": "tsc -p tsconfig.smoke.json && node out-smoke/main/legacy-organization/book-diagnoser-smoke.js",
+    "smoke:legacy-real-model": "tsc -p tsconfig.smoke.json && node out-smoke/main/legacy-organization/real-model-smoke.js",
     "smoke:workflow": "tsc -p tsconfig.smoke.json && node out-smoke/main/workflow-smoke.js && node out-smoke/main/workflow-integration-smoke.js"
   },
   "dependencies": {

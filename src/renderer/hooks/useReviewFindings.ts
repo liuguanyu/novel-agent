@@ -5,6 +5,7 @@
  * （产出 agent + ConsistencyIssueDto[]）。暴露选中态供「点击卡片 → 定位高亮 → 连线」链路驱动。
  * Renderer 无业务逻辑：仅接收后端下发的强类型结构化数据并维护 UI 选中态。
  */
+import { subscribeControlEvent } from '../lib/ipc-event-bus.js';
 
 import { useCallback, useEffect, useState } from 'react';
 import type {
@@ -45,7 +46,7 @@ export function useReviewFindings(): UseReviewFindingsResult {
   const [activeFinding, setActiveFinding] = useState<ActiveFinding | undefined>(undefined);
 
   useEffect(() => {
-    const off = window.novelAgent.onControlEvent((event: BackendControlEvent) => {
+    const off = subscribeControlEvent((event: BackendControlEvent) => {
       if (event.type !== 'review-completed') return;
       setFindingsByRun((prev) => {
         const next = new Map(prev);
