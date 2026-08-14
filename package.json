@@ -32,6 +32,9 @@
     "smoke:legacy-real-model": "tsc -p tsconfig.smoke.json && node out-smoke/main/legacy-organization/real-model-smoke.js",
     "smoke:story-asset": "tsc -p tsconfig.smoke.json && node out-smoke/main/story-asset/story-asset-smoke.js",
     "smoke:story-asset-extractor": "tsc -p tsconfig.smoke.json && node out-smoke/main/story-asset/asset-extractor-smoke.js",
+    "smoke:story-asset-store": "tsc -p tsconfig.smoke.json && node out-smoke/main/story-asset/asset-store-smoke.js",
+    "smoke:story-asset-validation": "tsc -p tsconfig.smoke.json && node out-smoke/main/story-asset/asset-validation-smoke.js",
+    "smoke:story-asset-lifecycle": "tsc -p tsconfig.smoke.json && node out-smoke/main/story-asset/asset-lifecycle-smoke.js",
     "smoke:workflow": "tsc -p tsconfig.smoke.json && node out-smoke/main/workflow-smoke.js && node out-smoke/main/workflow-integration-smoke.js"
   },
   "dependencies": {
