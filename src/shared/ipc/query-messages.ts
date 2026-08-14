@@ -32,6 +32,8 @@ export const QUERY_CHANNELS = {
   getOutlineGenerationProgress: 'query:get-outline-generation-progress',
   /** 取故事资产快照。 */
   getStoryAssetSnapshot: 'query:get-story-asset-snapshot',
+  /** 取新版大纲。 */
+  getNewOutline: 'query:get-new-outline',
 } as const;
 
 export type QueryChannel = (typeof QUERY_CHANNELS)[keyof typeof QUERY_CHANNELS];
@@ -434,4 +436,66 @@ export interface StoryAssetSnapshotDto {
   readonly arcs: ReadonlyArray<CharacterArcDto>;
   readonly foreshadowings: ReadonlyArray<ForeshadowingDto>;
   readonly sourceOutlineVersion: number | undefined;
+}
+
+// ─── 新版大纲 DTO（Roadmap M3） ──────────────────────────────────────────
+
+/** 新版大纲节点来源关系 DTO */
+export type SourceRelationDto = 'carried-over' | 'adjusted' | 'merged' | 'new' | 'deleted';
+
+/** 新版大纲节点状态 DTO */
+export type NewOutlineStatusDto = 'draft' | 'confirmed' | 'formal';
+
+/** 新版大纲节点 DTO */
+export interface NewOutlineNodeDto {
+  readonly id: string;
+  readonly parentId: string | undefined;
+  readonly order: number;
+  readonly kind: 'volume' | 'chapter' | 'arc' | 'plot-beat' | 'scene';
+  readonly title: string;
+  readonly summary: string;
+  readonly goal: string;
+  readonly conflict: string;
+  readonly outcome: string;
+  readonly sourceRelation: SourceRelationDto;
+  readonly sourceNodeIds: ReadonlyArray<string>;
+  readonly plotThreadIds: ReadonlyArray<string>;
+  readonly characterIds: ReadonlyArray<string>;
+  readonly preservedPlotIds: ReadonlyArray<string>;
+  readonly preservedQuoteIds: ReadonlyArray<string>;
+  readonly authorNote: string | undefined;
+}
+
+/** 保留项覆盖情况 DTO */
+export interface PreservationCoverageDto {
+  readonly totalPreservedPlots: number;
+  readonly coveredPreservedPlots: number;
+  readonly missingPreservedPlotIds: ReadonlyArray<string>;
+  readonly totalPreservedQuotes: number;
+  readonly coveredPreservedQuotes: number;
+  readonly missingPreservedQuoteIds: ReadonlyArray<string>;
+}
+
+/** 旧稿到新版节点映射 DTO */
+export interface NodeMappingDto {
+  readonly sourceNodeId: string;
+  readonly sourceNodeTitle: string;
+  readonly targetNodeId: string | undefined;
+  readonly targetNodeTitle: string | undefined;
+  readonly relation: SourceRelationDto;
+}
+
+/** 新版大纲 DTO */
+export interface NewOutlineDto {
+  readonly id: string;
+  readonly projectId: string;
+  readonly version: number;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+  readonly sourceSnapshotId: string;
+  readonly sourceSnapshotVersion: number;
+  readonly sourceLegacyOutlineVersion: number | undefined;
+  readonly authorIntent: string | undefined;
+  readonly nodes: ReadonlyArray<NewOutlineNodeDto>;
+  readonly status: NewOutlineStatusDto;
 }

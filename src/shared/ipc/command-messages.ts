@@ -361,6 +361,7 @@ export type FrontendCommandMessage =
   | ConfirmStoryAssetCommand
   | EditStoryAssetCommand
   | PublishStoryAssetsCommand
+  | GenerateNewOutlineCommand
   | AddOutlinePlotCommand
   | UpdateOutlinePlotCommand
   | MoveOutlinePlotCommand
@@ -500,6 +501,14 @@ export interface PublishStoryAssetsCommand {
   runId: RunId;
   projectId: string;
   expectedVersion: number;
+}
+
+/** 从正式故事资产生成新版大纲。 */
+export interface GenerateNewOutlineCommand {
+  type: 'generate-new-outline';
+  runId: RunId;
+  projectId: string;
+  authorIntent?: string;
 }
 
 /** 新增一个人工情节候选。 */

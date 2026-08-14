@@ -35,6 +35,7 @@
     "smoke:story-asset-store": "tsc -p tsconfig.smoke.json && node out-smoke/main/story-asset/asset-store-smoke.js",
     "smoke:story-asset-validation": "tsc -p tsconfig.smoke.json && node out-smoke/main/story-asset/asset-validation-smoke.js",
     "smoke:story-asset-lifecycle": "tsc -p tsconfig.smoke.json && node out-smoke/main/story-asset/asset-lifecycle-smoke.js",
+    "smoke:new-outline": "tsc -p tsconfig.smoke.json && node out-smoke/main/new-outline/new-outline-smoke.js",
     "smoke:workflow": "tsc -p tsconfig.smoke.json && node out-smoke/main/workflow-smoke.js && node out-smoke/main/workflow-integration-smoke.js"
   },
   "dependencies": {

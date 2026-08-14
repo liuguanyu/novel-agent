@@ -588,6 +588,25 @@ export interface StoryAssetChangeFailedEvent {
   error: string;
 }
 
+export interface NewOutlineGenerationStartedEvent {
+  type: 'new-outline-generation-started';
+  runId: RunId;
+  projectId: string;
+}
+
+export interface NewOutlineGenerationCompletedEvent {
+  type: 'new-outline-generation-completed';
+  runId: RunId;
+  projectId: string;
+  outline: import('./query-messages.js').NewOutlineDto;
+}
+
+export interface NewOutlineGenerationFailedEvent {
+  type: 'new-outline-generation-failed';
+  runId: RunId;
+  error: string;
+}
+
 export type BackendControlEvent =
   | LegacyPlotAdvisorCompletedEvent
   | LegacyPlotAdvisorFailedEvent
@@ -600,6 +619,9 @@ export type BackendControlEvent =
   | StoryAssetConfirmationFailedEvent
   | StoryAssetChangedEvent
   | StoryAssetChangeFailedEvent
+  | NewOutlineGenerationStartedEvent
+  | NewOutlineGenerationCompletedEvent
+  | NewOutlineGenerationFailedEvent
   | WorkflowSnapshotEvent
   | WorkflowFailureEvent
   | AssetTargetSelectionRequiredEvent

@@ -65,6 +65,15 @@ import {
   projectSnapshot,
   type AssetKind,
 } from './story-asset/asset-lifecycle-service.js';
+import { OutlineGenerator } from './new-outline/outline-generator.js';
+import {
+  loadNewOutline,
+  saveNewOutline,
+  nextNewOutlineVersion,
+} from './new-outline/new-outline-store.js';
+import { loadFormalStoryAssetSnapshot } from './story-asset/asset-store.js';
+import type { NewOutlineDto, NewOutlineNodeDto } from '../shared/ipc/query-messages.js';
+import type { NewOutline } from '../core/new-outline/index.js';
 
 const idSchema = z.string().trim().min(1).max(256);
 
@@ -126,6 +135,41 @@ const workflowActionSchema = z.object({
   content: z.unknown().optional(), provenance: z.unknown().optional(), objective: z.string().trim().min(1).max(10_000).optional(), authorIntents: z.array(authorIntentSchema).max(100).optional(),
 }).strict();
 const workflowCommandSchema = z.union([startWorkflowSchema, workflowActionSchema]);
+
+/** 将 NewOutline 投影为可序列化 DTO。 */
+function projectNewOutline(outline: NewOutline): NewOutlineDto {
+  const nodes: ReadonlyArray<NewOutlineNodeDto> = outline.nodes.map((n) => ({
+    id: n.id,
+    parentId: n.parentId,
+    order: n.order,
+    kind: n.kind,
+    title: n.title,
+    summary: n.summary,
+    goal: n.goal,
+    conflict: n.conflict,
+    outcome: n.outcome,
+    sourceRelation: n.sourceRelation,
+    sourceNodeIds: n.sourceNodeIds,
+    plotThreadIds: n.plotThreadIds,
+    characterIds: n.characterIds,
+    preservedPlotIds: n.preservedPlotIds,
+    preservedQuoteIds: n.preservedQuoteIds,
+    authorNote: n.authorNote,
+  }));
+  return {
+    id: outline.id,
+    projectId: outline.projectId,
+    version: outline.version,
+    createdAt: outline.createdAt,
+    updatedAt: outline.updatedAt,
+    sourceSnapshotId: outline.sourceSnapshotId,
+    sourceSnapshotVersion: outline.sourceSnapshotVersion,
+    sourceLegacyOutlineVersion: outline.sourceLegacyOutlineVersion,
+    authorIntent: outline.authorIntent,
+    nodes,
+    status: outline.status,
+  };
+}
 
 /**
  * 注册所有 IPC handlers。启动时调用一次。
@@ -339,6 +383,17 @@ export function registerIpcHandlers(
       const snapshot = await storyAssetStore.loadStoryAssetSnapshot(DEFAULT_NOVEL_DIR);
       if (snapshot === undefined) return undefined;
       return projectSnapshot(snapshot);
+    },
+  );
+
+  ipcMain.handle(
+    QUERY_CHANNELS.getNewOutline,
+    async (_event: IpcMainInvokeEvent, raw: unknown): Promise<NewOutlineDto | undefined> => {
+      const projectId = typeof raw === 'string' ? raw : '';
+      if (projectId.length === 0) return undefined;
+      const outline = await loadNewOutline(DEFAULT_NOVEL_DIR);
+      if (outline === undefined) return undefined;
+      return projectNewOutline(outline);
     },
   );
 
@@ -740,6 +795,52 @@ export function registerIpcHandlers(
           wc.send(IPC_CHANNELS.controlEvent, { type: 'story-asset-changed', runId: message.runId, action: 'published', snapshot: projectSnapshot(formal) });
         } catch (error: unknown) {
           wc.send(IPC_CHANNELS.controlEvent, { type: 'story-asset-change-failed', runId: message.runId, action: 'published', error: error instanceof Error ? error.message : String(error) });
+        }
+        return;
+      }
+      case 'generate-new-outline': {
+        const resolver = getModelResolver?.();
+        if (resolver === undefined) {
+          wc.send(IPC_CHANNELS.controlEvent, {
+            type: 'new-outline-generation-failed',
+            runId: message.runId,
+            error: '模型尚未配置，无法生成新版大纲',
+          });
+          return;
+        }
+        try {
+          const formalAssets = await loadFormalStoryAssetSnapshot(DEFAULT_NOVEL_DIR);
+          if (formalAssets === undefined) {
+            throw new Error('尚无正式故事资产，请先提炼并发布故事资产');
+          }
+          wc.send(IPC_CHANNELS.controlEvent, {
+            type: 'new-outline-generation-started',
+            runId: message.runId,
+            projectId: message.projectId,
+          });
+          const legacyOutline = await legacyOrgStore.loadOutline(DEFAULT_NOVEL_DIR);
+          const preservations = await legacyOrgStore.loadPreservations(DEFAULT_NOVEL_DIR);
+          const version = await nextNewOutlineVersion(DEFAULT_NOVEL_DIR);
+          const newOutline = await new OutlineGenerator(resolver).generate(
+            formalAssets,
+            legacyOutline,
+            preservations,
+            message.authorIntent,
+            version,
+          );
+          await saveNewOutline(DEFAULT_NOVEL_DIR, newOutline, 'draft');
+          wc.send(IPC_CHANNELS.controlEvent, {
+            type: 'new-outline-generation-completed',
+            runId: message.runId,
+            projectId: message.projectId,
+            outline: projectNewOutline(newOutline),
+          });
+        } catch (error: unknown) {
+          wc.send(IPC_CHANNELS.controlEvent, {
+            type: 'new-outline-generation-failed',
+            runId: message.runId,
+            error: error instanceof Error ? error.message : String(error),
+          });
         }
         return;
       }
