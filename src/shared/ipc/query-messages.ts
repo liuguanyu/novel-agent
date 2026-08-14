@@ -418,6 +418,7 @@ export interface ForeshadowingDto {
   readonly advancedPlotNodeIds: ReadonlyArray<string>;
   readonly credibility: CredibilityLevelDto;
   readonly evidence: ReadonlyArray<{ readonly plotNodeId?: string; readonly chapterTitle?: string; readonly quote: string }>;
+  readonly status: AssetStatusDto;
 }
 
 /** 故事资产快照 DTO */

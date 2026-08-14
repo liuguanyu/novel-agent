@@ -359,6 +359,8 @@ export type FrontendCommandMessage =
   | DiagnoseLegacyBookCommand
   | ExtractStoryAssetsCommand
   | ConfirmStoryAssetCommand
+  | EditStoryAssetCommand
+  | PublishStoryAssetsCommand
   | AddOutlinePlotCommand
   | UpdateOutlinePlotCommand
   | MoveOutlinePlotCommand
@@ -477,6 +479,27 @@ export interface ConfirmStoryAssetCommand {
   projectId: string;
   assetKind: 'plotThread' | 'character' | 'relation' | 'arc' | 'foreshadowing';
   assetId: string;
+  expectedVersion?: number;
+}
+
+/** 作者修正单个资产的核心文字，并留下裁决说明。 */
+export interface EditStoryAssetCommand {
+  type: 'edit-story-asset';
+  runId: RunId;
+  projectId: string;
+  assetKind: 'plotThread' | 'character' | 'relation' | 'arc' | 'foreshadowing';
+  assetId: string;
+  expectedVersion: number;
+  value: string;
+  authorNote?: string;
+}
+
+/** 将当前已确认草案发布为正式故事资产快照。 */
+export interface PublishStoryAssetsCommand {
+  type: 'publish-story-assets';
+  runId: RunId;
+  projectId: string;
+  expectedVersion: number;
 }
 
 /** 新增一个人工情节候选。 */

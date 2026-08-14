@@ -25,6 +25,8 @@ export interface UseStoryAssetsResult {
   extractAssets(): void;
   /** 确认资产条目（draft → confirmed） */
   confirmAsset(assetKind: 'plotThread' | 'character' | 'relation' | 'arc' | 'foreshadowing', assetId: string): void;
+  editAsset(assetKind: 'plotThread' | 'character' | 'relation' | 'arc', assetId: string, value: string, authorNote?: string): void;
+  publishAssets(): void;
   /** 重新加载快照 */
   refresh(): Promise<void>;
 }
@@ -80,6 +82,17 @@ export function useStoryAssets(projectId: string | undefined): UseStoryAssetsRes
         setError(event.error);
         return;
       }
+      if (event.type === 'story-asset-changed') {
+        setExtracting(false);
+        setSnapshot(event.snapshot);
+        setError(undefined);
+        return;
+      }
+      if (event.type === 'story-asset-change-failed') {
+        setExtracting(false);
+        setError(event.error);
+        return;
+      }
       if (event.type === 'story-asset-confirmed') {
         void refresh();
         return;
@@ -111,10 +124,23 @@ export function useStoryAssets(projectId: string | undefined): UseStoryAssetsRes
         projectId,
         assetKind,
         assetId,
+        ...(snapshot === undefined ? {} : { expectedVersion: snapshot.version }),
       });
     },
     [projectId],
   );
+
+  const editAsset = useCallback((assetKind: 'plotThread' | 'character' | 'relation' | 'arc', assetId: string, value: string, authorNote?: string) => {
+    if (projectId === undefined || snapshot === undefined) return;
+    const runId = nextRunId();
+    window.novelAgent.sendCommand({ type: 'edit-story-asset', runId, projectId, assetKind, assetId, expectedVersion: snapshot.version, value, ...(authorNote === undefined ? {} : { authorNote }) });
+  }, [projectId, snapshot]);
+
+  const publishAssets = useCallback(() => {
+    if (projectId === undefined || snapshot === undefined) return;
+    const runId = nextRunId();
+    window.novelAgent.sendCommand({ type: 'publish-story-assets', runId, projectId, expectedVersion: snapshot.version });
+  }, [projectId, snapshot]);
 
   return {
     snapshot,
@@ -123,6 +149,8 @@ export function useStoryAssets(projectId: string | undefined): UseStoryAssetsRes
     error,
     extractAssets,
     confirmAsset,
+    editAsset,
+    publishAssets,
     refresh,
   };
 }

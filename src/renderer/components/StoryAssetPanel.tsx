@@ -17,6 +17,7 @@ import {
   Heart,
   TrendingUp,
   Lightbulb,
+  Pencil,
 } from 'lucide-react';
 import { Button } from './ui/button.js';
 import { ScrollArea } from './ui/scroll-area.js';
@@ -40,6 +41,8 @@ interface StoryAssetPanelProps {
   onExtractAssets: () => void;
   onConfirmAsset: (assetKind: 'plotThread' | 'character' | 'relation' | 'arc' | 'foreshadowing', assetId: string) => void;
   onRefresh: () => void;
+  onPublishAssets: () => void;
+  onEditAsset: (assetKind: 'plotThread' | 'character' | 'relation' | 'arc', assetId: string, value: string, authorNote?: string) => void;
 }
 
 /* ── 辅助 ──────────────────────────────────────────────────────── */
@@ -95,7 +98,7 @@ function StatusBadge({ status }: { readonly status: string }): JSX.Element {
 
 /* ── 情节线 ──────────────────────────────────────────────────── */
 
-function PlotThreadCard({ thread, onConfirm }: { readonly thread: PlotThreadDto; readonly onConfirm: () => void }): JSX.Element {
+function PlotThreadCard({ thread, onConfirm, onEdit }: { readonly thread: PlotThreadDto; readonly onConfirm: () => void; readonly onEdit: () => void }): JSX.Element {
   return (
     <div className="rounded-md border border-border p-3 text-sm">
       <div className="flex items-center justify-between gap-2">
@@ -106,6 +109,7 @@ function PlotThreadCard({ thread, onConfirm }: { readonly thread: PlotThreadDto;
         </div>
         <div className="flex items-center gap-2">
           <StatusBadge status={thread.status} />
+          {thread.status !== 'formal' && <Button variant="ghost" size="sm" className="h-6 px-2 text-xs" onClick={onEdit}><Pencil className="mr-1 h-3 w-3" />修正</Button>}
           {thread.status === 'draft' && (
             <Button variant="ghost" size="sm" className="h-6 px-2 text-xs" onClick={onConfirm}>
               <CheckCircle2 className="mr-1 h-3 w-3" />确认
@@ -133,7 +137,7 @@ function PlotThreadCard({ thread, onConfirm }: { readonly thread: PlotThreadDto;
 
 /* ── 人物 ──────────────────────────────────────────────────── */
 
-function CharacterCard({ character, onConfirm }: { readonly character: CharacterProfileDto; readonly onConfirm: () => void }): JSX.Element {
+function CharacterCard({ character, onConfirm, onEdit }: { readonly character: CharacterProfileDto; readonly onConfirm: () => void; readonly onEdit: () => void }): JSX.Element {
   return (
     <div className="rounded-md border border-border p-3 text-sm">
       <div className="flex items-center justify-between gap-2">
@@ -146,6 +150,7 @@ function CharacterCard({ character, onConfirm }: { readonly character: Character
         </div>
         <div className="flex items-center gap-2">
           <StatusBadge status={character.status} />
+          {character.status !== 'formal' && <Button variant="ghost" size="sm" className="h-6 px-2 text-xs" onClick={onEdit}><Pencil className="mr-1 h-3 w-3" />修正身份</Button>}
           {character.status === 'draft' && (
             <Button variant="ghost" size="sm" className="h-6 px-2 text-xs" onClick={onConfirm}>
               <CheckCircle2 className="mr-1 h-3 w-3" />确认
@@ -168,10 +173,11 @@ function CharacterCard({ character, onConfirm }: { readonly character: Character
 
 /* ── 关系 ──────────────────────────────────────────────────── */
 
-function RelationCard({ relation, characterMap, onConfirm }: {
+function RelationCard({ relation, characterMap, onConfirm, onEdit }: {
   readonly relation: CharacterRelationDto;
   readonly characterMap: ReadonlyMap<string, string>;
   readonly onConfirm: () => void;
+  readonly onEdit: () => void;
 }): JSX.Element {
   const fromName = characterMap.get(relation.fromCharacterId) ?? relation.fromCharacterId;
   const toName = characterMap.get(relation.toCharacterId) ?? relation.toCharacterId;
@@ -185,6 +191,7 @@ function RelationCard({ relation, characterMap, onConfirm }: {
         </div>
         <div className="flex items-center gap-2">
           <StatusBadge status={relation.status} />
+          {relation.status !== 'formal' && <Button variant="ghost" size="sm" className="h-6 px-2 text-xs" onClick={onEdit}><Pencil className="mr-1 h-3 w-3" />修正</Button>}
           {relation.status === 'draft' && (
             <Button variant="ghost" size="sm" className="h-6 px-2 text-xs" onClick={onConfirm}>
               <CheckCircle2 className="mr-1 h-3 w-3" />确认
@@ -201,10 +208,11 @@ function RelationCard({ relation, characterMap, onConfirm }: {
 
 /* ── 成长弧 ──────────────────────────────────────────────────── */
 
-function ArcCard({ arc, characterMap, onConfirm }: {
+function ArcCard({ arc, characterMap, onConfirm, onEdit }: {
   readonly arc: CharacterArcDto;
   readonly characterMap: ReadonlyMap<string, string>;
   readonly onConfirm: () => void;
+  readonly onEdit: () => void;
 }): JSX.Element {
   const characterName = characterMap.get(arc.characterId) ?? arc.characterId;
   return (
@@ -216,6 +224,7 @@ function ArcCard({ arc, characterMap, onConfirm }: {
         </div>
         <div className="flex items-center gap-2">
           <StatusBadge status={arc.status} />
+          {arc.status !== 'formal' && <Button variant="ghost" size="sm" className="h-6 px-2 text-xs" onClick={onEdit}><Pencil className="mr-1 h-3 w-3" />修正</Button>}
           {arc.status === 'draft' && (
             <Button variant="ghost" size="sm" className="h-6 px-2 text-xs" onClick={onConfirm}>
               <CheckCircle2 className="mr-1 h-3 w-3" />确认
@@ -278,12 +287,21 @@ export function StoryAssetPanel({
   onExtractAssets,
   onConfirmAsset,
   onRefresh,
+  onPublishAssets,
+  onEditAsset,
 }: StoryAssetPanelProps): JSX.Element {
   const [activeTab, setActiveTab] = useState<TabId>('plotThreads');
 
   const characterMap = new Map<string, string>(
     (snapshot?.characters ?? []).map((c) => [c.id, c.name]),
   );
+
+  const requestEdit = (kind: 'plotThread' | 'character' | 'relation' | 'arc', id: string, currentValue: string): void => {
+    const value = window.prompt('修正内容', currentValue);
+    if (value === null || value.trim().length === 0 || value.trim() === currentValue.trim()) return;
+    const authorNote = window.prompt('修正依据或备注（可选）') ?? undefined;
+    onEditAsset(kind, id, value.trim(), authorNote);
+  };
 
   return (
     <div className="flex h-full flex-col">
@@ -294,6 +312,9 @@ export function StoryAssetPanel({
           <Button variant="ghost" size="sm" onClick={onRefresh} disabled={loading || extracting}>
             <RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
           </Button>
+          {snapshot !== undefined && snapshot.plotThreads.every((item) => item.status !== 'draft') && snapshot.characters.every((item) => item.status !== 'draft') && snapshot.relations.every((item) => item.status !== 'draft') && snapshot.arcs.every((item) => item.status !== 'draft') && snapshot.foreshadowings.every((item) => item.status !== 'draft') && (
+            <Button variant="outline" size="sm" onClick={onPublishAssets} disabled={extracting}>发布正式版</Button>
+          )}
           <Button variant="default" size="sm" onClick={onExtractAssets} disabled={extracting}>
             {extracting ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : <Sparkles className="mr-1 h-4 w-4" />}
             {extracting ? '提炼中…' : '提炼故事资产'}
@@ -365,6 +386,7 @@ export function StoryAssetPanel({
                       key={thread.id}
                       thread={thread}
                       onConfirm={() => onConfirmAsset('plotThread', thread.id)}
+                      onEdit={() => requestEdit('plotThread', thread.id, thread.goal.value)}
                     />
                   ))
               )}
@@ -376,6 +398,7 @@ export function StoryAssetPanel({
                       key={character.id}
                       character={character}
                       onConfirm={() => onConfirmAsset('character', character.id)}
+                      onEdit={() => requestEdit('character', character.id, character.identity.value)}
                     />
                   ))
               )}
@@ -388,6 +411,7 @@ export function StoryAssetPanel({
                       relation={relation}
                       characterMap={characterMap}
                       onConfirm={() => onConfirmAsset('relation', relation.id)}
+                      onEdit={() => requestEdit('relation', relation.id, relation.description.value)}
                     />
                   ))
               )}
@@ -400,6 +424,7 @@ export function StoryAssetPanel({
                       arc={arc}
                       characterMap={characterMap}
                       onConfirm={() => onConfirmAsset('arc', arc.id)}
+                      onEdit={() => requestEdit('arc', arc.id, arc.description)}
                     />
                   ))
               )}

@@ -12,8 +12,9 @@
 import { z } from 'zod';
 import type { CapabilityTier, ModelAdapter } from '../../core/model/index.js';
 import type { LegacyOutline } from '../../core/legacy-organization/index.js';
-import type {
-  StoryAssetSnapshot,
+import {
+  validateStoryAssetSnapshot,
+  type StoryAssetSnapshot,
   PlotThread,
   PlotThreadStage,
   PlotThreadKind,
@@ -49,6 +50,7 @@ export function renderExtractionPrompt(outline: LegacyOutline): string {
 
   // 收集所有出现过的角色名
   const allCharacters = [...new Set(plotNodes.flatMap((p) => p.characters))];
+  const characterCatalog = allCharacters.map((name, index) => `- id:ch-${index + 1} 名称：${name}`).join('\n');
 
   return [
     '你是一位资深小说结构分析师。下面是一部旧稿的全书情节列表和人物名单。',
@@ -81,8 +83,8 @@ export function renderExtractionPrompt(outline: LegacyOutline): string {
     '## 全书情节列表',
     plotLines.length > 0 ? plotLines.join('\n') : '（无情节候选）',
     '',
-    '## 人物名单',
-    allCharacters.length > 0 ? allCharacters.join('、') : '（无人物）',
+    '## 人物名单（characterIds 必须使用下面给出的 id）',
+    characterCatalog.length > 0 ? characterCatalog : '（无人物）',
     '',
     '## 输出要求',
     '严格输出以下 JSON 格式（不要添加其他文字）：',
@@ -179,15 +181,32 @@ function parseExtractionOutput(text: string): RawExtractionOutput {
 /* ─── 转换为 StoryAssetSnapshot ──────────────────────────────── */
 
 function toCredibleClaim(value: string, credibility: CredibilityLevel, evidence: ReadonlyArray<Evidence> = []): { value: string; credibility: CredibilityLevel; evidence: ReadonlyArray<Evidence> } {
-  return { value: value || '（未提炼）', credibility, evidence };
+  const usableEvidence = evidence.filter((item) => item.quote.trim().length > 0);
+  const safeCredibility = credibility === 'explicit' && usableEvidence.length === 0 ? 'pending-confirmation' : credibility;
+  return { value: value || '（未提炼）', credibility: safeCredibility, evidence: usableEvidence };
 }
 
-function toPlotThread(raw: RawExtractionOutput['plotThreads'][number]): PlotThread {
+function evidenceIndex(outline: LegacyOutline): ReadonlyMap<string, Evidence> {
+  const chapters = new Map(outline.nodes.filter((item) => item.kind === 'chapter').map((item) => [item.id, item.title]));
+  return new Map(outline.nodes.filter((item) => item.kind === 'plot-beat').flatMap((item) => {
+    const source = item.sources.find((candidate) => candidate.quote?.trim());
+    if (source?.quote === undefined) return [];
+    const chapterTitle = item.parentId === undefined ? source.label : (chapters.get(item.parentId) ?? source.label);
+    return [[item.id, { plotNodeId: item.id, chapterTitle, quote: source.quote } as Evidence]];
+  }));
+}
+
+function evidenceFor(ids: ReadonlyArray<string>, evidenceByPlotId: ReadonlyMap<string, Evidence>): ReadonlyArray<Evidence> {
+  return [...new Set(ids)].map((id) => evidenceByPlotId.get(id)).filter((item): item is Evidence => item !== undefined);
+}
+
+
+function toPlotThread(raw: RawExtractionOutput['plotThreads'][number], evidenceByPlotId: ReadonlyMap<string, Evidence>): PlotThread {
   return {
     id: raw.id,
     name: raw.name,
     kind: raw.kind as PlotThreadKind,
-    goal: toCredibleClaim(raw.goal, raw.credibility),
+    goal: toCredibleClaim(raw.goal, raw.credibility, evidenceFor(raw.plotNodeIds, evidenceByPlotId)),
     plotNodeIds: raw.plotNodeIds,
     characterIds: raw.characterIds,
     stages: raw.stages as ReadonlyArray<PlotThreadStage>,
@@ -196,34 +215,35 @@ function toPlotThread(raw: RawExtractionOutput['plotThreads'][number]): PlotThre
   };
 }
 
-function toCharacter(raw: RawExtractionOutput['characters'][number]): CharacterProfile {
+function toCharacter(raw: RawExtractionOutput['characters'][number], characterPlotIds: ReadonlyArray<string>, evidenceByPlotId: ReadonlyMap<string, Evidence>): CharacterProfile {
+  const characterEvidence = evidenceFor(characterPlotIds, evidenceByPlotId);
   const empty = toCredibleClaim('', 'pending-design');
   return {
     id: raw.id,
     name: raw.name,
     aliases: raw.aliases,
-    identity: toCredibleClaim(raw.identity, raw.identityCredibility),
+    identity: toCredibleClaim(raw.identity, raw.identityCredibility, characterEvidence),
     appearance: empty,
     abilities: empty,
-    personality: toCredibleClaim(raw.personality, raw.personalityCredibility),
+    personality: toCredibleClaim(raw.personality, raw.personalityCredibility, characterEvidence),
     languageStyle: empty,
-    desire: toCredibleClaim(raw.desire, raw.desireCredibility),
-    goal: toCredibleClaim(raw.goal, raw.goalCredibility),
-    fear: toCredibleClaim(raw.fear, raw.fearCredibility),
-    weakness: toCredibleClaim(raw.weakness, raw.weaknessCredibility),
-    currentStatus: toCredibleClaim(raw.currentStatus, raw.currentStatusCredibility),
+    desire: toCredibleClaim(raw.desire, raw.desireCredibility, characterEvidence),
+    goal: toCredibleClaim(raw.goal, raw.goalCredibility, characterEvidence),
+    fear: toCredibleClaim(raw.fear, raw.fearCredibility, characterEvidence),
+    weakness: toCredibleClaim(raw.weakness, raw.weaknessCredibility, characterEvidence),
+    currentStatus: toCredibleClaim(raw.currentStatus, raw.currentStatusCredibility, characterEvidence),
     plotThreadIds: raw.plotThreadIds,
     status: 'draft',
   };
 }
 
-function toRelation(raw: RawExtractionOutput['relations'][number]): CharacterRelation {
+function toRelation(raw: RawExtractionOutput['relations'][number], evidence: ReadonlyArray<Evidence>): CharacterRelation {
   return {
     id: raw.id,
     fromCharacterId: raw.fromCharacterId,
     toCharacterId: raw.toCharacterId,
     kind: raw.kind,
-    description: toCredibleClaim(raw.description, 'inferred'),
+    description: toCredibleClaim(raw.description, 'inferred', evidence),
     changes: [],
     status: 'draft',
   };
@@ -239,15 +259,16 @@ function toArc(raw: RawExtractionOutput['arcs'][number]): CharacterArc {
   };
 }
 
-function toForeshadowing(raw: RawExtractionOutput['foreshadowings'][number]): Foreshadowing {
+function toForeshadowing(raw: RawExtractionOutput['foreshadowings'][number], evidenceByPlotId: ReadonlyMap<string, Evidence>): Foreshadowing {
   return {
     id: raw.id,
     description: raw.description,
     state: raw.state,
     plantedPlotNodeId: raw.plantedPlotNodeId,
     advancedPlotNodeIds: [],
-    credibility: raw.credibility,
-    evidence: [],
+    credibility: raw.credibility === 'explicit' && !evidenceByPlotId.has(raw.plantedPlotNodeId) ? 'pending-confirmation' : raw.credibility,
+    evidence: evidenceFor([raw.plantedPlotNodeId], evidenceByPlotId),
+    status: 'draft',
   };
 }
 
@@ -256,7 +277,7 @@ function toForeshadowing(raw: RawExtractionOutput['foreshadowings'][number]): Fo
 export class AssetExtractor {
   constructor(private readonly resolver: AssetExtractorModelResolver) {}
 
-  async extract(outline: LegacyOutline): Promise<StoryAssetSnapshot> {
+  async extract(outline: LegacyOutline, version = 1): Promise<StoryAssetSnapshot> {
     const adapter = this.resolver.createAdapter(EXTRACTOR_AGENT_ID, EXTRACTOR_TIER);
     let lastError: Error | undefined;
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
@@ -274,19 +295,27 @@ export class AssetExtractor {
       try {
         const raw = parseExtractionOutput(result.text);
         const now = new Date().toISOString();
-        return {
+        const evidenceByPlotId = evidenceIndex(outline);
+        const characterPlotIds = new Map<string, string[]>();
+        for (const thread of raw.plotThreads) for (const characterId of thread.characterIds) characterPlotIds.set(characterId, [...(characterPlotIds.get(characterId) ?? []), ...thread.plotNodeIds]);
+        const relationEvidence = (fromId: string, toId: string): ReadonlyArray<Evidence> => evidenceFor([...(characterPlotIds.get(fromId) ?? []), ...(characterPlotIds.get(toId) ?? [])], evidenceByPlotId);
+        const snapshot: StoryAssetSnapshot = {
           id: `snapshot-${Date.now()}`,
           projectId: outline.projectId,
-          version: 1,
+          version,
           createdAt: now,
           updatedAt: now,
-          plotThreads: raw.plotThreads.map(toPlotThread),
-          characters: raw.characters.map(toCharacter),
-          relations: raw.relations.map(toRelation),
+          plotThreads: raw.plotThreads.map((item) => toPlotThread(item, evidenceByPlotId)),
+          characters: raw.characters.map((item) => toCharacter(item, characterPlotIds.get(item.id) ?? [], evidenceByPlotId)),
+          relations: raw.relations.map((item) => toRelation(item, relationEvidence(item.fromCharacterId, item.toCharacterId))),
           arcs: raw.arcs.map(toArc),
-          foreshadowings: raw.foreshadowings.map(toForeshadowing),
+          foreshadowings: raw.foreshadowings.map((item) => toForeshadowing(item, evidenceByPlotId)),
           sourceOutlineVersion: outline.version,
         };
+        const plotIds = new Set(outline.nodes.filter((item) => item.kind === 'plot-beat').map((item) => item.id));
+        const issues = validateStoryAssetSnapshot(snapshot, plotIds);
+        if (issues.length > 0) throw new Error(`故事资产引用或证据不完整：${issues.slice(0, 3).map((issue) => `${issue.path} ${issue.message}`).join('；')}`);
+        return snapshot;
       } catch (err) {
         lastError = err instanceof Error ? err : new Error(String(err));
         continue;

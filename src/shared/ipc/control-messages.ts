@@ -574,6 +574,20 @@ export interface StoryAssetConfirmationFailedEvent {
   error: string;
 }
 
+export interface StoryAssetChangedEvent {
+  type: 'story-asset-changed';
+  runId: RunId;
+  action: 'edited' | 'published';
+  snapshot: import('./query-messages.js').StoryAssetSnapshotDto;
+}
+
+export interface StoryAssetChangeFailedEvent {
+  type: 'story-asset-change-failed';
+  runId: RunId;
+  action: 'edited' | 'published';
+  error: string;
+}
+
 export type BackendControlEvent =
   | LegacyPlotAdvisorCompletedEvent
   | LegacyPlotAdvisorFailedEvent
@@ -584,6 +598,8 @@ export type BackendControlEvent =
   | StoryAssetExtractionFailedEvent
   | StoryAssetConfirmedEvent
   | StoryAssetConfirmationFailedEvent
+  | StoryAssetChangedEvent
+  | StoryAssetChangeFailedEvent
   | WorkflowSnapshotEvent
   | WorkflowFailureEvent
   | AssetTargetSelectionRequiredEvent

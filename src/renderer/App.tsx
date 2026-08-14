@@ -835,6 +835,8 @@ export function App(): JSX.Element {
               onExtractAssets={storyAssets.extractAssets}
               onConfirmAsset={storyAssets.confirmAsset}
               onRefresh={storyAssets.refresh}
+              onPublishAssets={storyAssets.publishAssets}
+              onEditAsset={storyAssets.editAsset}
             />
           </>
         ) : (

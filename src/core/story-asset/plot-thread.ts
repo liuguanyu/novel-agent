@@ -48,6 +48,8 @@ export interface Foreshadowing {
   readonly credibility: CredibleClaim<string>['credibility'];
   /** 证据 */
   readonly evidence: ReadonlyArray<Evidence>;
+  /** 资产状态；与其他故事资产统一经过草案、确认、正式三态。 */
+  readonly status: AssetStatus;
 }
 
 /** 情节线 */

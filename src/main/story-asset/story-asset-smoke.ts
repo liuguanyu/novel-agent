@@ -117,6 +117,7 @@ function smokeFullSnapshot(): void {
     advancedPlotNodeIds: [],
     credibility: 'explicit',
     evidence: [{ quote: '佐藤今夜外出', plotNodeId: 'p1' }],
+    status: 'formal',
   };
 
   const relation: CharacterRelation = {

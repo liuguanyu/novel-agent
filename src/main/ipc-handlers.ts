@@ -57,7 +57,7 @@ import { PlotAdvisor } from './legacy-organization/plot-advisor.js';
 import { BookDiagnoser } from './legacy-organization/book-diagnoser.js';
 import { AssetExtractor } from './story-asset/asset-extractor.js';
 import * as storyAssetStore from './story-asset/asset-store.js';
-import type { StoryAssetSnapshot } from '../core/story-asset/index.js';
+import { validateStoryAssetSnapshot, type StoryAssetSnapshot } from '../core/story-asset/index.js';
 import type { StoryAssetSnapshotDto, PlotThreadDto, CharacterProfileDto, CharacterRelationDto, CharacterArcDto, ForeshadowingDto, CredibleClaimDto } from '../shared/ipc/index.js';
 
 const idSchema = z.string().trim().min(1).max(256);
@@ -75,7 +75,7 @@ function confirmAsset(snapshot: StoryAssetSnapshot, kind: 'plotThread' | 'charac
     characters: kind === 'character' ? confirmItem(snapshot.characters) : snapshot.characters,
     relations: kind === 'relation' ? confirmItem(snapshot.relations) : snapshot.relations,
     arcs: kind === 'arc' ? confirmItem(snapshot.arcs) : snapshot.arcs,
-    foreshadowings: snapshot.foreshadowings,
+    foreshadowings: kind === 'foreshadowing' ? snapshot.foreshadowings.map((item) => item.id === assetId && item.status === 'draft' ? { ...item, status: 'confirmed' as const } : item) : snapshot.foreshadowings,
   };
 }
 
@@ -148,6 +148,7 @@ function projectSnapshot(snapshot: StoryAssetSnapshot): StoryAssetSnapshotDto {
     advancedPlotNodeIds: f.advancedPlotNodeIds,
     credibility: f.credibility,
     evidence: f.evidence,
+    status: f.status,
   }));
   return {
     id: snapshot.id,
@@ -786,8 +787,9 @@ export function registerIpcHandlers(
             runId: message.runId,
             projectId: message.projectId,
           });
-          const snapshot = await new AssetExtractor(resolver).extract(outline);
-          await storyAssetStore.saveStoryAssetSnapshot(DEFAULT_NOVEL_DIR, snapshot);
+          const version = await storyAssetStore.nextStoryAssetVersion(DEFAULT_NOVEL_DIR);
+          const snapshot = await new AssetExtractor(resolver).extract(outline, version);
+          await storyAssetStore.saveStoryAssetSnapshot(DEFAULT_NOVEL_DIR, snapshot, 'draft');
           wc.send(IPC_CHANNELS.controlEvent, {
             type: 'story-asset-extraction-completed',
             runId: message.runId,
@@ -807,13 +809,18 @@ export function registerIpcHandlers(
         try {
           const snapshot = await storyAssetStore.loadStoryAssetSnapshot(DEFAULT_NOVEL_DIR);
           if (snapshot === undefined) throw new Error('故事资产快照不存在，请先提炼');
+          if (message.expectedVersion !== undefined && message.expectedVersion !== snapshot.version) throw new Error(`故事资产版本冲突：当前版本为 ${snapshot.version}`);
           const updated = confirmAsset(snapshot, message.assetKind, message.assetId);
-          await storyAssetStore.saveStoryAssetSnapshot(DEFAULT_NOVEL_DIR, updated);
+          const targetItems = message.assetKind === 'plotThread' ? updated.plotThreads : message.assetKind === 'character' ? updated.characters : message.assetKind === 'relation' ? updated.relations : message.assetKind === 'arc' ? updated.arcs : updated.foreshadowings;
+          const target = targetItems.find((item) => item.id === message.assetId);
+          if (target === undefined) throw new Error(`故事资产不存在：${message.assetId}`);
+          if (target.status !== 'confirmed') throw new Error(`故事资产无法确认，当前状态为 ${target.status}`);
+          const version = await storyAssetStore.nextStoryAssetVersion(DEFAULT_NOVEL_DIR);
+          const versioned = { ...updated, id: `snapshot-${Date.now()}`, version };
+          if (versioned === snapshot) throw new Error('故事资产确认失败');
+          await storyAssetStore.saveStoryAssetSnapshot(DEFAULT_NOVEL_DIR, versioned, 'draft', snapshot.version);
           wc.send(IPC_CHANNELS.controlEvent, {
-            type: 'story-asset-confirmed',
-            runId: message.runId,
-            assetKind: message.assetKind,
-            assetId: message.assetId,
+            type: 'story-asset-confirmed', runId: message.runId, assetKind: message.assetKind, assetId: message.assetId,
           });
         } catch (error: unknown) {
           wc.send(IPC_CHANNELS.controlEvent, {
@@ -821,6 +828,51 @@ export function registerIpcHandlers(
             runId: message.runId,
             error: error instanceof Error ? error.message : String(error),
           });
+        }
+        return;
+      }
+      case 'edit-story-asset': {
+        try {
+          const snapshot = await storyAssetStore.loadStoryAssetSnapshot(DEFAULT_NOVEL_DIR);
+          if (snapshot === undefined) throw new Error('故事资产快照不存在，请先提炼');
+          if (snapshot.version !== message.expectedVersion) throw new Error(`故事资产版本冲突：当前版本为 ${snapshot.version}`);
+          const update = <T extends { readonly id: string }>(items: ReadonlyArray<T>, fn: (item: T) => T): ReadonlyArray<T> => items.map((item) => item.id === message.assetId ? fn(item) : item);
+          const note = message.authorNote?.trim();
+          const updateClaim = <T extends { readonly value: string }>(claim: T): T => ({ ...claim, value: message.value.trim(), ...(note === undefined || note.length === 0 ? {} : { authorNote: note }) });
+          const updated: StoryAssetSnapshot = {
+            ...snapshot,
+            updatedAt: new Date().toISOString(),
+            plotThreads: message.assetKind === 'plotThread' ? update(snapshot.plotThreads, (item) => ({ ...item, goal: updateClaim(item.goal) })) : snapshot.plotThreads,
+            characters: message.assetKind === 'character' ? update(snapshot.characters, (item) => ({ ...item, identity: updateClaim(item.identity) })) : snapshot.characters,
+            relations: message.assetKind === 'relation' ? update(snapshot.relations, (item) => ({ ...item, description: updateClaim(item.description) })) : snapshot.relations,
+            arcs: message.assetKind === 'arc' ? update(snapshot.arcs, (item) => ({ ...item, description: message.value.trim() })) : snapshot.arcs,
+            foreshadowings: snapshot.foreshadowings,
+          };
+          const version = await storyAssetStore.nextStoryAssetVersion(DEFAULT_NOVEL_DIR);
+          const versioned = { ...updated, id: `snapshot-${Date.now()}`, version };
+          await storyAssetStore.saveStoryAssetSnapshot(DEFAULT_NOVEL_DIR, versioned, 'draft', snapshot.version);
+          wc.send(IPC_CHANNELS.controlEvent, { type: 'story-asset-changed', runId: message.runId, action: 'edited', snapshot: projectSnapshot(versioned) });
+        } catch (error: unknown) {
+          wc.send(IPC_CHANNELS.controlEvent, { type: 'story-asset-change-failed', runId: message.runId, action: 'edited', error: error instanceof Error ? error.message : String(error) });
+        }
+        return;
+      }
+      case 'publish-story-assets': {
+        try {
+          const snapshot = await storyAssetStore.loadStoryAssetSnapshot(DEFAULT_NOVEL_DIR);
+          if (snapshot === undefined) throw new Error('故事资产草案不存在，请先提炼');
+          if (snapshot.version !== message.expectedVersion) throw new Error(`故事资产版本冲突：当前版本为 ${snapshot.version}`);
+          const outline = await legacyOrgStore.loadOutline(DEFAULT_NOVEL_DIR);
+          const plotIds = outline === undefined ? undefined : new Set(outline.nodes.filter((item) => item.kind === 'plot-beat').map((item) => item.id));
+          const validationIssues = validateStoryAssetSnapshot(snapshot, plotIds);
+          if (validationIssues.length > 0) throw new Error(`故事资产校验失败：${validationIssues[0]?.message ?? '未知问题'}`);
+          const allItems = [...snapshot.plotThreads, ...snapshot.characters, ...snapshot.relations, ...snapshot.arcs, ...snapshot.foreshadowings];
+          if (allItems.some((item) => item.status !== undefined && item.status !== 'confirmed' && item.status !== 'formal')) throw new Error('仍有未确认的故事资产，不能发布');
+          const formal = { ...snapshot, id: `snapshot-${Date.now()}`, version: await storyAssetStore.nextStoryAssetVersion(DEFAULT_NOVEL_DIR), updatedAt: new Date().toISOString(), plotThreads: snapshot.plotThreads.map((item) => ({ ...item, status: 'formal' as const })), characters: snapshot.characters.map((item) => ({ ...item, status: 'formal' as const })), relations: snapshot.relations.map((item) => ({ ...item, status: 'formal' as const })), arcs: snapshot.arcs.map((item) => ({ ...item, status: 'formal' as const })), foreshadowings: snapshot.foreshadowings.map((item) => ({ ...item, status: 'formal' as const })) };
+          await storyAssetStore.saveStoryAssetSnapshot(DEFAULT_NOVEL_DIR, formal, 'formal', snapshot.version);
+          wc.send(IPC_CHANNELS.controlEvent, { type: 'story-asset-changed', runId: message.runId, action: 'published', snapshot: projectSnapshot(formal) });
+        } catch (error: unknown) {
+          wc.send(IPC_CHANNELS.controlEvent, { type: 'story-asset-change-failed', runId: message.runId, action: 'published', error: error instanceof Error ? error.message : String(error) });
         }
         return;
       }
