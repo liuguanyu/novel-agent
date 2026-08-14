@@ -54,10 +54,17 @@ export interface StoryAssetValidationIssue {
   readonly message: string;
 }
 
-/** 校验资产内部引用；explicit 结论必须有可核验的原文证据。 */
+/**
+ * 校验资产内部引用；explicit/inferred 结论必须有可核验的原文证据。
+ *
+ * outlineSourceQuotes：从旧稿大纲构建的 plotNodeId → 原文引用片段列表映射。
+ * 当提供时，会检查每条 Evidence.quote 是否确实出现在对应 plot-beat 的 sources 中。
+ * 这防止模型或手工编辑伪造证据——quote 非空但实际不存在于原文。
+ */
 export function validateStoryAssetSnapshot(
   snapshot: StoryAssetSnapshot,
   outlinePlotNodeIds?: ReadonlySet<string>,
+  outlineSourceQuotes?: ReadonlyMap<string, ReadonlyArray<string>>,
 ): ReadonlyArray<StoryAssetValidationIssue> {
   const issues: StoryAssetValidationIssue[] = [];
   const characterIds = new Set(snapshot.characters.map((item) => item.id));
@@ -65,9 +72,20 @@ export function validateStoryAssetSnapshot(
   const checkPlot = (id: string, path: string): void => {
     if (outlinePlotNodeIds !== undefined && !outlinePlotNodeIds.has(id)) issues.push({ path, message: `引用了不存在的情节节点 ${id}` });
   };
+  const checkEvidence = (evidence: { readonly plotNodeId?: string; readonly quote: string }, path: string): void => {
+    if (evidence.plotNodeId !== undefined) checkPlot(evidence.plotNodeId, path);
+    if (outlineSourceQuotes !== undefined && evidence.plotNodeId !== undefined && evidence.quote.trim().length > 0) {
+      const sourceQuotes = outlineSourceQuotes.get(evidence.plotNodeId);
+      if (sourceQuotes === undefined || sourceQuotes.length === 0) {
+        issues.push({ path, message: `证据引用的情节节点 ${evidence.plotNodeId} 在旧稿大纲中无原文来源` });
+      } else if (!sourceQuotes.some((source) => source.includes(evidence.quote.trim()) || evidence.quote.trim().includes(source.trim()))) {
+        issues.push({ path, message: `证据引用片段与旧稿大纲来源不匹配` });
+      }
+    }
+  };
   const checkClaim = (claim: CredibleClaim<unknown>, path: string): void => {
     if ((claim.credibility === 'explicit' || claim.credibility === 'inferred') && !claim.evidence.some((item) => item.quote.trim().length > 0)) issues.push({ path, message: '“原文明确”结论缺少原文证据' });
-    claim.evidence.forEach((item, index) => { if (item.plotNodeId !== undefined) checkPlot(item.plotNodeId, `${path}.evidence[${index}]`); });
+    claim.evidence.forEach((item, index) => checkEvidence(item, `${path}.evidence[${index}]`));
   };
   snapshot.plotThreads.forEach((thread, index) => {
     checkClaim(thread.goal, `plotThreads[${index}].goal`);
@@ -88,7 +106,7 @@ export function validateStoryAssetSnapshot(
     relation.changes.forEach((change, changeIndex) => checkPlot(change.plotNodeId, `relations[${index}].changes[${changeIndex}]`));
   });
   snapshot.arcs.forEach((arc, index) => { if (!characterIds.has(arc.characterId)) issues.push({ path: `arcs[${index}].characterId`, message: `引用了不存在的人物 ${arc.characterId}` }); arc.turningPoints.forEach((point, pointIndex) => checkPlot(point.plotNodeId, `arcs[${index}].turningPoints[${pointIndex}]`)); });
-  snapshot.foreshadowings.forEach((item, index) => { checkPlot(item.plantedPlotNodeId, `foreshadowings[${index}].plantedPlotNodeId`); if (item.paidOffPlotNodeId !== undefined) checkPlot(item.paidOffPlotNodeId, `foreshadowings[${index}].paidOffPlotNodeId`); item.advancedPlotNodeIds.forEach((id, nodeIndex) => checkPlot(id, `foreshadowings[${index}].advancedPlotNodeIds[${nodeIndex}]`)); if (item.credibility === 'explicit' && !item.evidence.some((evidence) => evidence.quote.trim().length > 0)) issues.push({ path: `foreshadowings[${index}].evidence`, message: '“原文明确”伏笔缺少原文证据' }); });
+  snapshot.foreshadowings.forEach((item, index) => { checkPlot(item.plantedPlotNodeId, `foreshadowings[${index}].plantedPlotNodeId`); if (item.paidOffPlotNodeId !== undefined) checkPlot(item.paidOffPlotNodeId, `foreshadowings[${index}].paidOffPlotNodeId`); item.advancedPlotNodeIds.forEach((id, nodeIndex) => checkPlot(id, `foreshadowings[${index}].advancedPlotNodeIds[${nodeIndex}]`)); if (item.credibility === 'explicit' && !item.evidence.some((evidence) => evidence.quote.trim().length > 0)) issues.push({ path: `foreshadowings[${index}].evidence`, message: '“原文明确”伏笔缺少原文证据' }); item.evidence.forEach((evidence, evidenceIndex) => checkEvidence(evidence, `foreshadowings[${index}].evidence[${evidenceIndex}]`)); });
   return issues;
 }
 

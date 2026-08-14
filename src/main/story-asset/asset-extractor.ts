@@ -25,6 +25,7 @@ import {
   Evidence,
   CredibilityLevel,
 } from '../../core/story-asset/index.js';
+import { buildOutlineSourceQuotes } from './asset-lifecycle-service.js';
 
 const EXTRACTOR_AGENT_ID = 'architect';
 const EXTRACTOR_TIER: CapabilityTier = 'cheap-fast';
@@ -313,7 +314,8 @@ export class AssetExtractor {
           sourceOutlineVersion: outline.version,
         };
         const plotIds = new Set(outline.nodes.filter((item) => item.kind === 'plot-beat').map((item) => item.id));
-        const issues = validateStoryAssetSnapshot(snapshot, plotIds);
+        const sourceQuotes = buildOutlineSourceQuotes(outline);
+        const issues = validateStoryAssetSnapshot(snapshot, plotIds, sourceQuotes);
         if (issues.length > 0) throw new Error(`故事资产引用或证据不完整：${issues.slice(0, 3).map((issue) => `${issue.path} ${issue.message}`).join('；')}`);
         return snapshot;
       } catch (err) {

@@ -1,7 +1,7 @@
 /**
  * 故事资产生命周期验收 smoke — 提炼 → 修正 → 确认 → 发布 → 重启读取
  *
- * 验证完整闭环：
+ * 验证完整闭环（通过 AssetLifecycleService 调用产品代码路径）：
  * 1. 提炼（用 mock LLM 返回合法 JSON）→ 产出 draft 快照
  * 2. 修正（作者编辑资产值）→ 新版本 draft
  * 3. 确认（draft → confirmed）→ 新版本 draft
@@ -10,6 +10,7 @@
  * 6. 提炼时证据回填：mock LLM 返回的 explicit 结论自动从 outline sources 回填证据
  * 7. 提炼时引用校验：mock LLM 返回不存在的 plotNode 会被校验拒绝
  * 8. 提炼时 explicit 无证据自动降级为 pending-confirmation
+ * 9. quote↔source 匹配验证：证据引用片段必须来自旧稿大纲来源
  */
 
 import assert from 'node:assert/strict';
@@ -23,6 +24,13 @@ import {
   loadFormalStoryAssetSnapshot,
   nextStoryAssetVersion,
 } from './asset-store.js';
+import {
+  confirmAssetPersisted,
+  editAssetPersisted,
+  publishAssetPersisted,
+  buildOutlineSourceQuotes,
+  type AssetKind,
+} from './asset-lifecycle-service.js';
 import {
   validateStoryAssetSnapshot,
   formalAssets,
@@ -116,7 +124,7 @@ function makeMockLLMResponse(): string {
 
 /* ── 测试 1：提炼 → 产出 draft 快照 + 证据回填 ──────────── */
 
-async function testExtractProducesDraftWithEvidence(): Promise<{ snapshot: StoryAssetSnapshot; dir: string }> {
+async function testExtractProducesDraftWithEvidence(): Promise<{ snapshot: StoryAssetSnapshot; dir: string; outline: LegacyOutline }> {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'na-lifecycle-'));
   const outline = makeTestOutline();
   const resolver = new MockModelResolver(makeMockLLMResponse());
@@ -151,7 +159,7 @@ async function testExtractProducesDraftWithEvidence(): Promise<{ snapshot: Story
   // 保存
   await saveStoryAssetSnapshot(dir, snapshot, 'draft');
 
-  return { snapshot, dir };
+  return { snapshot, dir, outline };
 }
 
 /* ── 测试 2：提炼时引用校验拒绝不存在的 plotNode ──────────── */
@@ -228,29 +236,25 @@ async function testExplicitWithoutEvidenceDegradesToPending(): Promise<void> {
   assert.equal(char.identity.credibility, 'pending-confirmation', '人物 explicit 无证据应降级');
 }
 
-/* ── 测试 4：修正 → 新版本 draft ──────────────────────────── */
+/* ── 测试 4：修正 → 新版本 draft（通过 AssetLifecycleService） ── */
 
 async function testEditProducesNewVersion(dir: string): Promise<StoryAssetSnapshot> {
   const loaded = await loadStoryAssetSnapshot(dir);
   assert.notEqual(loaded, undefined);
 
-  // 修改情节线目标
-  const edited: StoryAssetSnapshot = {
-    ...loaded!,
-    updatedAt: new Date().toISOString(),
-    plotThreads: loaded!.plotThreads.map((t) =>
-      t.id === 'pt-1'
-        ? { ...t, goal: { ...t.goal, value: '修正后的目标：破译密信并传递情报', authorNote: '作者修正' } }
-        : t,
-    ),
-  };
-  const version = await nextStoryAssetVersion(dir);
-  const versioned = { ...edited, id: `snapshot-${Date.now()}`, version };
-  await saveStoryAssetSnapshot(dir, versioned, 'draft', loaded!.version);
+  // 通过领域服务修正情节线目标
+  const versioned = await editAssetPersisted(
+    dir,
+    'plotThread' as AssetKind,
+    'pt-1',
+    '修正后的目标：破译密信并传递情报',
+    '作者修正',
+    loaded!.version,
+  );
 
   // 验证
   const reloaded = await loadStoryAssetSnapshot(dir);
-  assert.equal(reloaded!.version, version, '修正后版本递增');
+  assert.equal(reloaded!.version, versioned.version, '修正后版本递增');
   assert.equal(reloaded!.plotThreads[0]!.goal.value, '修正后的目标：破译密信并传递情报');
   assert.ok(reloaded!.plotThreads[0]!.goal.authorNote?.includes('作者修正'));
   assert.ok(reloaded!.plotThreads.every((t) => t.status === 'draft'), '修正后仍为 draft');
@@ -258,23 +262,21 @@ async function testEditProducesNewVersion(dir: string): Promise<StoryAssetSnapsh
   return reloaded!;
 }
 
-/* ── 测试 5：确认 → draft → confirmed ─────────────────────── */
+/* ── 测试 5：确认 → draft → confirmed（通过 AssetLifecycleService） ── */
 
 async function testConfirmTransitionsToConfirmed(dir: string): Promise<StoryAssetSnapshot> {
-  const loaded = await loadStoryAssetSnapshot(dir);
-  const now = new Date().toISOString();
-
-  // 确认所有情节线
-  const confirmed: StoryAssetSnapshot = {
-    ...loaded!,
-    updatedAt: now,
-    plotThreads: loaded!.plotThreads.map((t) => t.status === 'draft' ? { ...t, status: 'confirmed' as const } : t),
-    characters: loaded!.characters.map((c) => c.status === 'draft' ? { ...c, status: 'confirmed' as const } : c),
-    foreshadowings: loaded!.foreshadowings.map((f) => f.status === 'draft' ? { ...f, status: 'confirmed' as const } : f),
-  };
-  const version = await nextStoryAssetVersion(dir);
-  const versioned = { ...confirmed, id: `snapshot-${Date.now()}`, version };
-  await saveStoryAssetSnapshot(dir, versioned, 'draft', loaded!.version);
+  // 通过领域服务逐项确认
+  let current = await loadStoryAssetSnapshot(dir);
+  assert.notEqual(current, undefined, '确认前应存在快照');
+  for (const thread of current!.plotThreads) {
+    current = await confirmAssetPersisted(dir, 'plotThread' as AssetKind, thread.id, current!.version);
+  }
+  for (const char of current!.characters) {
+    current = await confirmAssetPersisted(dir, 'character' as AssetKind, char.id, current!.version);
+  }
+  for (const fs_ of current!.foreshadowings) {
+    current = await confirmAssetPersisted(dir, 'foreshadowing' as AssetKind, fs_.id, current!.version);
+  }
 
   const reloaded = await loadStoryAssetSnapshot(dir);
   assert.ok(reloaded!.plotThreads.every((t) => t.status === 'confirmed'), '确认后情节线应为 confirmed');
@@ -284,29 +286,15 @@ async function testConfirmTransitionsToConfirmed(dir: string): Promise<StoryAsse
   return reloaded!;
 }
 
-/* ── 测试 6：发布 → confirmed → formal ─────────────────────── */
+/* ── 测试 6：发布 → confirmed → formal（通过 AssetLifecycleService） ── */
 
-async function testPublishTransitionsToFormal(dir: string): Promise<StoryAssetSnapshot> {
+async function testPublishTransitionsToFormal(dir: string, outline: LegacyOutline): Promise<StoryAssetSnapshot> {
   const loaded = await loadStoryAssetSnapshot(dir);
 
-  // 发布门槛：校验通过 + 全部 confirmed
-  const plotIds = new Set(makeTestOutline().nodes.filter((n) => n.kind === 'plot-beat').map((n) => n.id));
-  const issues = validateStoryAssetSnapshot(loaded!, plotIds);
-  assert.equal(issues.length, 0, `发布前校验应通过，但发现：${issues.map((i) => i.message).join('; ')}`);
+  // 通过领域服务发布（内部做校验 + 全 confirmed 检查 + 转 formal）
+  const formal = await publishAssetPersisted(dir, outline, loaded!.version);
 
-  // 全部转 formal
-  const formal: StoryAssetSnapshot = {
-    ...loaded!,
-    updatedAt: new Date().toISOString(),
-    plotThreads: loaded!.plotThreads.map((t) => ({ ...t, status: 'formal' as const })),
-    characters: loaded!.characters.map((c) => ({ ...c, status: 'formal' as const })),
-    foreshadowings: loaded!.foreshadowings.map((f) => ({ ...f, status: 'formal' as const })),
-  };
-  const version = await nextStoryAssetVersion(dir);
-  const versioned = { ...formal, id: `snapshot-formal-${Date.now()}`, version };
-  await saveStoryAssetSnapshot(dir, versioned, 'formal', loaded!.version);
-
-  return versioned;
+  return formal;
 }
 
 /* ── 测试 7：重启后读取 formal ─────────────────────────────── */
@@ -356,15 +344,13 @@ async function testPublishGateRejectsUnconfirmed(): Promise<void> {
   const snapshot = await new AssetExtractor(resolver).extract(outline, 1);
   await saveStoryAssetSnapshot(dir, snapshot, 'draft');
 
-  // 尝试发布 draft（未确认）→ 应失败
+  // 尝试通过领域服务发布 draft（未确认）→ 应抛出错误
   const loaded = await loadStoryAssetSnapshot(dir);
-  const allItems = [...loaded!.plotThreads, ...loaded!.characters, ...loaded!.foreshadowings];
-  const hasDraft = allItems.some((item) => 'status' in item && item.status === 'draft');
-  assert.ok(hasDraft, '提炼后应有 draft 资产');
-
-  // 模拟发布检查
-  const canPublish = allItems.every((item) => 'status' in item && (item.status === 'confirmed' || item.status === 'formal'));
-  assert.equal(canPublish, false, '有 draft 资产时不应能发布');
+  await assert.rejects(
+    publishAssetPersisted(dir, outline, loaded!.version),
+    /未确认/,
+    '有 draft 资产时不应能发布',
+  );
 }
 
 /* ── 测试 10：prompt 包含原文证据线索 ──────────────────────── */
@@ -389,15 +375,48 @@ function testPromptContainsEvidence(): void {
   assert.ok(prompt.includes('characterIds'), 'prompt 应说明 characterIds');
 }
 
+/* ── 测试 11：quote↔source 匹配验证 ─────────────────────────── */
+
+async function testQuoteSourceMatching(): Promise<void> {
+  const outline = makeTestOutline();
+  const sourceQuotes = buildOutlineSourceQuotes(outline);
+
+  // outline sources 中的 quote 应被收录
+  assert.ok(sourceQuotes.has('plot-1'), 'plot-1 应有 source quotes');
+  assert.ok(sourceQuotes.has('plot-2'), 'plot-2 应有 source quotes');
+
+  // 正常提炼的快照应通过 quote 匹配验证
+  const resolver = new MockModelResolver(makeMockLLMResponse());
+  const snapshot = await new AssetExtractor(resolver).extract(outline, 1);
+  const plotIds = new Set(outline.nodes.filter((n) => n.kind === 'plot-beat').map((n) => n.id));
+  const issues = validateStoryAssetSnapshot(snapshot, plotIds, sourceQuotes);
+  assert.equal(issues.length, 0, `正常提炼的快照应通过 quote 匹配验证，但发现：${issues.map((i) => i.message).join('; ')}`);
+
+  // 构造一个 quote 不匹配的快照
+  const badSnapshot: StoryAssetSnapshot = {
+    ...snapshot,
+    plotThreads: snapshot.plotThreads.map((t) => ({
+      ...t,
+      goal: {
+        ...t.goal,
+        evidence: [{ plotNodeId: 'plot-1', quote: '这是一段不存在的伪造引用' }],
+      },
+    })),
+  };
+  const badIssues = validateStoryAssetSnapshot(badSnapshot, plotIds, sourceQuotes);
+  assert.ok(badIssues.length > 0, '伪造的 quote 应被检测出不匹配');
+  assert.ok(badIssues.some((i) => i.message.includes('不匹配') || i.message.includes('无原文来源')), '应报告 quote 不匹配');
+}
+
 /* ── 主入口 ─────────────────────────────────────────────────── */
 
 async function main(): Promise<void> {
   console.log('═'.repeat(60));
-  console.log('故事资产生命周期闭环验收');
+  console.log('故事资产生命周期闭环验收（通过 AssetLifecycleService）');
   console.log('═'.repeat(60));
 
   console.log('\n━ testExtractProducesDraftWithEvidence');
-  const { dir } = await testExtractProducesDraftWithEvidence();
+  const { dir, outline } = await testExtractProducesDraftWithEvidence();
   console.log('✅ 提炼产出 draft 快照，证据从 outline sources 回填');
 
   console.log('\n━ testExtractRejectsInvalidReferences');
@@ -410,15 +429,15 @@ async function main(): Promise<void> {
 
   console.log('\n━ testEditProducesNewVersion');
   await testEditProducesNewVersion(dir);
-  console.log('✅ 修正产出新版本 draft，版本递增');
+  console.log('✅ 修正产出新版本 draft（通过 AssetLifecycleService.editAssetPersisted）');
 
   console.log('\n━ testConfirmTransitionsToConfirmed');
   await testConfirmTransitionsToConfirmed(dir);
-  console.log('✅ 确认 draft → confirmed，版本递增');
+  console.log('✅ 确认 draft → confirmed（通过 AssetLifecycleService.confirmAssetPersisted）');
 
   console.log('\n━ testPublishTransitionsToFormal');
-  await testPublishTransitionsToFormal(dir);
-  console.log('✅ 发布 confirmed → formal，校验通过');
+  await testPublishTransitionsToFormal(dir, outline);
+  console.log('✅ 发布 confirmed → formal（通过 AssetLifecycleService.publishAssetPersisted）');
 
   console.log('\n━ testRestartReadsFormal');
   await testRestartReadsFormal(dir);
@@ -436,9 +455,14 @@ async function main(): Promise<void> {
   testPromptContainsEvidence();
   console.log('✅ prompt 包含原文证据线索和 ID 约束');
 
+  console.log('\n━ testQuoteSourceMatching');
+  await testQuoteSourceMatching();
+  console.log('✅ quote↔source 匹配验证：正常提炼通过，伪造 quote 被检测');
+
   console.log('\n' + '═'.repeat(60));
   console.log('全部生命周期闭环验收通过');
-  console.log('提炼 → 修正 → 确认 → 发布 → 重启读取 → draft 不污染 formal');
+  console.log('提炼 → 修正 → 确认 → 发布 → 重启读取 → draft 不污染 formal → quote 匹配');
+  console.log('所有生命周期操作通过 AssetLifecycleService 调用产品代码路径');
   console.log('═'.repeat(60));
 }
 
