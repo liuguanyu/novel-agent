@@ -74,6 +74,7 @@ interface LegacyOutlinePanelProps {
   onSaveAdvisorConversation(plotNodeId: string, turns: ReadonlyArray<{ question: string; advice: string; options: ReadonlyArray<string>; askedAt: string }>): void;
   onClearAdvisorConversation(plotNodeId: string): void;
   onDiagnoseBook(): void;
+  onCancelRunningTask(): void;
   onSelectChapter(nodeId: string): Promise<void>;
   onRefresh(): Promise<void>;
 }
@@ -230,6 +231,7 @@ export function LegacyOutlinePanel({
   onSaveAdvisorConversation,
   onClearAdvisorConversation,
   onDiagnoseBook,
+  onCancelRunningTask,
   onSelectChapter,
   onRefresh,
 }: LegacyOutlinePanelProps): JSX.Element {
@@ -515,11 +517,19 @@ export function LegacyOutlinePanel({
         </div>
       </header>
 
-      {progress?.status === 'analyzing' && progress.totalChapters !== 1 && (
-        <div className="shrink-0 border-b border-violet-500/20 bg-violet-500/5 px-3 py-2 text-xs text-violet-700">
-          正在识别 {progress.currentChapterTitle ?? '全书情节'}
-          {progress.totalChapters !== undefined ? ` · 已完成章节 ${progress.chaptersRead ?? 0}/${progress.totalChapters}` : ''}
-          {progress.totalSegments !== undefined && progress.totalSegments > 1 ? ` · 本章分段 ${progress.currentSegment ?? 0}/${progress.totalSegments}` : ''}
+      {(progress?.status === 'reading' || progress?.status === 'structuring' || progress?.status === 'analyzing') && (
+        <div className="flex shrink-0 items-center justify-between border-b border-violet-500/20 bg-violet-500/5 px-3 py-2 text-xs text-violet-700">
+          <span>
+            {progress.status === 'reading' ? '正在读取章节' : progress.status === 'structuring' ? '正在还原章节结构' : `正在识别 ${progress.currentChapterTitle ?? '全书情节'}`}
+            {progress.totalChapters !== undefined && progress.status === 'analyzing' ? ` · 已完成章节 ${progress.chaptersRead ?? 0}/${progress.totalChapters}` : ''}
+            {progress.totalSegments !== undefined && progress.totalSegments > 1 ? ` · 本章分段 ${progress.currentSegment ?? 0}/${progress.totalSegments}` : ''}
+          </span>
+          <Button variant="ghost" size="sm" className="h-6 px-2 text-[11px] text-violet-700 hover:text-destructive" onClick={onCancelRunningTask}>取消</Button>
+        </div>
+      )}
+      {progress?.status === 'failed' && progress.error !== undefined && (
+        <div className="shrink-0 border-b border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive">
+          识别失败：{progress.error}。可重试。
         </div>
       )}
       {progress?.status === 'completed' && (progress.failedChapters?.length ?? 0) > 0 && (
@@ -904,14 +914,14 @@ export function LegacyOutlinePanel({
                         <div className="flex items-center justify-between gap-2">
                           <p className="text-xs font-medium">本章情节候选</p>
                           <Button
-                            variant="outline"
+                            variant={selectedNodeChildren.length === 0 ? 'default' : 'outline'}
                             size="sm"
                             className="h-7 text-xs"
                             disabled={isRecognizingPlots}
                             onClick={() => onRecognizeChapterPlots(selectedNode.id)}
                           >
                             {isRecognizingPlots && <Loader2 className="size-3 animate-spin" />}
-                            {isRecognizingPlots ? '正在识别…' : '重新识别'}
+                            {isRecognizingPlots ? '正在识别…' : selectedNodeChildren.length === 0 ? '识别本章情节' : '重新识别'}
                           </Button>
                         </div>
                         <p className="text-[11px] leading-relaxed text-muted-foreground">
@@ -921,18 +931,6 @@ export function LegacyOutlinePanel({
                           <p className="rounded border border-destructive/30 bg-destructive/5 px-2 py-1.5 text-[11px] text-destructive">
                             识别失败：{recognitionError}
                           </p>
-                        )}
-                        {selectedNodeChildren.length === 0 && (
-                          <Button
-                            variant="default"
-                            size="sm"
-                            className="w-full text-xs"
-                            disabled={isRecognizingPlots}
-                            onClick={() => onRecognizeChapterPlots(selectedNode.id)}
-                          >
-                            {isRecognizingPlots && <Loader2 className="size-3 animate-spin" />}
-                            {isRecognizingPlots ? '正在识别本章情节…' : '识别本章情节'}
-                          </Button>
                         )}
                         <div className="mb-2 flex items-center justify-between rounded border border-dashed border-border px-2 py-1.5 text-[11px] text-muted-foreground">
                           <span>可跨章节选择多个情节，记录关联或冲突；不会自动合并。</span>

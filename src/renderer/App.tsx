@@ -809,6 +809,7 @@ export function App(): JSX.Element {
                 onSaveAdvisorConversation={legacyOrganization.saveAdvisorConversation}
                 onClearAdvisorConversation={legacyOrganization.clearAdvisorConversation}
                 onDiagnoseBook={legacyOrganization.diagnoseBook}
+                onCancelRunningTask={legacyOrganization.cancelRunningTask}
                 onSelectChapter={selectChapter}
                 onRefresh={legacyOrganization.refresh}
               />

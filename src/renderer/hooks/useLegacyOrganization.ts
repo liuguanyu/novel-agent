@@ -64,6 +64,8 @@ export interface UseLegacyOrganizationResult {
   clearAdvisorConversation(plotNodeId: string): void;
   /** 发起全书诊断 */
   diagnoseBook(): void;
+  /** 取消当前正在运行的长任务（情节识别/大纲生成/诊断） */
+  cancelRunningTask(): void;
   /** 重新加载大纲和清单 */
   refresh(): Promise<void>;
 }
@@ -78,6 +80,7 @@ function nextRunId(): string {
 export function useLegacyOrganization(projectId: string | undefined): UseLegacyOrganizationResult {
   const [outline, setOutline] = useState<LegacyOutlineDto | undefined>(undefined);
   const [manifest, setManifest] = useState<PreservationManifestDto | undefined>(undefined);
+  const activeRunIdRef = useRef<string | undefined>(undefined);
   const [progress, setProgress] = useState<OutlineGenerationProgressDto | undefined>(undefined);
   const [loading, setLoading] = useState<boolean>(false);
   const [error, setError] = useState<string | undefined>(undefined);
@@ -127,6 +130,7 @@ export function useLegacyOrganization(projectId: string | undefined): UseLegacyO
   const generateOutline = useCallback(() => {
     if (projectId === undefined) return;
     const runId = nextRunId();
+    activeRunIdRef.current = runId;
     window.novelAgent.sendCommand({
       type: 'generate-legacy-outline',
       runId,
@@ -141,7 +145,9 @@ export function useLegacyOrganization(projectId: string | undefined): UseLegacyO
   const recognizeChapterPlots = useCallback(
     (chapterNodeId: string) => {
       if (projectId === undefined) return;
-      window.novelAgent.sendCommand({ type: 'recognize-chapter-plots', runId: nextRunId(), projectId, chapterNodeId });
+      const runId = nextRunId();
+      activeRunIdRef.current = runId;
+      window.novelAgent.sendCommand({ type: 'recognize-chapter-plots', runId, projectId, chapterNodeId });
       setProgress({ status: 'analyzing', chaptersRead: 0, totalChapters: 1, error: undefined });
       setTimeout(() => void refresh(), 300);
     },
@@ -150,7 +156,9 @@ export function useLegacyOrganization(projectId: string | undefined): UseLegacyO
 
   const recognizeBookPlots = useCallback(() => {
     if (projectId === undefined) return;
-    window.novelAgent.sendCommand({ type: 'recognize-book-plots', runId: nextRunId(), projectId });
+    const runId = nextRunId();
+    activeRunIdRef.current = runId;
+    window.novelAgent.sendCommand({ type: 'recognize-book-plots', runId, projectId });
     setProgress({ status: 'analyzing', chaptersRead: 0, totalChapters: undefined, error: undefined });
     setTimeout(() => void refresh(), 300);
   }, [projectId, refresh]);
@@ -355,12 +363,21 @@ export function useLegacyOrganization(projectId: string | undefined): UseLegacyO
 
   const diagnoseBook = useCallback(() => {
     if (projectId === undefined) return;
+    const runId = nextRunId();
+    activeRunIdRef.current = runId;
     window.novelAgent.sendCommand({
       type: 'diagnose-legacy-book',
-      runId: nextRunId(),
+      runId,
       projectId,
     });
   }, [projectId]);
+
+  const cancelRunningTask = useCallback(() => {
+    const runId = activeRunIdRef.current;
+    if (runId === undefined) return;
+    window.novelAgent.sendCommand({ type: 'abort-run', runId });
+    activeRunIdRef.current = undefined;
+  }, []);
 
   return {
     outline,
@@ -386,6 +403,7 @@ export function useLegacyOrganization(projectId: string | undefined): UseLegacyO
     saveAdvisorConversation,
     clearAdvisorConversation,
     diagnoseBook,
+    cancelRunningTask,
     refresh,
   };
 }
