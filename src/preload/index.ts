@@ -28,6 +28,7 @@ import {
   type LegacyOutlineDto,
   type PreservationManifestDto,
   type OutlineGenerationProgressDto,
+  type StoryAssetSnapshotDto,
   type NovelAgentBridge,
   type Unsubscribe,
   WORKFLOW_QUERY_CHANNELS,
@@ -79,6 +80,10 @@ const api: NovelAgentBridge = {
   /** 取大纲生成进度。 */
   getOutlineGenerationProgress(projectId: string): Promise<OutlineGenerationProgressDto> {
     return ipcRenderer.invoke(QUERY_CHANNELS.getOutlineGenerationProgress, projectId) as Promise<OutlineGenerationProgressDto>;
+  },
+  /** 取故事资产快照。 */
+  getStoryAssetSnapshot(projectId: string): Promise<StoryAssetSnapshotDto | undefined> {
+    return ipcRenderer.invoke(QUERY_CHANNELS.getStoryAssetSnapshot, projectId) as Promise<StoryAssetSnapshotDto | undefined>;
   },
   /** 发送前端命令（召唤/中断等），经 control-event 通道上行。 */
   sendCommand(command: FrontendCommandMessage): void {

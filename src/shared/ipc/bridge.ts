@@ -24,6 +24,7 @@ import type {
   LegacyOutlineDto,
   PreservationManifestDto,
   OutlineGenerationProgressDto,
+  StoryAssetSnapshotDto,
 } from './query-messages.js';
 import type { WorkflowSnapshotResponse, GetWorkflowSnapshotRequest, WorkflowCommand, WorkflowAssetQuery, WorkflowAssetResponse, WorkflowIssuesQuery, WorkflowIssuesResponse } from './workflow-messages.js';
 
@@ -69,4 +70,6 @@ export interface NovelAgentBridge {
   getPreservationManifest(projectId: string): Promise<PreservationManifestDto | undefined>;
   /** 取大纲生成进度。 */
   getOutlineGenerationProgress(projectId: string): Promise<OutlineGenerationProgressDto>;
+  /** 取故事资产快照。 */
+  getStoryAssetSnapshot(projectId: string): Promise<StoryAssetSnapshotDto | undefined>;
 }

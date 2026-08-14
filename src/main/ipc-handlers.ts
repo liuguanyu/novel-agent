@@ -55,8 +55,114 @@ import * as legacyOrgService from './legacy-organization/outline-service.js';
 import * as legacyOrgStore from './legacy-organization/store.js';
 import { PlotAdvisor } from './legacy-organization/plot-advisor.js';
 import { BookDiagnoser } from './legacy-organization/book-diagnoser.js';
+import { AssetExtractor } from './story-asset/asset-extractor.js';
+import * as storyAssetStore from './story-asset/asset-store.js';
+import type { StoryAssetSnapshot } from '../core/story-asset/index.js';
+import type { StoryAssetSnapshotDto, PlotThreadDto, CharacterProfileDto, CharacterRelationDto, CharacterArcDto, ForeshadowingDto, CredibleClaimDto } from '../shared/ipc/index.js';
 
 const idSchema = z.string().trim().min(1).max(256);
+
+/* ── 故事资产确认 (draft → confirmed) ──────────────────────── */
+
+function confirmAsset(snapshot: StoryAssetSnapshot, kind: 'plotThread' | 'character' | 'relation' | 'arc' | 'foreshadowing', assetId: string): StoryAssetSnapshot {
+  const now = new Date().toISOString();
+  const confirmItem = <T extends { readonly id: string; readonly status: string }>(items: ReadonlyArray<T>): ReadonlyArray<T> =>
+    items.map((item) => item.id === assetId && item.status === 'draft' ? { ...item, status: 'confirmed' as const } : item);
+  return {
+    ...snapshot,
+    updatedAt: now,
+    plotThreads: kind === 'plotThread' ? confirmItem(snapshot.plotThreads) : snapshot.plotThreads,
+    characters: kind === 'character' ? confirmItem(snapshot.characters) : snapshot.characters,
+    relations: kind === 'relation' ? confirmItem(snapshot.relations) : snapshot.relations,
+    arcs: kind === 'arc' ? confirmItem(snapshot.arcs) : snapshot.arcs,
+    foreshadowings: snapshot.foreshadowings,
+  };
+}
+
+/* ── 故事资产快照投影 (core → DTO) ──────────────────────────── */
+
+function projectClaim(claim: { readonly value: string; readonly credibility: string; readonly evidence: ReadonlyArray<{ readonly plotNodeId?: string; readonly chapterTitle?: string; readonly quote: string }>; readonly authorNote?: string }): CredibleClaimDto {
+  return {
+    value: claim.value,
+    credibility: claim.credibility as CredibleClaimDto['credibility'],
+    evidence: claim.evidence,
+    ...(claim.authorNote === undefined ? {} : { authorNote: claim.authorNote }),
+  };
+}
+
+function projectSnapshot(snapshot: StoryAssetSnapshot): StoryAssetSnapshotDto {
+  const plotThreads: ReadonlyArray<PlotThreadDto> = snapshot.plotThreads.map((t) => ({
+    id: t.id,
+    name: t.name,
+    kind: t.kind,
+    goal: projectClaim(t.goal),
+    plotNodeIds: t.plotNodeIds,
+    characterIds: t.characterIds,
+    stages: t.stages,
+    keyEvents: t.keyEvents,
+    ...(t.timeAnchor === undefined ? {} : { timeAnchor: projectClaim(t.timeAnchor) }),
+    status: t.status,
+  }));
+  const characters: ReadonlyArray<CharacterProfileDto> = snapshot.characters.map((c) => ({
+    id: c.id,
+    name: c.name,
+    aliases: c.aliases,
+    identity: projectClaim(c.identity),
+    appearance: projectClaim(c.appearance),
+    abilities: projectClaim(c.abilities),
+    personality: projectClaim(c.personality),
+    languageStyle: projectClaim(c.languageStyle),
+    desire: projectClaim(c.desire),
+    goal: projectClaim(c.goal),
+    fear: projectClaim(c.fear),
+    weakness: projectClaim(c.weakness),
+    currentStatus: projectClaim(c.currentStatus),
+    plotThreadIds: c.plotThreadIds,
+    ...(c.narrativeFunction === undefined ? {} : { narrativeFunction: projectClaim(c.narrativeFunction) }),
+    status: c.status,
+  }));
+  const relations: ReadonlyArray<CharacterRelationDto> = snapshot.relations.map((r) => ({
+    id: r.id,
+    fromCharacterId: r.fromCharacterId,
+    toCharacterId: r.toCharacterId,
+    kind: r.kind,
+    description: projectClaim(r.description),
+    changes: r.changes,
+    status: r.status,
+  }));
+  const arcs: ReadonlyArray<CharacterArcDto> = snapshot.arcs.map((a) => ({
+    id: a.id,
+    characterId: a.characterId,
+    description: a.description,
+    turningPoints: a.turningPoints,
+    ...(a.startState === undefined ? {} : { startState: a.startState }),
+    ...(a.endState === undefined ? {} : { endState: a.endState }),
+    status: a.status,
+  }));
+  const foreshadowings: ReadonlyArray<ForeshadowingDto> = snapshot.foreshadowings.map((f) => ({
+    id: f.id,
+    description: f.description,
+    state: f.state,
+    plantedPlotNodeId: f.plantedPlotNodeId,
+    ...(f.paidOffPlotNodeId === undefined ? {} : { paidOffPlotNodeId: f.paidOffPlotNodeId }),
+    advancedPlotNodeIds: f.advancedPlotNodeIds,
+    credibility: f.credibility,
+    evidence: f.evidence,
+  }));
+  return {
+    id: snapshot.id,
+    projectId: snapshot.projectId,
+    version: snapshot.version,
+    createdAt: snapshot.createdAt,
+    updatedAt: snapshot.updatedAt,
+    plotThreads,
+    characters,
+    relations,
+    arcs,
+    foreshadowings,
+    sourceOutlineVersion: snapshot.sourceOutlineVersion,
+  };
+}
 const workflowRefSchema = z.object({ workflowId: idSchema, stageId: idSchema, issueId: idSchema.optional() }).strict();
 const metaShape = { requestId: idSchema.optional(), operationId: idSchema.optional(), expectedVersion: z.number().int().nonnegative().optional(), workflowRef: workflowRefSchema.optional() };
 const workflowSnapshotQuerySchema = z.object({ ...metaShape, workflowId: idSchema.optional(), projectId: idSchema }).strict();
@@ -317,6 +423,17 @@ export function registerIpcHandlers(
       const projectId = typeof raw === 'string' ? raw : '';
       if (projectId.length === 0) return { status: 'idle', chaptersRead: undefined, totalChapters: undefined, error: undefined };
       return legacyOrgStore.loadProgress(DEFAULT_NOVEL_DIR);
+    },
+  );
+
+  ipcMain.handle(
+    QUERY_CHANNELS.getStoryAssetSnapshot,
+    async (_event: IpcMainInvokeEvent, raw: unknown): Promise<StoryAssetSnapshotDto | undefined> => {
+      const projectId = typeof raw === 'string' ? raw : '';
+      if (projectId.length === 0) return undefined;
+      const snapshot = await storyAssetStore.loadStoryAssetSnapshot(DEFAULT_NOVEL_DIR);
+      if (snapshot === undefined) return undefined;
+      return projectSnapshot(snapshot);
     },
   );
 
@@ -645,6 +762,62 @@ export function registerIpcHandlers(
         } catch (error: unknown) {
           wc.send(IPC_CHANNELS.controlEvent, {
             type: 'legacy-book-diagnosis-failed',
+            runId: message.runId,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+        return;
+      }
+      case 'extract-story-assets': {
+        const resolver = getModelResolver?.();
+        if (resolver === undefined) {
+          wc.send(IPC_CHANNELS.controlEvent, {
+            type: 'story-asset-extraction-failed',
+            runId: message.runId,
+            error: '模型尚未配置，无法提炼故事资产',
+          });
+          return;
+        }
+        try {
+          const outline = await legacyOrgStore.loadOutline(DEFAULT_NOVEL_DIR);
+          if (outline === undefined) throw new Error('大纲尚未生成，请先生成大纲');
+          wc.send(IPC_CHANNELS.controlEvent, {
+            type: 'story-asset-extraction-started',
+            runId: message.runId,
+            projectId: message.projectId,
+          });
+          const snapshot = await new AssetExtractor(resolver).extract(outline);
+          await storyAssetStore.saveStoryAssetSnapshot(DEFAULT_NOVEL_DIR, snapshot);
+          wc.send(IPC_CHANNELS.controlEvent, {
+            type: 'story-asset-extraction-completed',
+            runId: message.runId,
+            projectId: message.projectId,
+            snapshot: projectSnapshot(snapshot),
+          });
+        } catch (error: unknown) {
+          wc.send(IPC_CHANNELS.controlEvent, {
+            type: 'story-asset-extraction-failed',
+            runId: message.runId,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+        return;
+      }
+      case 'confirm-story-asset': {
+        try {
+          const snapshot = await storyAssetStore.loadStoryAssetSnapshot(DEFAULT_NOVEL_DIR);
+          if (snapshot === undefined) throw new Error('故事资产快照不存在，请先提炼');
+          const updated = confirmAsset(snapshot, message.assetKind, message.assetId);
+          await storyAssetStore.saveStoryAssetSnapshot(DEFAULT_NOVEL_DIR, updated);
+          wc.send(IPC_CHANNELS.controlEvent, {
+            type: 'story-asset-confirmed',
+            runId: message.runId,
+            assetKind: message.assetKind,
+            assetId: message.assetId,
+          });
+        } catch (error: unknown) {
+          wc.send(IPC_CHANNELS.controlEvent, {
+            type: 'story-asset-confirmation-failed',
             runId: message.runId,
             error: error instanceof Error ? error.message : String(error),
           });

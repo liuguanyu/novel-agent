@@ -19,6 +19,7 @@ import { ExpertWorkbench } from './components/ExpertWorkbench.js';
 import { WorkflowGraph } from './components/WorkflowGraph.js';
 import { LegacyOutlinePanel } from './components/LegacyOutlinePanel.js';
 import { PreservationDrawer } from './components/PreservationDrawer.js';
+import { StoryAssetPanel } from './components/StoryAssetPanel.js';
 import { GoalDialog } from './components/GoalDialog.js';
 import { FactSheetDrawer } from './components/FactSheetDrawer.js';
 import { StatusFooter } from './components/StatusFooter.js';
@@ -34,6 +35,7 @@ import {
 } from './components/ui/resizable.js';
 import { useChapters } from './hooks/useChapters.js';
 import { useLegacyOrganization } from './hooks/useLegacyOrganization.js';
+import { useStoryAssets } from './hooks/useStoryAssets.js';
 import { useDialogue, type SummonRequest } from './hooks/useDialogue.js';
 import { useReviewFindings } from './hooks/useReviewFindings.js';
 import { useStoryBible } from './hooks/useStoryBible.js';
@@ -133,6 +135,7 @@ export function App(): JSX.Element {
   }, [latestFactModelTask?.chapterId, tree]);
   const dashboard = useDashboard();
   const legacyOrganization = useLegacyOrganization(workspaceProjectId);
+  const storyAssets = useStoryAssets(workspaceProjectId);
   // 当前项目身份来自 Main 的工作区 manifest；查询失败时保留 standalone 工作台。
   const workflowState = useWorkflowSnapshot(workspaceProjectId);
   const workflowRef = workflowState.snapshot?.currentStageId === null || workflowState.snapshot === null
@@ -823,6 +826,15 @@ export function App(): JSX.Element {
               }}
               onUnpreservePlot={legacyOrganization.unpreservePlot}
               onUnpreserveQuote={legacyOrganization.unpreserveQuote}
+            />
+            <StoryAssetPanel
+              snapshot={storyAssets.snapshot}
+              loading={storyAssets.loading}
+              extracting={storyAssets.extracting}
+              error={storyAssets.error}
+              onExtractAssets={storyAssets.extractAssets}
+              onConfirmAsset={storyAssets.confirmAsset}
+              onRefresh={storyAssets.refresh}
             />
           </>
         ) : (

@@ -357,6 +357,8 @@ export type FrontendCommandMessage =
   | RecognizeBookPlotsCommand
   | AskLegacyPlotAdvisorCommand
   | DiagnoseLegacyBookCommand
+  | ExtractStoryAssetsCommand
+  | ConfirmStoryAssetCommand
   | AddOutlinePlotCommand
   | UpdateOutlinePlotCommand
   | MoveOutlinePlotCommand
@@ -459,6 +461,22 @@ export interface DiagnoseLegacyBookCommand {
   type: 'diagnose-legacy-book';
   runId: RunId;
   projectId: string;
+}
+
+/** 提炼故事资产：从旧稿大纲中用 LLM 提炼情节线/人物/关系/成长弧/伏笔。 */
+export interface ExtractStoryAssetsCommand {
+  type: 'extract-story-assets';
+  runId: RunId;
+  projectId: string;
+}
+
+/** 确认故事资产条目（draft → confirmed）。 */
+export interface ConfirmStoryAssetCommand {
+  type: 'confirm-story-asset';
+  runId: RunId;
+  projectId: string;
+  assetKind: 'plotThread' | 'character' | 'relation' | 'arc' | 'foreshadowing';
+  assetId: string;
 }
 
 /** 新增一个人工情节候选。 */

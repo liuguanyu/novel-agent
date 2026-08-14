@@ -30,6 +30,8 @@ export const QUERY_CHANNELS = {
   getPreservationManifest: 'query:get-preservation-manifest',
   /** 取大纲生成进度。 */
   getOutlineGenerationProgress: 'query:get-outline-generation-progress',
+  /** 取故事资产快照。 */
+  getStoryAssetSnapshot: 'query:get-story-asset-snapshot',
 } as const;
 
 export type QueryChannel = (typeof QUERY_CHANNELS)[keyof typeof QUERY_CHANNELS];
@@ -325,4 +327,110 @@ export interface OutlineGenerationProgressDto {
   readonly currentSegment?: number;
   readonly totalSegments?: number;
   readonly failedChapters?: ReadonlyArray<{ chapterNodeId: string; title: string; error: string }>;
+}
+
+// ─── 故事资产 DTO（Roadmap M2） ──────────────────────────────────────────
+
+/** 可信度等级 DTO */
+export type CredibilityLevelDto = 'explicit' | 'inferred' | 'pending-confirmation' | 'pending-design';
+
+/** 资产状态 DTO */
+export type AssetStatusDto = 'draft' | 'confirmed' | 'formal';
+
+/** 带可信度的结论 DTO */
+export interface CredibleClaimDto {
+  readonly value: string;
+  readonly credibility: CredibilityLevelDto;
+  readonly evidence: ReadonlyArray<{ readonly plotNodeId?: string; readonly chapterTitle?: string; readonly quote: string }>;
+  readonly authorNote?: string;
+}
+
+/** 情节线阶段 DTO */
+export interface PlotThreadStageDto {
+  readonly kind: 'setup' | 'rising' | 'turn' | 'climax' | 'resolution';
+  readonly plotNodeIds: ReadonlyArray<string>;
+  readonly description: string;
+}
+
+/** 情节线 DTO */
+export interface PlotThreadDto {
+  readonly id: string;
+  readonly name: string;
+  readonly kind: 'main' | 'sub';
+  readonly goal: CredibleClaimDto;
+  readonly plotNodeIds: ReadonlyArray<string>;
+  readonly characterIds: ReadonlyArray<string>;
+  readonly stages: ReadonlyArray<PlotThreadStageDto>;
+  readonly keyEvents: ReadonlyArray<{ readonly plotNodeId: string; readonly description: string; readonly cause?: string; readonly effect?: string }>;
+  readonly timeAnchor?: CredibleClaimDto;
+  readonly status: AssetStatusDto;
+}
+
+/** 人物档案 DTO */
+export interface CharacterProfileDto {
+  readonly id: string;
+  readonly name: string;
+  readonly aliases: ReadonlyArray<string>;
+  readonly identity: CredibleClaimDto;
+  readonly appearance: CredibleClaimDto;
+  readonly abilities: CredibleClaimDto;
+  readonly personality: CredibleClaimDto;
+  readonly languageStyle: CredibleClaimDto;
+  readonly desire: CredibleClaimDto;
+  readonly goal: CredibleClaimDto;
+  readonly fear: CredibleClaimDto;
+  readonly weakness: CredibleClaimDto;
+  readonly currentStatus: CredibleClaimDto;
+  readonly plotThreadIds: ReadonlyArray<string>;
+  readonly narrativeFunction?: CredibleClaimDto;
+  readonly status: AssetStatusDto;
+}
+
+/** 人物关系 DTO */
+export interface CharacterRelationDto {
+  readonly id: string;
+  readonly fromCharacterId: string;
+  readonly toCharacterId: string;
+  readonly kind: 'ally' | 'enemy' | 'mentor' | 'lover' | 'family' | 'colleague' | 'rival' | 'other';
+  readonly description: CredibleClaimDto;
+  readonly changes: ReadonlyArray<{ readonly plotNodeId: string; readonly description: string }>;
+  readonly status: AssetStatusDto;
+}
+
+/** 人物成长弧 DTO */
+export interface CharacterArcDto {
+  readonly id: string;
+  readonly characterId: string;
+  readonly description: string;
+  readonly turningPoints: ReadonlyArray<{ readonly plotNodeId: string; readonly description: string }>;
+  readonly startState?: string;
+  readonly endState?: string;
+  readonly status: AssetStatusDto;
+}
+
+/** 伏笔 DTO */
+export interface ForeshadowingDto {
+  readonly id: string;
+  readonly description: string;
+  readonly state: 'planted' | 'advanced' | 'paid-off' | 'abandoned';
+  readonly plantedPlotNodeId: string;
+  readonly paidOffPlotNodeId?: string;
+  readonly advancedPlotNodeIds: ReadonlyArray<string>;
+  readonly credibility: CredibilityLevelDto;
+  readonly evidence: ReadonlyArray<{ readonly plotNodeId?: string; readonly chapterTitle?: string; readonly quote: string }>;
+}
+
+/** 故事资产快照 DTO */
+export interface StoryAssetSnapshotDto {
+  readonly id: string;
+  readonly projectId: string;
+  readonly version: number;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+  readonly plotThreads: ReadonlyArray<PlotThreadDto>;
+  readonly characters: ReadonlyArray<CharacterProfileDto>;
+  readonly relations: ReadonlyArray<CharacterRelationDto>;
+  readonly arcs: ReadonlyArray<CharacterArcDto>;
+  readonly foreshadowings: ReadonlyArray<ForeshadowingDto>;
+  readonly sourceOutlineVersion: number | undefined;
 }

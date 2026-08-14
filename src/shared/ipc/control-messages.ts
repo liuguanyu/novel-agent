@@ -542,11 +542,48 @@ export interface LegacyBookDiagnosisFailedEvent {
   error: string;
 }
 
+export interface StoryAssetExtractionStartedEvent {
+  type: 'story-asset-extraction-started';
+  runId: RunId;
+  projectId: string;
+}
+
+export interface StoryAssetExtractionCompletedEvent {
+  type: 'story-asset-extraction-completed';
+  runId: RunId;
+  projectId: string;
+  snapshot: import('./query-messages.js').StoryAssetSnapshotDto;
+}
+
+export interface StoryAssetExtractionFailedEvent {
+  type: 'story-asset-extraction-failed';
+  runId: RunId;
+  error: string;
+}
+
+export interface StoryAssetConfirmedEvent {
+  type: 'story-asset-confirmed';
+  runId: RunId;
+  assetKind: 'plotThread' | 'character' | 'relation' | 'arc' | 'foreshadowing';
+  assetId: string;
+}
+
+export interface StoryAssetConfirmationFailedEvent {
+  type: 'story-asset-confirmation-failed';
+  runId: RunId;
+  error: string;
+}
+
 export type BackendControlEvent =
   | LegacyPlotAdvisorCompletedEvent
   | LegacyPlotAdvisorFailedEvent
   | LegacyBookDiagnosisCompletedEvent
   | LegacyBookDiagnosisFailedEvent
+  | StoryAssetExtractionStartedEvent
+  | StoryAssetExtractionCompletedEvent
+  | StoryAssetExtractionFailedEvent
+  | StoryAssetConfirmedEvent
+  | StoryAssetConfirmationFailedEvent
   | WorkflowSnapshotEvent
   | WorkflowFailureEvent
   | AssetTargetSelectionRequiredEvent
